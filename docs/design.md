@@ -12,7 +12,7 @@ the node chosen at creation, either explicitly or through a configured default.
 There is no scheduler or automatic migration.
 
 The server serves the API and web UI, authenticates people through OIDC, and
-stores biot definitions, permissions, and hostname allocations in SQLite. The
+stores biot definitions, permissions, and publications in SQLite. The
 CLI and web UI expose the same operations through this API.
 
 Nodes build Nix environments, manage Podman containers and working data, and
@@ -38,6 +38,13 @@ specific peer and its role; network location alone is not authority. Nodes are
 trusted with the workloads and credentials assigned to them. Disabling a node
 removes its authority to participate in the system.
 
+Initially, the operator enrolls nodes and changes their status through server
+startup configuration, provisioning peer identities and credentials on both
+ends. The server retains durable registrations: removing a live entry disables it,
+and retirement remains irreversible and subject to the cleanup precondition.
+Node administration requires a server restart; there is no user-facing enrollment
+API. Structured server logs expose orphaned allocations for operator inspection.
+
 ## Implementation boundaries
 
 The server and node use Elixir/OTP. Processes own node connections, biot
@@ -59,10 +66,10 @@ the CLI; additional language boundaries require a concrete implementation need.
 
 ## State and lifecycle
 
-A biot has a stable ID, an owner, an assigned node, and a desired configuration.
-That configuration describes its environment inputs, credential grants, and
-whether it should be running, stopped, or destroyed. Published ports and access
-grants belong to the stable biot, not to a particular container instance.
+A biot has a stable ID, an owner, an assigned node, and desired execution. That
+execution selects environment inputs and whether the biot should be running,
+stopped, or destroyed. Credential grants, published ports, and access grants are
+separate policy attached to the stable biot, not to a container instance.
 
 The server records desired changes before asking the node to apply them. The
 node reports what is actually running and which configuration it has applied. An
@@ -70,25 +77,28 @@ accepted request and a completed operation are distinct: clients can see pending
 work, progress, and failures rather than infer completion from a successful API
 response.
 
-Changes carry a revision, and repeating an operation must be safe. Retrying a
-creation request returns the same biot; retrying destruction continues cleanup.
+Changes carry a revision, and repeating an operation must be safe. Creation uses
+a caller-generated UUIDv4, so retrying it returns the same biot; retrying
+destruction continues cleanup.
+
 The node serializes runtime changes to each biot and never lets a delayed build
 or reply supersede a later revision. Long builds do not delay access revocation.
 It reconciles recorded intent with actual resources after either program
 restarts or their connection is restored.
 
 The persistent data is the checkout and home directory. The runtime is
-replaceable. Restarts and rebuilds preserve that data, including dependencies
-installed with project package managers. Stopping preserves it too. Biots do not
-suspend, and persistence does not provide recovery from lost node storage.
-Provisioning initializes the checkout once; reconciliation does not reset user
-work to match the original repository revision.
+replaceable. Stop/start cycles and rebuilds preserve that data, including
+dependencies installed with project package managers. Stopping preserves it too.
+Biots do not suspend, and persistence does not provide recovery from lost node
+storage. Provisioning initializes the checkout once; reconciliation does not
+reset user work to match the original repository revision.
 
 Destroying a biot first removes its managed access, then removes its runtime and
 data. If the node is unavailable, cleanup remains pending. The server retains
 the destruction record until the node acknowledges cleanup, so reconnecting
-cannot resurrect the biot. Permanently retiring a lost node does not constitute
-proof that its disks were erased; it cannot rejoin using its old registration.
+cannot resurrect the biot. A node with allocations not known absent remains
+disabled rather than retired. Future abandonment must record that its disks may
+still contain data; it cannot present unobserved cleanup as erasure.
 
 ### Disconnection
 
@@ -97,11 +107,12 @@ its preview and terminal streams. Once the node detects loss of control-plane
 contact, it closes managed SSH sessions, rejects new ones, and stops mediated
 credential access. Containers and their background work may continue running.
 
-Loss detection has a finite, configured timeout. Until it expires, the node may
-still enforce its last applied permissions. On reconnection it applies current
-permissions and lifecycle intent before reopening access. Revocation is
-immediate at the server; node enforcement is reported as pending until applied
-or access has been closed. Directly supplied secrets cannot be recalled.
+Loss detection has a finite, configured timeout. Until it expires, managed
+sessions admitted before the loss may remain open; new admissions require the
+server. On reconnection the node clears old sessions and synchronizes current
+access and lifecycle revisions before reopening access. Revocation is immediate
+at the server; node enforcement is reported as pending until access has been
+closed. Directly supplied secrets cannot be recalled.
 
 This keeps ordinary work alive through a server restart without treating an
 indefinitely stale authorization snapshot as current authority.
@@ -167,6 +178,11 @@ Revocation does not undo work or promise to stop detached processes. Biot's
 managed SSH admission remains under node control rather than user-editable
 project configuration.
 
+Initially, any access withdrawal closes every managed session for that biot on
+the node. Unaffected users may reconnect and be authorized again. This trades a
+small interruption in a trusted-group deployment for simple, recoverable
+revision-based enforcement without a durable remote session directory.
+
 Preview applications are outside the control plane's trust boundary. Biot's
 browser authentication must work across preview hosts without sharing a
 control-plane credential with applications. Preview sessions are scoped to their
@@ -185,10 +201,14 @@ resolved by the node from that biot's current runtime; it is never an arbitrary
 host address supplied by a user. Listening-port discovery can help users choose
 a port, but grants no access and publishes nothing automatically.
 
-An allocation survives stops, rebuilds, and crashes. Unpublishing disables the
-route but retains the allocation; republishing that port restores its URL.
-Destroying the biot ends the allocation and invalidates its sessions. A new biot
-never inherits an old biot's identity or permissions.
+The URL survives stops, rebuilds, crashes, and unpublishing. Its hostname is
+derived with a stable server-held key from the biot identity and port, then
+stored on the active publication for routing and collision detection.
+Unpublishing removes the route and its view grants; republishing that port
+restores the same URL but requires sharing again.
+
+Destroying the biot deletes its publications and grants and invalidates its
+sessions. A new biot never inherits an old biot's identity or permissions.
 
 Every preview request is authenticated and checked against the port's current
 view grant. The server replaces caller-supplied identity headers with verified
