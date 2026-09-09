@@ -88,14 +88,6 @@ defmodule Biot.Server.Repo.Migrations.CreateOperationsAndObservations do
 
       add(:failure, :map)
 
-      add(:applied_access_revision, :integer,
-        null: false,
-        check: %{
-          name: "observations_applied_access_revision_positive",
-          expr: "applied_access_revision > 0"
-        }
-      )
-
       timestamps(type: :utc_datetime_usec)
     end
 

@@ -225,13 +225,13 @@ defmodule Biot.Server.Queries.BiotsTest do
     report =
       TestFixtures.execution_report(accepted_revision: 2, container: :absent, data: :present)
 
-    assert {:ok, :stored} =
-             Reports.observation(context.node.id, context.connection_id, context.biot_id, report)
-
     NodeConnections.put(context.node.id, %{
       connection_id: context.connection_id,
       state: :ready
     })
+
+    assert {:ok, :stored} =
+             Reports.observation(context.node.id, context.connection_id, context.biot_id, report)
 
     for actor <- [context.actor, context.collaborator_actor] do
       assert {:ok, views} = Queries.Biots.list(actor, @page)
@@ -261,22 +261,24 @@ defmodule Biot.Server.Queries.BiotsTest do
     report =
       TestFixtures.execution_report(accepted_revision: 1, container: :absent, data: :present)
 
-    assert {:ok, :stored} =
-             Reports.observation(context.node.id, context.connection_id, context.biot_id, report)
-
-    assert {:ok, view} = Queries.Biots.get(context.actor, context.biot_id)
-    assert view.actual.freshness == :stale
-    assert view.actual.container == :absent
-    assert view.actual.data == :present
-
     NodeConnections.put(context.node.id, %{
       connection_id: context.connection_id,
       state: :ready
     })
 
+    assert {:ok, :stored} =
+             Reports.observation(context.node.id, context.connection_id, context.biot_id, report)
+
     assert {:ok, view} = Queries.Biots.get(context.actor, context.biot_id)
     assert view.actual.freshness == :current
-    assert view.node == :ready
+    assert view.actual.container == :absent
+    assert view.actual.data == :present
+
+    NodeConnections.delete(context.node.id)
+
+    assert {:ok, view} = Queries.Biots.get(context.actor, context.biot_id)
+    assert view.actual.freshness == :stale
+    assert view.node == :unavailable
 
     NodeConnections.put(context.node.id, %{
       connection_id: TestFixtures.connection_id(2),

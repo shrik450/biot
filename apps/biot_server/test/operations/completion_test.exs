@@ -198,8 +198,7 @@ defmodule Biot.Server.Operations.CompletionTest do
       installed_environment_id: Map.get(fields, :installed_environment_id),
       container: Map.get(fields, :container, :unknown),
       data: Map.get(fields, :data, :unknown),
-      failure: Map.get(fields, :failure),
-      applied_access_revision: Map.get(fields, :applied_access_revision, 1)
+      failure: Map.get(fields, :failure)
     }
   end
 

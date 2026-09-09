@@ -1,14 +1,21 @@
 defmodule Biot.Protocol.RepositorySource do
   @moduledoc "A credential-free Git repository URL."
 
+  alias Biot.Protocol.Limits
+
   @enforce_keys [:url]
   defstruct [:url]
 
   @type t :: %__MODULE__{url: String.t()}
 
-  @spec parse(term()) :: {:ok, t()} | {:error, :invalid_format | :embedded_credentials}
+  @spec parse(term()) ::
+          {:ok, t()}
+          | {:error, :invalid_format | :embedded_credentials | :repository_url_too_long}
   def parse(value) when is_binary(value) do
     cond do
+      byte_size(value) > Limits.max_repository_url_bytes() ->
+        {:error, :repository_url_too_long}
+
       not String.valid?(value) or Regex.match?(~r/\s/u, value) or String.contains?(value, "#") ->
         {:error, :invalid_format}
 

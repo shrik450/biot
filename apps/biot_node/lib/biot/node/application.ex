@@ -5,6 +5,8 @@ defmodule Biot.Node.Application do
 
   require Logger
 
+  alias Biot.Protocol.Wire
+
   @control_connection_keys [:server_host, :server_port, :registration_id, :tls]
   @host_keys [:data_root, :uid_range_base, :uid_range_count, :uid_range_limit]
 
@@ -12,6 +14,8 @@ defmodule Biot.Node.Application do
   # they run even on a node that owns no biots.
   @impl true
   def start(_type, _args) do
+    Wire.check_frame_limit!(Application.fetch_env!(:biot_node, :max_frame_bytes))
+
     children = [Biot.Node.Diagnostics, Biot.Node.Host.Command.Reaper] ++ host_children()
 
     opts = [strategy: :one_for_one, name: Biot.Node.Supervisor]

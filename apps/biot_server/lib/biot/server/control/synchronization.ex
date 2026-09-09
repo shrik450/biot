@@ -10,6 +10,7 @@ defmodule Biot.Server.Control.Synchronization do
   alias Biot.Protocol.NodeId
   alias Biot.Server.Biots
   alias Biot.Server.Repo
+  alias Biot.Server.Schema.AccessObservation
   alias Biot.Server.Schema.Biot, as: BiotRow
   alias Biot.Server.Schema.Observation
 
@@ -37,15 +38,24 @@ defmodule Biot.Server.Control.Synchronization do
 
   @spec behind(NodeId.t(), ConnectionId.t()) :: [Biot.Protocol.BiotId.t()]
   def behind(%NodeId{} = node_id, %ConnectionId{} = connection_id) do
-    node_biots(node_id)
+    from(biot in BiotRow,
+      left_join: observation in Observation,
+      on: observation.biot_id == biot.id,
+      left_join: access_observation in AccessObservation,
+      on: access_observation.biot_id == biot.id,
+      where: biot.node_id == ^node_id
+    )
     |> order_by([biot], asc: biot.id)
-    |> select([biot, observation], %{
+    |> select([biot, observation, access_observation], %{
       biot_id: biot.id,
       desired_state: biot.desired_state,
       desired_revision: biot.desired_revision,
+      access_revision: biot.access_revision,
       data: observation.data,
-      connection_id: observation.connection_id,
-      accepted_revision: observation.accepted_revision
+      observation_connection_id: observation.connection_id,
+      accepted_revision: observation.accepted_revision,
+      access_connection_id: access_observation.connection_id,
+      applied_access_revision: access_observation.applied_access_revision
     })
     |> Repo.all()
     |> Enum.filter(&behind?(&1, connection_id))
@@ -61,12 +71,13 @@ defmodule Biot.Server.Control.Synchronization do
   end
 
   defp behind?(row, connection_id) do
-    included?(row.desired_state, row.data) and not accepted?(row, connection_id)
+    included?(row.desired_state, row.data) and
+      (not accepted?(row, connection_id) or not applied?(row, connection_id))
   end
 
   defp accepted?(
          %{
-           connection_id: connection_id,
+           observation_connection_id: connection_id,
            accepted_revision: accepted_revision,
            desired_revision: desired_revision
          },
@@ -75,4 +86,16 @@ defmodule Biot.Server.Control.Synchronization do
        do: accepted_revision >= desired_revision
 
   defp accepted?(_row, _connection_id), do: false
+
+  defp applied?(
+         %{
+           access_connection_id: connection_id,
+           applied_access_revision: applied_revision,
+           access_revision: access_revision
+         },
+         connection_id
+       ),
+       do: applied_revision >= access_revision
+
+  defp applied?(_row, _connection_id), do: false
 end

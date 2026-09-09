@@ -11,19 +11,31 @@ defmodule Biot.Server.Reports do
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.NodeId
+  alias Biot.Server.NodeConnections
   alias Biot.Server.Operations.Completion
   alias Biot.Server.Repo
-  alias Biot.Server.Schema.{Biot, Environment, Node, NodeObservation, Observation, Operation}
+
+  alias Biot.Server.Schema.{
+    AccessObservation,
+    Biot,
+    Environment,
+    Node,
+    NodeObservation,
+    Observation,
+    Operation
+  }
 
   @type ingestion_error ::
           :not_assigned | :not_found | :resolution_mismatch | :temporarily_unavailable
+  @type ignore_reason :: :revision_ahead | :stale_connection
+  @type ignored :: {:ignored, ignore_reason()}
 
   @spec observation(
           NodeId.t(),
           ConnectionId.t(),
           BiotId.t(),
           ExecutionReport.t()
-        ) :: {:ok, :stored | :ignored} | {:error, ingestion_error()}
+        ) :: {:ok, :stored | ignored()} | {:error, ingestion_error()}
   def observation(
         %NodeId{} = node_id,
         %ConnectionId{} = connection_id,
@@ -40,6 +52,23 @@ defmodule Biot.Server.Reports do
     case Repo.transaction(multi, mode: :immediate) do
       {:ok, %{result: result}} -> {:ok, result}
       {:error, :plan, error, _changes} -> {:error, error}
+    end
+  end
+
+  @spec access_applied(NodeId.t(), ConnectionId.t(), BiotId.t(), pos_integer()) ::
+          {:ok, :stored | ignored()} | {:error, ingestion_error()}
+  def access_applied(
+        %NodeId{} = node_id,
+        %ConnectionId{} = connection_id,
+        %BiotId{} = biot_id,
+        revision
+      ) do
+    case Repo.transaction(
+           fn -> access_progress(Repo, node_id, connection_id, biot_id, revision) end,
+           mode: :immediate
+         ) do
+      {:ok, result} -> {:ok, result}
+      {:error, error} -> {:error, error}
     end
   end
 
@@ -98,17 +127,13 @@ defmodule Biot.Server.Reports do
   end
 
   defp plan_observation(repo, node_id, connection_id, biot_id, report) do
-    case repo.get(Biot, biot_id) do
-      %Biot{node_id: ^node_id} = biot ->
-        with :ok <- check_environment(repo, biot, report.installed_environment_id) do
-          plan_assigned_observation(repo, biot, connection_id, report)
-        end
-
-      %Biot{} ->
-        {:error, :not_assigned}
-
-      nil ->
-        {:error, :not_assigned}
+    with {:ok, %Biot{} = biot} <-
+           report_biot(repo, node_id, connection_id, biot_id),
+         :ok <- check_environment(repo, biot, report.installed_environment_id) do
+      plan_assigned_observation(repo, biot, connection_id, report)
+    else
+      {:ok, {:ignored, _reason} = ignored} -> {:ok, ignored}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -128,7 +153,7 @@ defmodule Biot.Server.Reports do
 
   defp plan_assigned_observation(_repo, biot, _connection_id, report)
        when report.accepted_revision > biot.desired_revision,
-       do: {:ok, :ignored}
+       do: {:ok, {:ignored, :revision_ahead}}
 
   defp plan_assigned_observation(repo, biot, connection_id, report) do
     observation = %Observation{
@@ -139,8 +164,7 @@ defmodule Biot.Server.Reports do
       installed_environment_id: report.installed_environment_id,
       container: report.container,
       data: report.data,
-      failure: report.failure,
-      applied_access_revision: report.applied_access_revision
+      failure: report.failure
     }
 
     operation =
@@ -153,8 +177,8 @@ defmodule Biot.Server.Reports do
     {:ok, {:store, observation, operation, outcome}}
   end
 
-  defp observation_writes(%{plan: :ignored}) do
-    Ecto.Multi.new() |> Ecto.Multi.put(:result, :ignored)
+  defp observation_writes(%{plan: {:ignored, _reason} = ignored}) do
+    Ecto.Multi.new() |> Ecto.Multi.put(:result, ignored)
   end
 
   defp observation_writes(%{plan: {:store, observation, operation, outcome}}) do
@@ -205,9 +229,80 @@ defmodule Biot.Server.Reports do
       :container,
       :data,
       :failure,
-      :applied_access_revision,
       :updated_at
     ]
+  end
+
+  defp access_progress(
+         repo,
+         node_id,
+         connection_id,
+         biot_id,
+         revision
+       ) do
+    case report_biot(repo, node_id, connection_id, biot_id) do
+      {:ok, %Biot{} = biot} ->
+        access_observation = repo.get(AccessObservation, biot.id)
+
+        case plan_progress(access_observation, biot, connection_id, revision) do
+          {:ignored, _reason} = ignored ->
+            ignored
+
+          {:store, access_observation} ->
+            repo.insert!(access_observation,
+              on_conflict: {:replace, access_observation_fields()},
+              conflict_target: :biot_id
+            )
+
+            :stored
+        end
+
+      {:ok, {:ignored, _reason} = ignored} ->
+        ignored
+
+      {:error, reason} ->
+        repo.rollback(reason)
+    end
+  end
+
+  defp plan_progress(
+         %AccessObservation{
+           connection_id: connection_id,
+           applied_access_revision: applied_revision
+         },
+         %Biot{},
+         connection_id,
+         revision
+       )
+       when revision <= applied_revision,
+       do: {:ignored, :revision_ahead}
+
+  defp plan_progress(_access_observation, %Biot{} = biot, connection_id, revision) do
+    {:store,
+     %AccessObservation{
+       biot_id: biot.id,
+       connection_id: connection_id,
+       applied_access_revision: revision
+     }}
+  end
+
+  defp access_observation_fields do
+    [:connection_id, :applied_access_revision, :updated_at]
+  end
+
+  defp report_biot(repo, node_id, connection_id, biot_id) do
+    case repo.get(Biot, biot_id) do
+      %Biot{node_id: ^node_id} = biot ->
+        if NodeConnections.current?(connection_id, NodeConnections.current(node_id)),
+          do: {:ok, biot},
+          else: {:ok, {:ignored, :stale_connection}}
+
+      %Biot{} ->
+        {:error, :not_assigned}
+
+      nil ->
+        {:error, :not_assigned}
+    end
   end
 
   defp plan_resolution(repo, node_id, environment_id, manifest) do

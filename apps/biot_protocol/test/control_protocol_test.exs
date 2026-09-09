@@ -27,6 +27,7 @@ defmodule Biot.Protocol.ControlProtocolTest do
   alias Biot.Protocol.RegistrationId
   alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.SourceSelector
+  alias Biot.Protocol.TestGenerators, as: Generators
   alias Biot.Protocol.Version
   alias Biot.Protocol.Wire
 
@@ -71,6 +72,30 @@ defmodule Biot.Protocol.ControlProtocolTest do
     for {context, message} <- messages() do
       assert {:ok, encoded} = Wire.encode(message, context)
       assert Wire.decode(encoded, context) == {:ok, message}
+    end
+  end
+
+  property "the four step 13 messages round-trip through version 1" do
+    check all(message <- step_13_message()) do
+      assert {:ok, encoded} = Wire.encode(message, 1)
+      assert Wire.decode(encoded, 1) == {:ok, message}
+      assert {:error, handshake_reason} = Wire.encode(message, :handshake)
+      assert is_atom(handshake_reason)
+      assert Wire.decode(encoded, :handshake) == {:error, :unknown_message_type}
+    end
+  end
+
+  property "the four step 13 messages reject damaged maps without raising" do
+    check all(
+            message <- step_13_message(),
+            replacement <- json_term(),
+            remove? <- StreamData.boolean()
+          ) do
+      {:ok, encoded} = Wire.encode(message, 1)
+      map = Jason.decode!(encoded)
+      field = Enum.random(Map.keys(map))
+      damaged = if remove?, do: Map.delete(map, field), else: Map.put(map, field, replacement)
+      assert_wire_result(damaged |> Jason.encode!() |> Wire.decode(1))
     end
   end
 
@@ -321,8 +346,7 @@ defmodule Biot.Protocol.ControlProtocolTest do
       installed_environment_id: environment_id,
       container: :absent,
       data: :present,
-      failure: nil,
-      applied_access_revision: 9
+      failure: nil
     }
 
     {:ok, pinned} =
@@ -345,7 +369,9 @@ defmodule Biot.Protocol.ControlProtocolTest do
       {:handshake,
        %Message.Connected{connection_id: connection_id, selected_protocol_version: 1}},
       {:handshake, %Message.Reject{reason: :registration_rejected}},
-      {1, %Message.Synchronize{connection_id: connection_id, biot_specs: [spec]}},
+      {1, %Message.SynchronizeBegin{connection_id: connection_id, count: 1}},
+      {1, %Message.SynchronizeItem{biot_spec: spec}},
+      {1, %Message.SynchronizeEnd{connection_id: connection_id}},
       {1, %Message.Desired{biot_spec: spec}},
       {1,
        %Message.Diagnostic{
@@ -356,6 +382,7 @@ defmodule Biot.Protocol.ControlProtocolTest do
        }},
       {1, %Message.Synchronized{connection_id: connection_id}},
       {1, %Message.Observation{biot_id: biot_id, execution_report: report}},
+      {1, %Message.AccessApplied{biot_id: biot_id, access_revision: 9}},
       {1, %Message.Resolution{environment_id: environment_id, manifest: manifest}},
       {1, %Message.NodeObservation{orphaned_allocations: [orphaned_allocation]}},
       {1, %Message.DiagnosticResult{request_id: "request-1", result: {<<0, 1, 2>>, true}}},
@@ -363,6 +390,22 @@ defmodule Biot.Protocol.ControlProtocolTest do
       {1, %Message.Heartbeat{challenge: "challenge"}},
       {1, %Message.HeartbeatResponse{challenge: "challenge"}}
     ]
+  end
+
+  defp step_13_message do
+    StreamData.one_of([
+      gen all(
+            connection_id <- Generators.connection_id(),
+            count <- StreamData.non_negative_integer()
+          ) do
+        %Message.SynchronizeBegin{connection_id: connection_id, count: count}
+      end,
+      StreamData.map(Generators.biot_spec(), &%Message.SynchronizeItem{biot_spec: &1}),
+      StreamData.map(Generators.connection_id(), &%Message.SynchronizeEnd{connection_id: &1}),
+      gen all(biot_id <- Generators.biot_id(), revision <- StreamData.positive_integer()) do
+        %Message.AccessApplied{biot_id: biot_id, access_revision: revision}
+      end
+    ])
   end
 
   defp find_message(module) do

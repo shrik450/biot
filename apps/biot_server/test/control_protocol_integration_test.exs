@@ -25,6 +25,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
   alias Biot.Server.Nodes
   alias Biot.Server.Nodes.Registration
   alias Biot.Server.Repo
+  alias Biot.Server.Schema.AccessObservation
   alias Biot.Server.Schema.Biot, as: BiotRow
   alias Biot.Server.Schema.Environment
   alias Biot.Server.Schema.Node
@@ -76,14 +77,14 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
                TestFixtures.create_command(name: "full-path", node_id: node.id)
              )
 
-    {socket, connected, synchronize} = ready_peer(listener.port, context.certificates, node, 0)
+    {socket, connected, specs} = ready_peer(listener.port, context.certificates, node, 0)
 
     assert NodeConnections.current(node.id) == %{
              connection_id: connected.connection_id,
              state: :ready
            }
 
-    assert [%{execution: %{biot_id: ^biot_id}} = spec] = synchronize.biot_specs
+    assert [%{execution: %{biot_id: ^biot_id}} = spec] = specs
     assert spec.access_revision == Repo.get!(BiotRow, biot_id).access_revision
     :ssl.close(socket)
   end
@@ -316,11 +317,11 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
 
     socket = connect(listener.port, context.certificates, 0)
     send_hello(socket, node.registration, [1])
-    assert %Message.Connected{} = await_message(socket, :handshake, Message.Connected)
-    assert %Message.Synchronize{} = synchronize = await_message(socket, 1, Message.Synchronize)
+    assert %Message.Connected{} = connected = await_message(socket, :handshake, Message.Connected)
+    specs = await_snapshot(socket, connected.connection_id)
 
     revisions =
-      Map.new(synchronize.biot_specs, fn spec ->
+      Map.new(specs, fn spec ->
         {spec.execution.biot_id, spec.access_revision}
       end)
 
@@ -334,7 +335,8 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     :ssl.close(socket)
   end
 
-  test "a biot created during synchronization arrives on the first sweep", context do
+  test "access_applied is accepted while synchronizing and new intent arrives on the sweep",
+       context do
     listener = start_listener(context.certificates, desired_sweep_interval_ms: 100)
     owner = TestFixtures.principal(1)
     actor = TestFixtures.actor(owner)
@@ -342,7 +344,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     socket = connect(listener.port, context.certificates, 0)
     send_hello(socket, node.registration, [1])
     connected = await_message(socket, :handshake, Message.Connected)
-    assert %Message.Synchronize{biot_specs: []} = await_message(socket, 1, Message.Synchronize)
+    assert [] = await_snapshot(socket, connected.connection_id)
 
     eventually(fn ->
       match?(%{state: :synchronizing}, NodeConnections.current(node.id))
@@ -356,6 +358,16 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
                biot_id,
                TestFixtures.create_command(name: "mid-sync", node_id: node.id)
              )
+
+    send_message(socket, %Message.AccessApplied{biot_id: biot_id, access_revision: 1}, 1)
+    connection_id = connected.connection_id
+
+    eventually(fn ->
+      match?(
+        %AccessObservation{connection_id: ^connection_id, applied_access_revision: 1},
+        Repo.get(AccessObservation, biot_id)
+      )
+    end)
 
     # The wake arrives while the connection is still synchronizing, so the handler drops it.
     [{handler, _connection_id}] = Registry.lookup(Biot.Server.Control.Registry, node.id)
@@ -371,7 +383,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     :ssl.close(socket)
   end
 
-  test "the sweep skips a biot whose observation accepted the desired revision", context do
+  test "the sweep resends a biot behind on access only and stops after access_applied", context do
     listener = start_listener(context.certificates, desired_sweep_interval_ms: 100)
     owner = TestFixtures.principal(1)
     actor = TestFixtures.actor(owner)
@@ -379,7 +391,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     socket = connect(listener.port, context.certificates, 0)
     send_hello(socket, node.registration, [1])
     connected = await_message(socket, :handshake, Message.Connected)
-    assert %Message.Synchronize{biot_specs: []} = await_message(socket, 1, Message.Synchronize)
+    assert [] = await_snapshot(socket, connected.connection_id)
 
     eventually(fn ->
       match?(%{state: :synchronizing}, NodeConnections.current(node.id))
@@ -415,7 +427,14 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
       )
     end)
 
-    assert_no_non_heartbeat_message(socket, 1, 350)
+    assert_desired_revision(socket, biot_id, 1)
+    send_message(socket, %Message.AccessApplied{biot_id: biot_id, access_revision: 1}, 1)
+
+    eventually(fn ->
+      match?(%AccessObservation{applied_access_revision: 1}, Repo.get(AccessObservation, biot_id))
+    end)
+
+    assert_no_non_heartbeat_message(socket, 1, 250)
     :ssl.close(socket)
   end
 
@@ -475,13 +494,18 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         accepted_revision: accepted.revision,
         installed_environment_id: spec.execution.environment.id,
         container: TestFixtures.running_container(1),
-        data: :present,
-        applied_access_revision: spec.access_revision
+        data: :present
       )
 
     send_message(
       socket,
       %Message.Observation{biot_id: biot_id, execution_report: report},
+      1
+    )
+
+    send_message(
+      socket,
+      %Message.AccessApplied{biot_id: biot_id, access_revision: spec.access_revision},
       1
     )
 
@@ -503,6 +527,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     observation = Repo.get!(Observation, biot_id)
     assert observation.connection_id == connected.connection_id
     assert observation.accepted_revision == 1
+    assert Repo.get!(AccessObservation, biot_id).connection_id == connected.connection_id
     assert Repo.get!(Operation, accepted.operation_id).outcome == :succeeded
 
     assert Repo.get!(Environment, spec.execution.environment.id).resolution ==
@@ -671,8 +696,8 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
 
     socket = connect(listener.port, context.certificates, 0)
     send_hello(socket, node.registration, [1])
-    assert %Message.Connected{} = await_message(socket, :handshake, Message.Connected)
-    assert %Message.Synchronize{} = await_message(socket, 1, Message.Synchronize)
+    assert %Message.Connected{} = connected = await_message(socket, :handshake, Message.Connected)
+    _specs = await_snapshot(socket, connected.connection_id)
 
     eventually(fn ->
       match?(%{state: :synchronizing}, NodeConnections.current(node.id))
@@ -849,8 +874,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
             accepted_revision: 1,
             installed_environment_id: spec.execution.environment.id,
             container: TestFixtures.running_container(11),
-            data: :present,
-            applied_access_revision: spec.access_revision
+            data: :present
           )
 
         assert :ok = NodeControl.report_observation(biot_id, report)
@@ -876,6 +900,255 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
 
         refute second_connection.connection_id == first_connection.connection_id
         eventually(fn -> local_intent(biot_id).execution.desired.revision == 2 end)
+
+      {:error, :unsupported_platform} ->
+        assert Platform.current() == {:error, :unsupported_platform}
+    end
+  end
+
+  test "a real node stages a complete snapshot through its heartbeat and acknowledges in order",
+       context do
+    case Platform.current() do
+      {:ok, _platform} ->
+        owner = TestFixtures.principal(41)
+        node = node_for_certificate(41, context.certificates, 0)
+
+        {baseline_row, _environment} =
+          TestFixtures.biot(owner, node, 8_041, desired_state: :destroyed)
+
+        {next_row, _environment} =
+          TestFixtures.biot(owner, node, 8_042, desired_state: :destroyed)
+
+        {:ok, baseline} = Biots.spec(baseline_row.id)
+        {:ok, next_spec} = Biots.spec(next_row.id)
+
+        start_node_journal()
+        assert {:ok, _intent} = NodeJournal.put_intent(baseline)
+        {listener, port} = raw_server(context.certificates)
+        parent = self()
+        connection_id = TestFixtures.connection_id(41)
+
+        server =
+          Task.async(fn ->
+            socket = accept_raw_server(listener)
+            assert %Message.Hello{} = await_message(socket, :handshake, Message.Hello)
+
+            send_message(
+              socket,
+              %Message.Connected{connection_id: connection_id, selected_protocol_version: 1},
+              :handshake
+            )
+
+            send_message(
+              socket,
+              %Message.SynchronizeBegin{connection_id: connection_id, count: 1},
+              1
+            )
+
+            send_message(socket, %Message.SynchronizeItem{biot_spec: next_spec}, 1)
+            send(parent, :snapshot_staged)
+
+            assert %Message.Heartbeat{challenge: challenge} =
+                     await_message(socket, 1, Message.Heartbeat)
+
+            send_message(socket, %Message.HeartbeatResponse{challenge: challenge}, 1)
+
+            receive do
+              :finish_snapshot -> :ok
+            end
+
+            send_message(socket, %Message.SynchronizeEnd{connection_id: connection_id}, 1)
+
+            assert %Message.AccessApplied{
+                     biot_id: biot_id,
+                     access_revision: access_revision
+                   } = await_message(socket, 1, Message.AccessApplied)
+
+            assert biot_id == next_spec.execution.biot_id
+            assert access_revision == next_spec.access_revision
+
+            assert %Message.Synchronized{connection_id: ^connection_id} =
+                     await_message(socket, 1, Message.Synchronized)
+
+            :ssl.close(socket)
+          end)
+
+        _connection =
+          start_node(port, context.certificates, node,
+            heartbeat_interval_ms: 20,
+            heartbeat_timeout_ms: 500
+          )
+
+        assert_receive :snapshot_staged, @eventually_timeout
+        assert local_intent(baseline.execution.biot_id) == baseline
+        assert local_intent(next_spec.execution.biot_id) == nil
+        send(server.pid, :finish_snapshot)
+        Task.await(server, @eventually_timeout)
+
+        eventually(fn -> local_intent(next_spec.execution.biot_id) == next_spec end)
+        assert local_intent(baseline.execution.biot_id) == nil
+        :ssl.close(listener)
+
+      {:error, :unsupported_platform} ->
+        assert Platform.current() == {:error, :unsupported_platform}
+    end
+  end
+
+  test "a real node rejects every invalid snapshot without changing accepted intent", context do
+    case Platform.current() do
+      {:ok, _platform} ->
+        owner = TestFixtures.principal(51)
+        node = node_for_certificate(51, context.certificates, 0)
+
+        {baseline_row, _environment} =
+          TestFixtures.biot(owner, node, 8_051, desired_state: :destroyed)
+
+        {first_row, _environment} =
+          TestFixtures.biot(owner, node, 8_052, desired_state: :destroyed)
+
+        {second_row, _environment} =
+          TestFixtures.biot(owner, node, 8_053, desired_state: :destroyed)
+
+        {:ok, baseline} = Biots.spec(baseline_row.id)
+        {:ok, first} = Biots.spec(first_row.id)
+        {:ok, second} = Biots.spec(second_row.id)
+        start_node_journal()
+        assert {:ok, _intent} = NodeJournal.put_intent(baseline)
+
+        cases = [
+          {:synchronize_count_mismatch,
+           fn connection_id ->
+             [
+               %Message.SynchronizeBegin{connection_id: connection_id, count: 2},
+               %Message.SynchronizeItem{biot_spec: first},
+               %Message.SynchronizeEnd{connection_id: connection_id}
+             ]
+           end},
+          {:duplicate_biot_id,
+           fn connection_id ->
+             [
+               %Message.SynchronizeBegin{connection_id: connection_id, count: 2},
+               %Message.SynchronizeItem{biot_spec: first},
+               %Message.SynchronizeItem{biot_spec: first}
+             ]
+           end},
+          {:desired_during_snapshot,
+           fn connection_id ->
+             [
+               %Message.SynchronizeBegin{connection_id: connection_id, count: 1},
+               %Message.Desired{biot_spec: first}
+             ]
+           end},
+          {:staged_count_exceeded,
+           fn connection_id ->
+             [
+               %Message.SynchronizeBegin{connection_id: connection_id, count: 1},
+               %Message.SynchronizeItem{biot_spec: first},
+               %Message.SynchronizeItem{biot_spec: second}
+             ]
+           end},
+          {:snapshot_count_over_capacity,
+           fn connection_id ->
+             [
+               %Message.SynchronizeBegin{
+                 connection_id: connection_id,
+                 count: Application.fetch_env!(:biot_node, :max_staged_specs) + 1
+               }
+             ]
+           end}
+        ]
+
+        for {{reason, actions}, number} <- Enum.with_index(cases, 51) do
+          assert_node_snapshot_rejected(
+            context.certificates,
+            node,
+            TestFixtures.connection_id(number),
+            reason,
+            actions.(TestFixtures.connection_id(number)),
+            baseline
+          )
+        end
+
+      {:error, :unsupported_platform} ->
+        assert Platform.current() == {:error, :unsupported_platform}
+    end
+  end
+
+  test "a real node discards a closed snapshot, reconnects, and restages it", context do
+    case Platform.current() do
+      {:ok, _platform} ->
+        owner = TestFixtures.principal(61)
+        node = node_for_certificate(61, context.certificates, 0)
+
+        {baseline_row, _environment} =
+          TestFixtures.biot(owner, node, 8_061, desired_state: :destroyed)
+
+        {next_row, _environment} =
+          TestFixtures.biot(owner, node, 8_062, desired_state: :destroyed)
+
+        {:ok, baseline} = Biots.spec(baseline_row.id)
+        {:ok, next_spec} = Biots.spec(next_row.id)
+
+        start_node_journal()
+        assert {:ok, _intent} = NodeJournal.put_intent(baseline)
+        {listener, port} = raw_server(context.certificates)
+        first_connection = TestFixtures.connection_id(61)
+        second_connection = TestFixtures.connection_id(62)
+        parent = self()
+
+        server =
+          Task.async(fn ->
+            first = accept_raw_server(listener)
+            complete_node_hello(first, first_connection)
+
+            send_message(
+              first,
+              %Message.SynchronizeBegin{connection_id: first_connection, count: 1},
+              1
+            )
+
+            send_message(first, %Message.SynchronizeItem{biot_spec: next_spec}, 1)
+            send(parent, :first_snapshot_staged)
+            :ssl.close(first)
+
+            replacement = accept_raw_server(listener)
+            complete_node_hello(replacement, second_connection)
+
+            send_message(
+              replacement,
+              %Message.SynchronizeBegin{connection_id: second_connection, count: 1},
+              1
+            )
+
+            send_message(replacement, %Message.SynchronizeItem{biot_spec: next_spec}, 1)
+
+            send_message(
+              replacement,
+              %Message.SynchronizeEnd{connection_id: second_connection},
+              1
+            )
+
+            assert %Message.AccessApplied{} = await_message(replacement, 1, Message.AccessApplied)
+
+            assert %Message.Synchronized{connection_id: ^second_connection} =
+                     await_message(replacement, 1, Message.Synchronized)
+
+            :ssl.close(replacement)
+          end)
+
+        _connection =
+          start_node(port, context.certificates, node,
+            reconnect_backoff_min_ms: 20,
+            reconnect_backoff_max_ms: 40
+          )
+
+        assert_receive :first_snapshot_staged, @eventually_timeout
+        assert local_intent(baseline.execution.biot_id) == baseline
+        assert local_intent(next_spec.execution.biot_id) == nil
+        Task.await(server, @eventually_timeout)
+        eventually(fn -> local_intent(next_spec.execution.biot_id) == next_spec end)
+        assert local_intent(baseline.execution.biot_id) == nil
+        :ssl.close(listener)
 
       {:error, :unsupported_platform} ->
         assert Platform.current() == {:error, :unsupported_platform}
@@ -920,8 +1193,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
           TestFixtures.execution_report(
             accepted_revision: 1,
             container: :absent,
-            data: :uninitialized,
-            applied_access_revision: spec.access_revision
+            data: :uninitialized
           )
 
         latest =
@@ -929,8 +1201,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
             accepted_revision: 1,
             installed_environment_id: environment_id,
             container: TestFixtures.running_container(31),
-            data: :present,
-            applied_access_revision: spec.access_revision
+            data: :present
           )
 
         first_manifest = TestFixtures.manifest(revision_digit: "a")
@@ -1088,8 +1359,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     assert %Message.Connected{} =
              connected = await_message(socket, :handshake, Message.Connected)
 
-    assert %Message.Synchronize{} =
-             synchronize = await_message(socket, 1, Message.Synchronize)
+    specs = await_snapshot(socket, connected.connection_id)
 
     send_message(socket, %Message.Synchronized{connection_id: connected.connection_id}, 1)
 
@@ -1100,7 +1370,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
       }
     end)
 
-    {socket, connected, synchronize}
+    {socket, connected, specs}
   end
 
   defp send_hello(socket, registration_id, versions) do
@@ -1316,6 +1586,59 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     socket
   end
 
+  defp complete_node_hello(socket, connection_id) do
+    assert %Message.Hello{} = await_message(socket, :handshake, Message.Hello)
+
+    send_message(
+      socket,
+      %Message.Connected{connection_id: connection_id, selected_protocol_version: 1},
+      :handshake
+    )
+  end
+
+  defp assert_node_snapshot_rejected(
+         certificates,
+         node,
+         connection_id,
+         reason,
+         actions,
+         baseline
+       ) do
+    log =
+      capture_log(fn ->
+        {listener, port} = raw_server(certificates)
+
+        server =
+          Task.async(fn ->
+            socket = accept_raw_server(listener)
+            complete_node_hello(socket, connection_id)
+            Enum.each(actions, &send_message(socket, &1, 1))
+            assert_closed(socket)
+          end)
+
+        _connection =
+          start_node(port, certificates, node,
+            reconnect_backoff_min_ms: 100,
+            reconnect_backoff_max_ms: 200
+          )
+
+        Task.await(server, @eventually_timeout)
+        :ssl.close(listener)
+        eventually(fn -> NodeControl.status() == :offline end)
+
+        receive do
+        after
+          20 -> :ok
+        end
+
+        Logger.flush()
+        stop_supervised(NodeConnection)
+      end)
+
+    assert log =~ "node control connection disconnected: #{inspect(reason)}"
+    assert local_intent(baseline.execution.biot_id) == baseline
+  end
+
   defp complete_server_handshake(socket) do
     assert %Message.Hello{} = await_message(socket, :handshake, Message.Hello)
     connection_id = TestFixtures.connection_id(99)
@@ -1326,14 +1649,29 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
       :handshake
     )
 
-    send_message(
-      socket,
-      %Message.Synchronize{connection_id: connection_id, biot_specs: []},
-      1
-    )
+    send_message(socket, %Message.SynchronizeBegin{connection_id: connection_id, count: 0}, 1)
+    send_message(socket, %Message.SynchronizeEnd{connection_id: connection_id}, 1)
 
     assert %Message.Synchronized{connection_id: ^connection_id} =
              await_message(socket, 1, Message.Synchronized)
+  end
+
+  defp await_snapshot(socket, connection_id) do
+    assert %Message.SynchronizeBegin{connection_id: ^connection_id, count: count} =
+             await_message(socket, 1, Message.SynchronizeBegin)
+
+    specs =
+      for _index <- 1..count//1 do
+        assert %Message.SynchronizeItem{biot_spec: spec} =
+                 await_message(socket, 1, Message.SynchronizeItem)
+
+        spec
+      end
+
+    assert %Message.SynchronizeEnd{connection_id: ^connection_id} =
+             await_message(socket, 1, Message.SynchronizeEnd)
+
+    specs
   end
 
   defp eventually(function, timeout \\ @eventually_timeout) do

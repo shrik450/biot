@@ -426,7 +426,7 @@ defmodule Biot.Server.PolicyRecordsTest do
     assert_no_wake()
   end
 
-  test "current observation progress changes enforcement from pending to applied", context do
+  test "current access progress changes transaction and Biot view enforcement", context do
     current_connection = TestFixtures.connection_id(1)
     stale_connection = TestFixtures.connection_id(2)
 
@@ -436,11 +436,11 @@ defmodule Biot.Server.PolicyRecordsTest do
     })
 
     assert {:ok, :stored} =
-             Reports.observation(
+             Reports.access_applied(
                context.node.id,
                current_connection,
                context.biot_id,
-               TestFixtures.execution_report(applied_access_revision: 1)
+               1
              )
 
     assert {:ok, %Applied{enforcement: :applied}} =
@@ -455,23 +455,23 @@ defmodule Biot.Server.PolicyRecordsTest do
     assert node_id == context.node.id
     assert_one_wake(context.biot_id)
 
-    assert {:ok, :stored} =
-             Reports.observation(
+    assert {:ok, {:ignored, :stale_connection}} =
+             Reports.access_applied(
                context.node.id,
                stale_connection,
                context.biot_id,
-               TestFixtures.execution_report(applied_access_revision: 9)
+               9
              )
 
     assert {:ok, stale_view} = Queries.Biots.get(context.actor, context.biot_id)
     assert stale_view.access.enforcement == {:pending, context.node.id}
 
     assert {:ok, :stored} =
-             Reports.observation(
+             Reports.access_applied(
                context.node.id,
                current_connection,
                context.biot_id,
-               TestFixtures.execution_report(applied_access_revision: 2)
+               2
              )
 
     assert {:ok, current_view} = Queries.Biots.get(context.actor, context.biot_id)

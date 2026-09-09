@@ -11,8 +11,8 @@ defmodule Biot.Server.Queries.BiotView do
   alias Biot.Server.Policy
   alias Biot.Server.Policy.Enforcement
   alias Biot.Server.Queries.OperationView
+  alias Biot.Server.Schema.{AccessObservation, Node, Observation, Operation}
   alias Biot.Server.Schema.Biot, as: BiotRow
-  alias Biot.Server.Schema.{Node, Observation, Operation}
 
   defmodule Input do
     @moduledoc "Lists every durable and live value required to project one Biot view."
@@ -21,6 +21,7 @@ defmodule Biot.Server.Queries.BiotView do
       :biot,
       :role,
       :observation,
+      :access_observation,
       :node,
       :operation,
       :connection,
@@ -30,6 +31,7 @@ defmodule Biot.Server.Queries.BiotView do
       :biot,
       :role,
       :observation,
+      :access_observation,
       :node,
       :operation,
       :connection,
@@ -40,6 +42,7 @@ defmodule Biot.Server.Queries.BiotView do
             biot: BiotRow.t(),
             role: Authorization.role(),
             observation: Observation.t() | nil,
+            access_observation: AccessObservation.t() | nil,
             node: Node.t(),
             operation: Operation.t() | nil,
             connection: NodeConnections.connection() | nil,
@@ -96,13 +99,12 @@ defmodule Biot.Server.Queries.BiotView do
         biot: %BiotRow{} = biot,
         role: role,
         observation: observation,
+        access_observation: access_observation,
         node: %Node{} = node,
         operation: operation,
         connection: connection,
         publications: publications
       }) do
-    freshness = Enforcement.freshness(observation, connection)
-
     %__MODULE__{
       id: biot.id,
       name: biot.name,
@@ -110,21 +112,26 @@ defmodule Biot.Server.Queries.BiotView do
       node_id: biot.node_id,
       role: role,
       desired: BiotRow.desired(biot),
-      actual: actual(observation, freshness),
+      actual: actual(observation, connection),
       node: node_status(node.status, connection_state(connection)),
       operation: operation(operation),
       access: %{
         revision: biot.access_revision,
-        enforcement: Enforcement.access(biot, observation, freshness)
+        enforcement: Enforcement.access(biot, access_observation, connection)
       },
       publications: publications,
       direct_secret_exposure_possible: biot.direct_secret_exposure_possible
     }
   end
 
-  defp actual(nil, _freshness), do: :never_reported
+  defp actual(nil, _connection), do: :never_reported
 
-  defp actual(%Observation{} = observation, freshness) do
+  defp actual(%Observation{} = observation, connection) do
+    freshness =
+      if NodeConnections.current?(observation.connection_id, connection),
+        do: :current,
+        else: :stale
+
     %{
       received_at: observation.received_at,
       freshness: freshness,

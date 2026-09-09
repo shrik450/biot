@@ -132,6 +132,12 @@ defmodule Biot.Server.Queries.NodesTest do
   end
 
   defp report(context, biot_id, data) do
+    :ok =
+      NodeConnections.put(context.first.id, %{
+        connection_id: context.connection_id,
+        state: :ready
+      })
+
     assert {:ok, :stored} =
              Reports.observation(
                context.first.id,
@@ -140,8 +146,7 @@ defmodule Biot.Server.Queries.NodesTest do
                TestFixtures.execution_report(
                  accepted_revision: 2,
                  container: :absent,
-                 data: data,
-                 applied_access_revision: 2
+                 data: data
                )
              )
   end

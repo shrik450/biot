@@ -1,6 +1,7 @@
 defmodule Biot.Protocol.SourceSelector do
   @moduledoc ~S|An unpinned Nix source selected by repository and ref. Canonical form is "nixpkgs" or "<url>#<ref>".|
 
+  alias Biot.Protocol.Limits
   alias Biot.Protocol.RepositorySource
 
   @enforce_keys [:source]
@@ -9,7 +10,13 @@ defmodule Biot.Protocol.SourceSelector do
   @type source :: :nixpkgs | {:git, RepositorySource.t(), String.t()}
   @type t :: %__MODULE__{source: source()}
 
-  @spec parse(term()) :: {:ok, t()} | {:error, :invalid_format | :embedded_credentials}
+  @spec parse(term()) ::
+          {:ok, t()}
+          | {:error,
+             :invalid_format
+             | :embedded_credentials
+             | :repository_url_too_long
+             | :source_ref_too_long}
   def parse("nixpkgs"), do: {:ok, nixpkgs()}
 
   def parse(value) when is_binary(value) do
@@ -28,7 +35,7 @@ defmodule Biot.Protocol.SourceSelector do
   def parse(_value), do: {:error, :invalid_format}
 
   @spec new(RepositorySource.t(), String.t()) ::
-          {:ok, t()} | {:error, :invalid_format | :embedded_credentials}
+          {:ok, t()} | {:error, :invalid_format | :source_ref_too_long}
   def new(%RepositorySource{} = repository, ref) do
     with :ok <- validate_ref(ref) do
       {:ok, %__MODULE__{source: {:git, repository, ref}}}
@@ -47,6 +54,9 @@ defmodule Biot.Protocol.SourceSelector do
 
   defp validate_ref(ref) when is_binary(ref) do
     cond do
+      byte_size(ref) > Limits.max_source_ref_bytes() ->
+        {:error, :source_ref_too_long}
+
       ref == "" or not String.valid?(ref) or Regex.match?(~r/\s/u, ref) ->
         {:error, :invalid_format}
 

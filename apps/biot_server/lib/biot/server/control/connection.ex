@@ -24,20 +24,22 @@ defmodule Biot.Server.Control.Connection do
 
   defmodule State do
     @moduledoc false
-    defstruct phase: :handshake,
-              peer_identity: nil,
-              buffer: <<>>,
-              max_frame_bytes: 1_000_000,
-              handshake_timeout_ms: 10_000,
-              handshake_timer: nil,
-              heartbeat_interval_ms: 30_000,
-              heartbeat_timeout_ms: 10_000,
-              desired_sweep_interval_ms: 60_000,
-              heartbeat_challenge: nil,
-              version: nil,
-              node_id: nil,
-              connection_id: nil,
-              pending_diagnostics: %{}
+    defstruct [
+      :max_frame_bytes,
+      :handshake_timeout_ms,
+      :heartbeat_interval_ms,
+      :heartbeat_timeout_ms,
+      :desired_sweep_interval_ms,
+      phase: :handshake,
+      peer_identity: nil,
+      buffer: <<>>,
+      handshake_timer: nil,
+      heartbeat_challenge: nil,
+      version: nil,
+      node_id: nil,
+      connection_id: nil,
+      pending_diagnostics: %{}
+    ]
   end
 
   @spec request_diagnostic(
@@ -87,7 +89,7 @@ defmodule Biot.Server.Control.Connection do
         {:biot_spec_changed, _biot_id},
         {socket, %State{phase: :synchronizing} = state}
       ) do
-    # Synchronize sends the set; the sweep covers later intent, including dropped wakes.
+    # The snapshot sends the set; the sweep covers later intent, including dropped wakes.
     {:noreply, {socket, state}}
   end
 
@@ -206,18 +208,19 @@ defmodule Biot.Server.Control.Connection do
   def handle_shutdown(_socket, state), do: cleanup(state)
 
   defp initial_state(options, peer_identity) do
+    # Timing options let integration checks exercise deadlines without production waits.
     %State{
       peer_identity: peer_identity,
-      max_frame_bytes: option(options, :max_frame_bytes, 1_000_000),
-      handshake_timeout_ms: option(options, :handshake_timeout_ms, 10_000),
-      heartbeat_interval_ms: option(options, :heartbeat_interval_ms, 30_000),
-      heartbeat_timeout_ms: option(options, :heartbeat_timeout_ms, 10_000),
-      desired_sweep_interval_ms: option(options, :desired_sweep_interval_ms, 60_000)
+      max_frame_bytes: Application.fetch_env!(:biot_server, :max_frame_bytes),
+      handshake_timeout_ms: option(options, :handshake_timeout_ms),
+      heartbeat_interval_ms: option(options, :heartbeat_interval_ms),
+      heartbeat_timeout_ms: option(options, :heartbeat_timeout_ms),
+      desired_sweep_interval_ms: option(options, :desired_sweep_interval_ms)
     }
   end
 
-  defp option(options, key, default) do
-    Keyword.get(options, key, Application.get_env(:biot_server, key, default))
+  defp option(options, key) do
+    Keyword.get(options, key, Application.fetch_env!(:biot_server, key))
   end
 
   defp process_frames([], _socket, state), do: {:continue, state}
@@ -245,7 +248,7 @@ defmodule Biot.Server.Control.Connection do
          {:ok, node} <- store_platform(node, hello.platform),
          :ok <- send_connected(socket, connection_id, version),
          :ok <- NodeWake.subscribe(node.id),
-         :ok <- send_synchronize(socket, node.id, connection_id, version) do
+         :ok <- send_snapshot(socket, node.id, connection_id, version) do
       NodeConnections.put(node.id, %{connection_id: connection_id, state: :synchronizing})
       Process.send_after(self(), :send_heartbeat, state.heartbeat_interval_ms)
 
@@ -275,7 +278,7 @@ defmodule Biot.Server.Control.Connection do
        ) do
     case NodeConnections.put(state.node_id, %{connection_id: connection_id, state: :ready}) do
       :ok ->
-        # Synchronize sends the set; the sweep covers later intent, including dropped wakes.
+        # The snapshot sends the set; the sweep covers later intent, including dropped wakes.
         Process.send_after(self(), :desired_sweep, state.desired_sweep_interval_ms)
         {:continue, %{state | phase: :ready}}
 
@@ -293,13 +296,32 @@ defmodule Biot.Server.Control.Connection do
         message.execution_report
       )
 
-    log_report_error(result, state.node_id, "observation")
+    log_report_result(result, state.node_id, "observation")
+    {:continue, state}
+  end
+
+  defp handle_message(
+         %Message.AccessApplied{} = message,
+         _socket,
+         %State{phase: phase} = state
+       )
+       when phase in [:synchronizing, :ready] do
+    # The node acknowledges durable snapshot access before it sends synchronized.
+    result =
+      Reports.access_applied(
+        state.node_id,
+        state.connection_id,
+        message.biot_id,
+        message.access_revision
+      )
+
+    log_report_result(result, state.node_id, "access_applied")
     {:continue, state}
   end
 
   defp handle_message(%Message.Resolution{} = message, _socket, %State{phase: :ready} = state) do
     result = Reports.resolution(state.node_id, message.environment_id, message.manifest)
-    log_report_error(result, state.node_id, "resolution")
+    log_report_result(result, state.node_id, "resolution")
     {:continue, state}
   end
 
@@ -309,7 +331,7 @@ defmodule Biot.Server.Control.Connection do
          %State{phase: :ready} = state
        ) do
     result = Reports.node_observation(state.node_id, state.connection_id, allocations)
-    log_report_error(result, state.node_id, "node_observation")
+    log_report_result(result, state.node_id, "node_observation")
     {:continue, state}
   end
 
@@ -406,15 +428,15 @@ defmodule Biot.Server.Control.Connection do
     )
   end
 
-  defp send_synchronize(socket, node_id, connection_id, version) do
-    send_message(
-      socket,
-      %Message.Synchronize{
-        connection_id: connection_id,
-        biot_specs: Synchronization.specs(node_id)
-      },
-      version
-    )
+  defp send_snapshot(socket, node_id, connection_id, version) do
+    specs = Synchronization.specs(node_id)
+
+    messages =
+      [%Message.SynchronizeBegin{connection_id: connection_id, count: length(specs)}] ++
+        Enum.map(specs, &%Message.SynchronizeItem{biot_spec: &1}) ++
+        [%Message.SynchronizeEnd{connection_id: connection_id}]
+
+    send_all(socket, messages, version)
   end
 
   defp send_message(socket, message, version) do
@@ -448,20 +470,39 @@ defmodule Biot.Server.Control.Connection do
   end
 
   defp send_behind_specs(socket, state) do
-    state.node_id
-    |> Synchronization.behind(state.connection_id)
-    |> Enum.reduce_while(:ok, fn biot_id, :ok ->
-      case send_desired(socket, biot_id, state.version) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    with {:ok, messages} <- desired_messages(state.node_id, state.connection_id) do
+      send_all(socket, messages, state.version)
+    end
   end
 
   defp send_desired(socket, biot_id, version) do
     with {:ok, spec} <- Biots.spec(biot_id) do
       send_message(socket, %Message.Desired{biot_spec: spec}, version)
     end
+  end
+
+  defp desired_messages(node_id, connection_id) do
+    node_id
+    |> Synchronization.behind(connection_id)
+    |> Enum.reduce_while({:ok, []}, fn biot_id, {:ok, messages} ->
+      case Biots.spec(biot_id) do
+        {:ok, spec} -> {:cont, {:ok, [%Message.Desired{biot_spec: spec} | messages]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, messages} -> {:ok, Enum.reverse(messages)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp send_all(socket, messages, version) do
+    Enum.reduce_while(messages, :ok, fn message, :ok ->
+      case send_message(socket, message, version) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp rejection_reason(reason)
@@ -485,13 +526,19 @@ defmodule Biot.Server.Control.Connection do
 
   defp fingerprints_match?(_left, _right), do: false
 
-  defp log_report_error({:error, reason}, node_id, message_kind) do
+  defp log_report_result({:ok, {:ignored, reason}}, node_id, message_kind) do
+    Logger.debug(
+      "node report ignored: node_id=#{inspect(node_id)} message_kind=#{message_kind} reason=#{inspect(reason)}"
+    )
+  end
+
+  defp log_report_result({:error, reason}, node_id, message_kind) do
     Logger.warning(
       "node report failed: node_id=#{inspect(node_id)} message_kind=#{message_kind} reason=#{inspect(reason)}"
     )
   end
 
-  defp log_report_error(_result, _node_id, _message_kind), do: :ok
+  defp log_report_result({:ok, _result}, _node_id, _message_kind), do: :ok
 
   defp close(reason, state) do
     Logger.info("closing node control connection: #{inspect(reason)}")

@@ -100,7 +100,6 @@ defmodule Biot.Node.ControllerPureTest do
           |> then(&Observation.report(spec, &1))
 
         assert report.accepted_revision == 8
-        assert report.applied_access_revision == 13
         assert report.installed_environment_id == installed_environment_id
         assert report.container == reported_container
         assert report.data == reported_data

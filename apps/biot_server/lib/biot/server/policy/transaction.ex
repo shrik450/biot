@@ -10,7 +10,7 @@ defmodule Biot.Server.Policy.Transaction do
   alias Biot.Server.Policy
   alias Biot.Server.Policy.{Applied, Enforcement, Unchanged}
   alias Biot.Server.Repo
-  alias Biot.Server.Schema.{Biot, Observation}
+  alias Biot.Server.Schema.{AccessObservation, Biot}
 
   @type change ::
           :unchanged
@@ -84,14 +84,13 @@ defmodule Biot.Server.Policy.Transaction do
     end
 
     # Enforcement uses committed state because an earlier withdrawal can still be pending.
-    observation = Repo.get(Observation, biot.id)
+    access_observation = Repo.get(AccessObservation, biot.id)
     connection = NodeConnections.current(biot.node_id)
-    freshness = Enforcement.freshness(observation, connection)
 
     result = %{
       biot_id: biot.id,
       access_revision: biot.access_revision,
-      enforcement: Enforcement.access(biot, observation, freshness)
+      enforcement: Enforcement.access(biot, access_observation, connection)
     }
 
     case kind do

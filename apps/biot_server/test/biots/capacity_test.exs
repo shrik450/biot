@@ -5,6 +5,7 @@ defmodule Biot.Server.Biots.CapacityTest do
   alias Biot.Server.Biots
   alias Biot.Server.Biots.Accepted
   alias Biot.Server.Biots.Capacity
+  alias Biot.Server.NodeConnections
   alias Biot.Server.Repo
   alias Biot.Server.Reports
   alias Biot.Server.Schema.Node
@@ -87,6 +88,12 @@ defmodule Biot.Server.Biots.CapacityTest do
   end
 
   defp report(context, biot_id, data) do
+    :ok =
+      NodeConnections.put(context.node.id, %{
+        connection_id: context.connection_id,
+        state: :ready
+      })
+
     assert {:ok, :stored} =
              Reports.observation(
                context.node.id,
@@ -95,8 +102,7 @@ defmodule Biot.Server.Biots.CapacityTest do
                TestFixtures.execution_report(
                  accepted_revision: 2,
                  container: :absent,
-                 data: data,
-                 applied_access_revision: 2
+                 data: data
                )
              )
   end

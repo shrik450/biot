@@ -22,8 +22,8 @@ This app owns shared parsed values and wire codecs.
 
 ### Protocol layer
 
-- `Message.*` defines the protocol message structs.
-- `Wire` provides a versioned, strict JSON codec with table-driven dispatch.
+- `Message.*` defines the protocol message structs. Version 1 uses `SynchronizeBegin(connection_id, count)`, `SynchronizeItem(biot_spec)`, `SynchronizeEnd(connection_id)`, and `AccessApplied(biot_id, access_revision)`.
+- `Wire` provides a versioned, strict JSON codec with table-driven dispatch. It enforces the 256 KiB version 1 `BiotSpec` bound on encode and decode with `:biot_spec_too_large`. It measures the envelope of every spec-carrying message. It owns `min_frame_bytes/1` and `check_frame_limit!/1`. Both applications call the frame check at boot.
 - `Frame` encodes and incrementally decodes length-prefixed frames.
 - `Version` selects the highest protocol version shared by both peers.
 - `Liveness` matches heartbeat responses.
@@ -32,6 +32,7 @@ This app owns shared parsed values and wire codecs.
 - `Certificates` and `mix biot.gen.certs` write deployment certificates and keys.
   The task writes CA, server, and node certificates, keys with mode 0600, and `fingerprints.json`.
 - `OrphanedAllocation` represents node allocations absent from server intent.
+- `Limits` owns the versioned spec bound and the shared component limits. Version 1 allows a 256 KiB spec, a 2,048-byte repository URL, a 256-byte source ref, a 1,024-byte relative directory, and 16 layers.
 
 ### Value modules
 
@@ -56,6 +57,8 @@ This app owns shared parsed values and wire codecs.
 - **Other parsed values:** `Hostname` represents a lowercase DNS label.
 - **Other parsed values:** `Port` represents a valid user-facing TCP port.
 - **Other parsed values:** `RelativeDirectory` represents a safe relative checkout directory.
+
+`RepositorySource`, `SourceSelector`, `RelativeDirectory`, and `EnvironmentSelection` enforce the shared limits. They return `:repository_url_too_long`, `:source_ref_too_long`, `:directory_too_long`, and `:too_many_layers` for those bound violations. `EnvironmentSelection` passes through component parser reasons.
 
 Parsed values share `parse/1`, which returns `{:ok, t} | {:error, atom}`.
 Their `to_string/1` output round-trips through `parse/1`.
@@ -103,7 +106,7 @@ A new status cannot compile until all six functions answer it.
 - `Biots.Capacity.room?/2` admits creation, and `counts/2` projects capacity held on assigned nodes. Together they define which Biots still hold capacity.
 - `Operations` owns operation queries.
 - `Operations.Completion` provides pure completion evidence. `:create` and `:update_environment` use one clause set for each desired state.
-- `Reports` handles node-facing ingestion through `observation`, `resolution`, and `node_observation`.
+- `Reports` handles node-facing ingestion through `observation`, `access_applied`, `resolution`, and `node_observation`.
 - `Queries.Biots.get/2` and `list/2` build owner and collaborator `BiotView` values. `Access.readable/2` supplies their single read rule. `PublicationView.visible/2` limits collaborator publications to their view grants.
 - `Queries.Nodes.list/1` and `Queries.NodeView` build the node inventory with capacity counts, live connections, and latest orphan reports.
 - `Queries.Deployment.get/1` returns the publication and SSH settings in `DeploymentView`.
@@ -146,19 +149,19 @@ for the same Biot and port.
 `Policy.Transaction` owns the immediate transaction around each mutation. It
 loads the Biot, authorizes the actor, checks that the Biot is not destroyed,
 executes the callback's writes, bumps the access revision on withdrawal, wakes
-the node after a withdrawal, reads enforcement from committed observation and
-connection state, and builds the result.
+the node after a withdrawal, reads enforcement from `AccessObservation` and
+live connection state, and builds the result.
 
 Policy callbacks receive the transaction's repository and Biot. They return
 `:unchanged`, `{:added, multi}`, or `{:withdrawn, multi}`. Additions keep the
 current revision and do not wake the node. Withdrawals add one revision and wake
 the assigned node.
 
-`Policy.Enforcement.freshness/2` compares an observation's connection with the
-node's current connection. `access/3` reports `:applied` only for a current
-observation that has caught up to the Biot's access revision. Otherwise it
-reports `{:pending, node_id}`. `Policy.Enforcement` supplies this same result to
-policy commands and `Queries.BiotView`.
+`Schema.AccessObservation` stores the latest access revision accepted by a node
+connection. `Policy.Enforcement.access/3` reads that row and the live connection.
+It reports `:applied` only for the current connection when the row has caught up
+to the Biot's access revision. Otherwise it reports `{:pending, node_id}`.
+`Policy.Enforcement` supplies this result to policy commands and `Queries.BiotView`.
 
 #### Hostnames and projections
 
@@ -187,18 +190,25 @@ transaction.
 
 - `Control.Listener` accepts mutually authenticated TLS node connections.
 - `Control.Connection` owns one process per node connection.
-  It handles hello, synchronize, ready, wake, desired sweeps, reports, heartbeats,
-  and diagnostics.
+  It handles hello, snapshot synchronization, ready, wake, desired sweeps, reports,
+  heartbeats, and diagnostics.
   It sends `registration_abandoned` when an abandoned node attempts a connection.
-  `Synchronize` carries the full set, so ready sends no desired message. The connection
-  schedules its first sweep one `desired_sweep_interval_ms` after ready and reschedules
-  after each sweep. Wakes during synchronization are dropped because the next sweep
-  repeats the comparison.
+  It sends one snapshot from one `Synchronization.specs/1` list as `SynchronizeBegin`,
+  `SynchronizeItem` messages, and `SynchronizeEnd`. The connection schedules its first
+  sweep one `desired_sweep_interval_ms` after ready and reschedules after each sweep.
+  Wakes during synchronization are dropped because the next sweep repeats the comparison.
 - The server starts the Registry before `Nodes.Startup` and starts the listener after `Nodes.Startup`.
   The Registry enforces newest-wins connection replacement.
-- `Control.Synchronization` builds complete intent sets and finds Biots behind on
-  the current connection. `behind/2` excludes destroyed Biots after cleanup and
-  returns Biots whose intent this connection has not accepted.
+- `Control.Synchronization.behind/2` runs one query. It returns Biots whose desired
+  revision or access revision this connection has not accepted. The sweep resends
+  `desired` for those Biots.
+- `Reports.observation/4` and `Reports.access_applied/4` require the assigned node
+  and the current connection through `NodeConnections.current?/2`. Equal or lower
+  access revisions return `{:ignored, :revision_ahead}`. Reports from an old
+  connection return `{:ignored, :stale_connection}`. The connection logs ignored
+  reports at debug level.
+- `AccessApplied` is accepted during synchronization because the node sends it
+  before `synchronized`.
 - `Diagnostics` authorizes and retrieves bounded node-held diagnostics.
 
 ### Node status and lifecycle
@@ -219,6 +229,8 @@ Those commands still work on a disabled node.
 ### Migrations
 
 Migrations live under `priv/repo/migrations`.
+`20260908000500` creates `Schema.AccessObservation`, which stores the latest
+access revision accepted for each Biot.
 Raw SQL is used only for `biots` and `view_grants`.
 SQLite needs their composite foreign keys inline.
 
@@ -230,8 +242,8 @@ Integration tests hit the real SQLite test database.
 
 Step 10 adds focused server evidence:
 
-- `policy/enforcement_test.exs` proves current-connection freshness and access
-  enforcement for missing, stale, and caught-up observations.
+- `policy/enforcement_test.exs` proves current-connection checks and access
+  enforcement for missing, stale, and caught-up access observations.
 - `queries/publication_view_test.exs` proves role-based publication visibility,
   HTTPS URL projection, port sorting, and empty-list handling.
 - `queries/access_view_test.exs` proves owner projection and deterministic shell
@@ -272,7 +284,7 @@ Step 12 adds lifecycle, access, query, publication, and redelivery evidence:
 - `biots/capacity_test.exs` covers room and counts, including destroyed Biots waiting for release.
 - `biots/create_command_test.exs` property-tests accepted initial states and the running default.
 - `biots/spec_test.exs` covers node-facing specs, selected environments, and access revisions.
-- `control/synchronization_behind_test.exs` covers connection-specific accepted revisions and cleanup exclusion.
+- `control/synchronization_behind_test.exs` covers connection-specific execution and access acceptance, plus cleanup exclusion.
 - `control/synchronization_test.exs` covers the shared inclusion rule for desired state and observed data.
 - `publications/hostname_test.exs` property-tests 128-bit lowercase unpadded base32 allocation.
 - `queries/biots_test.exs` covers readable get and list results, roles, collaborator visibility, pagination, and operation selection.
@@ -457,10 +469,11 @@ unused configured range, while the unique `allocation_uid_start` index closes th
 concurrent-insert race.
 
 `Journal.put_intent/1` upserts one durable `LocalIntent` for a Biot. The control
-connection uses it for an individual desired message. `Journal.replace_intents/1`
-upserts the complete synchronized set in one transaction and deletes local intents
-that the server no longer sends. That deletion stops the controller, leaving any
-allocation for orphan reporting.
+connection sends `access_applied` after that write because the durable write is the
+honest acknowledgement until step 20. `Journal.replace_intents/1` upserts the
+complete staged snapshot in one transaction and deletes local intents that the
+server no longer sends. The connection sends `access_applied` after this write too.
+That deletion stops the controller, leaving any allocation for orphan reporting.
 
 `Biot.Node.DataRootLock` owns a long-lived `flock` port on the data-root lock file.
 `application.ex` always starts `Diagnostics` and `Host.Command.Reaper` first.
@@ -527,8 +540,11 @@ settings are:
 | `controller_start_retry_ms` | `5_000` | `BIOT_NODE_CONTROLLER_START_RETRY_MS` |
 | `diagnostic_max_entries_per_biot` | `5` | `BIOT_NODE_DIAGNOSTIC_MAX_ENTRIES_PER_BIOT` |
 | `diagnostic_max_entry_bytes` | `65_536` | `BIOT_NODE_DIAGNOSTIC_MAX_ENTRY_BYTES` |
+| `max_staged_specs` | `1_000` | `BIOT_NODE_MAX_STAGED_SPECS` |
+| `max_frame_bytes` | `1_000_000` | `BIOT_MAX_FRAME_BYTES` |
 
-`config/runtime.exs` also reads the data root, UID/GID range, executable,
+`max_frame_bytes` is read from application configuration only by the node
+connection. `config/runtime.exs` also reads the data root, UID/GID range, executable,
 connection, heartbeat, reconnect, Nix, Podman, and TLS settings. The listed
 `BIOT_NODE_*` overrides must be positive integers. `Host.Config` validates the
 resulting settings before host setup or effects use them.
@@ -552,14 +568,23 @@ allocation reports to the outbox; `Control.status/0` returns `:ready` or
 `:offline` from the connection's published status.
 
 `Control.Connection` owns the reconnecting mutually authenticated TLS client,
-synchronization, heartbeats, and report delivery. An individual desired message
-uses `Journal.put_intent/1`; a complete synchronization uses
-`Journal.replace_intents/1` before the node acknowledges synchronization. After
-that acknowledgement, the connection starts or pokes controllers, compares
-journal allocations with the synchronized intents, and puts orphan reports in
-the outbox. The application starts this connection only after host configuration,
-the journal, and the controller tree are ready. Linux is required for the node
-control path.
+synchronization, heartbeats, and report delivery. It has one `:synchronizing`
+status with a `Staging` value. `Control.Staging` is pure: `begin/3`, `add/2`, and
+`complete/2` accept a bounded snapshot and return five reasons:
+`:snapshot_count_over_capacity`, `:staged_count_exceeded`, `:duplicate_biot_id`,
+`:synchronize_connection_mismatch`, and `:synchronize_count_mismatch`.
+A desired message during staging also closes the connection with
+`:desired_during_snapshot`. Any snapshot error clears staging before reconnecting.
+The node does not call `Journal.replace_intents/1`, so accepted intent stays
+untouched.
+
+An individual desired message uses `Journal.put_intent/1`; a complete snapshot
+uses `Journal.replace_intents/1`. The node sends `access_applied` after either
+durable write, then hands controller starts to `Controllers` before it sends
+`synchronized`. After that acknowledgement, the connection compares journal
+allocations with synchronized intents and puts orphan reports in the outbox.
+The application starts this connection only after host configuration, the journal,
+and the controller tree are ready. Linux is required for the node control path.
 
 ### Tests
 
@@ -580,6 +605,30 @@ imperative shell:
   `step9_controller_runner.exs` support runner proves lost-response recovery,
   controller startup and retry, cancellation, reconnect behavior, and orphan
   reporting against real resources.
+
+Step 13 adds synchronization, access acknowledgement, size-limit, and snapshot
+staging evidence:
+
+- `control_staging_test.exs` is new. It covers pure snapshot staging success and all five staging reasons.
+- `controller_pure_test.exs` removes access progress from execution-report projections.
+- `control_protocol_test.exs` covers the four new version 1 messages, strict wire errors, and phase and version dispatch.
+- `execution_records_test.exs` covers `ExecutionReport` without `applied_access_revision` and rejects that removed field.
+- `limits_test.exs` is new. It covers parser bounds, exact limit reasons, spec size checks, envelope sizing, and boot frame checks.
+- `parse_robustness_test.exs` covers the new bounded-parser error reasons without parser exceptions.
+- `test_helper.exs` adds generators for maximal execution and Biot specs.
+- `control_protocol_integration_test.exs` covers begin/item/end snapshots, access-only sweeps, access reports during synchronization, and three Linux-only node TLS cases for staging, rejection, and reconnect.
+- `control/synchronization_behind_test.exs` covers execution and access progress for one current connection.
+- `reports_test.exs` covers current-connection checks, access revision monotonicity, stale reports, and separation of execution and access progress.
+- `policy/enforcement_test.exs` covers `AccessObservation` and live-connection enforcement across missing, stale, synchronizing, and caught-up states.
+- `policy_records_test.exs` covers access progress in policy transactions and Biot views.
+- `node_connections_test.exs` covers current connection identity checks.
+- `queries/biot_view_test.exs` covers access observations and live connection state in the Biot view.
+- `queries/biots_test.exs` covers current and stale report connections in Biot reads.
+- `queries/nodes_test.exs` covers report ingestion with the current connection.
+- `biots/capacity_test.exs` covers capacity evidence with current execution reports.
+- `biots/create_test.exs` covers destroyed-Biot capacity release with current reports.
+- `operations/completion_test.exs` updates completion fixtures for the execution-only report.
+- `support/fixtures.ex` separates execution-report and access-observation fixtures.
 
 `docker/linux-host/run-tests.sh` builds or reuses the privileged Linux test image
 and runs the full Mix test suite inside it.

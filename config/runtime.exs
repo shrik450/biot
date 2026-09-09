@@ -165,7 +165,9 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
         heartbeat_interval_ms: node_integer_env.("BIOT_NODE_HEARTBEAT_INTERVAL_MS", 30_000, 1),
         heartbeat_timeout_ms: node_integer_env.("BIOT_NODE_HEARTBEAT_TIMEOUT_MS", 10_000, 1),
         reconnect_backoff_min_ms: node_integer_env.("BIOT_NODE_BACKOFF_MIN_MS", 250, 1),
-        reconnect_backoff_max_ms: node_integer_env.("BIOT_NODE_BACKOFF_MAX_MS", 30_000, 1)
+        reconnect_backoff_max_ms: node_integer_env.("BIOT_NODE_BACKOFF_MAX_MS", 30_000, 1),
+        max_frame_bytes: node_integer_env.("BIOT_MAX_FRAME_BYTES", 1_000_000, 1),
+        max_staged_specs: node_integer_env.("BIOT_NODE_MAX_STAGED_SPECS", 1_000, 1)
 
     {:error, _reason} ->
       raise "BIOT_NODE_REGISTRATION_ID must be a canonical UUID"

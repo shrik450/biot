@@ -5,11 +5,13 @@ defmodule Biot.Protocol.TestGenerators do
   import StreamData
 
   alias Biot.Protocol.BiotId
+  alias Biot.Protocol.BiotSpec
   alias Biot.Protocol.ConnectionId
   alias Biot.Protocol.Desired
   alias Biot.Protocol.Digest
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.EnvironmentSelection
+  alias Biot.Protocol.ExecutionSpec
   alias Biot.Protocol.Failure
   alias Biot.Protocol.Hostname
   alias Biot.Protocol.IncarnationId
@@ -196,6 +198,28 @@ defmodule Biot.Protocol.TestGenerators do
           environment_id <- environment_id()
         ) do
       %Desired{revision: revision, state: state, environment_id: environment_id}
+    end
+  end
+
+  def execution_spec do
+    gen all(
+          biot_id <- biot_id(),
+          repository <- repository_source(),
+          desired <- desired(),
+          selection <- environment_selection()
+        ) do
+      %ExecutionSpec{
+        biot_id: biot_id,
+        repository: repository,
+        desired: desired,
+        environment: %{id: desired.environment_id, selection: selection}
+      }
+    end
+  end
+
+  def biot_spec do
+    gen all(execution <- execution_spec(), access_revision <- positive_integer()) do
+      %BiotSpec{execution: execution, access_revision: access_revision}
     end
   end
 

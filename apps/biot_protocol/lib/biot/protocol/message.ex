@@ -47,17 +47,33 @@ defmodule Biot.Protocol.Message.Reject do
   def reasons, do: @reasons
 end
 
-defmodule Biot.Protocol.Message.Synchronize do
-  @moduledoc "Carries the complete server intent set for a node connection."
-  @enforce_keys [:connection_id, :biot_specs]
-  defstruct [:connection_id, :biot_specs]
+defmodule Biot.Protocol.Message.SynchronizeBegin do
+  @moduledoc "Starts one bounded server intent snapshot."
+  @enforce_keys [:connection_id, :count]
+  defstruct [:connection_id, :count]
 
   @type t :: %__MODULE__{
           connection_id: Biot.Protocol.ConnectionId.t(),
-          biot_specs: [Biot.Protocol.BiotSpec.t()]
+          count: non_neg_integer()
         }
 
-  def type, do: "synchronize"
+  def type, do: "synchronize_begin"
+end
+
+defmodule Biot.Protocol.Message.SynchronizeItem do
+  @moduledoc "Carries one item in a server intent snapshot."
+  @enforce_keys [:biot_spec]
+  defstruct [:biot_spec]
+  @type t :: %__MODULE__{biot_spec: Biot.Protocol.BiotSpec.t()}
+  def type, do: "synchronize_item"
+end
+
+defmodule Biot.Protocol.Message.SynchronizeEnd do
+  @moduledoc "Ends one server intent snapshot."
+  @enforce_keys [:connection_id]
+  defstruct [:connection_id]
+  @type t :: %__MODULE__{connection_id: Biot.Protocol.ConnectionId.t()}
+  def type, do: "synchronize_end"
 end
 
 defmodule Biot.Protocol.Message.Desired do
@@ -102,6 +118,19 @@ defmodule Biot.Protocol.Message.Observation do
         }
 
   def type, do: "observation"
+end
+
+defmodule Biot.Protocol.Message.AccessApplied do
+  @moduledoc "Reports the access revision applied for one biot."
+  @enforce_keys [:biot_id, :access_revision]
+  defstruct [:biot_id, :access_revision]
+
+  @type t :: %__MODULE__{
+          biot_id: Biot.Protocol.BiotId.t(),
+          access_revision: pos_integer()
+        }
+
+  def type, do: "access_applied"
 end
 
 defmodule Biot.Protocol.Message.Resolution do

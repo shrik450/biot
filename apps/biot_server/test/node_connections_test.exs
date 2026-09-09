@@ -8,18 +8,25 @@ defmodule Biot.Server.NodeConnectionsTest do
   @node_uuid "b0000000-0000-4000-8000-00000000000b"
   @other_node_uuid "c0000000-0000-4000-8000-00000000000c"
   @connection_uuid "d0000000-0000-4000-8000-00000000000d"
+  @other_connection_uuid "e0000000-0000-4000-8000-00000000000e"
 
   setup do
     {:ok, node_id} = NodeId.parse(@node_uuid)
     {:ok, other_node_id} = NodeId.parse(@other_node_uuid)
     {:ok, connection_id} = ConnectionId.parse(@connection_uuid)
+    {:ok, other_connection_id} = ConnectionId.parse(@other_connection_uuid)
 
     on_exit(fn ->
       NodeConnections.delete(node_id)
       NodeConnections.delete(other_node_id)
     end)
 
-    %{node_id: node_id, other_node_id: other_node_id, connection_id: connection_id}
+    %{
+      node_id: node_id,
+      other_node_id: other_node_id,
+      connection_id: connection_id,
+      other_connection_id: other_connection_id
+    }
   end
 
   test "a node with no connection has none", context do
@@ -54,6 +61,15 @@ defmodule Biot.Server.NodeConnectionsTest do
 
     task = Task.async(fn -> NodeConnections.current(context.node_id) end)
     assert Task.await(task) == connection
+  end
+
+  test "current? compares an observation connection with the current connection", context do
+    current = %{connection_id: context.connection_id, state: :ready}
+
+    assert NodeConnections.current?(context.connection_id, current)
+    refute NodeConnections.current?(context.other_connection_id, current)
+    refute NodeConnections.current?(context.connection_id, nil)
+    refute NodeConnections.current?(nil, current)
   end
 
   test "a connection state outside the closed set is rejected", context do

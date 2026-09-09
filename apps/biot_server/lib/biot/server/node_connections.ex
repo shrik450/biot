@@ -38,6 +38,10 @@ defmodule Biot.Server.NodeConnections do
     end
   end
 
+  @spec current?(ConnectionId.t() | nil, connection() | nil) :: boolean()
+  def current?(%ConnectionId{} = id, %{connection_id: %ConnectionId{} = id}), do: true
+  def current?(_connection_id, _connection), do: false
+
   @impl true
   def init(:ok) do
     __MODULE__ = :ets.new(__MODULE__, [:named_table, :set, :protected, read_concurrency: true])

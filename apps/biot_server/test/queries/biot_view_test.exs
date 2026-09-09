@@ -11,6 +11,7 @@ defmodule Biot.Server.Queries.BiotViewTest do
   alias Biot.Server.Queries.BiotView
   alias Biot.Server.Queries.BiotView.Input
   alias Biot.Server.Queries.OperationView
+  alias Biot.Server.Schema.AccessObservation
   alias Biot.Server.Schema.Biot, as: BiotRow
   alias Biot.Server.Schema.Node
   alias Biot.Server.Schema.Observation
@@ -182,11 +183,8 @@ defmodule Biot.Server.Queries.BiotViewTest do
       view =
         BiotView.project(
           input(context, %{
-            observation:
-              observation(context, %{
-                connection_id: observed_connection,
-                applied_access_revision: applied_access_revision
-              })
+            access_observation:
+              access_observation(context, observed_connection, applied_access_revision)
           })
         )
 
@@ -200,7 +198,7 @@ defmodule Biot.Server.Queries.BiotViewTest do
   end
 
   test "a biot that never reported has pending access enforcement", context do
-    view = BiotView.project(input(context, %{observation: nil}))
+    view = BiotView.project(input(context, %{access_observation: nil}))
 
     assert view.access == %{revision: 2, enforcement: {:pending, context.node_id}}
   end
@@ -209,6 +207,7 @@ defmodule Biot.Server.Queries.BiotViewTest do
     defaults = %{
       biot: context.biot,
       observation: observation(context, %{}),
+      access_observation: access_observation(context, context.live_connection, 2),
       node: context.node,
       operation: nil,
       connection: %{connection_id: context.live_connection, state: :ready},
@@ -228,10 +227,17 @@ defmodule Biot.Server.Queries.BiotViewTest do
       installed_environment_id: context.environment_id,
       container: :unknown,
       data: :present,
-      failure: nil,
-      applied_access_revision: 2
+      failure: nil
     }
 
     struct!(Observation, Map.merge(defaults, overrides))
+  end
+
+  defp access_observation(context, connection_id, revision) do
+    %AccessObservation{
+      biot_id: context.biot.id,
+      connection_id: connection_id,
+      applied_access_revision: revision
+    }
   end
 end

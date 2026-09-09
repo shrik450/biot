@@ -24,6 +24,7 @@ defmodule Biot.Server.TestFixtures do
   alias Biot.Server.Biots.Create
   alias Biot.Server.Nodes.Registration
   alias Biot.Server.Repo
+  alias Biot.Server.Schema.AccessObservation
   alias Biot.Server.Schema.Biot, as: BiotSchema
   alias Biot.Server.Schema.Environment
   alias Biot.Server.Schema.Node
@@ -117,7 +118,14 @@ defmodule Biot.Server.TestFixtures do
       installed_environment_id: Keyword.get(opts, :installed_environment_id),
       container: Keyword.get(opts, :container, :unknown),
       data: Keyword.get(opts, :data, :unknown),
-      failure: Keyword.get(opts, :failure),
+      failure: Keyword.get(opts, :failure)
+    })
+  end
+
+  def access_observation(biot, number, opts \\ []) do
+    Repo.insert!(%AccessObservation{
+      biot_id: biot.id,
+      connection_id: Keyword.get(opts, :connection_id, id(ConnectionId, number + 5_000)),
       applied_access_revision: Keyword.get(opts, :applied_access_revision, 1)
     })
   end
@@ -156,8 +164,7 @@ defmodule Biot.Server.TestFixtures do
       installed_environment_id: Keyword.get(opts, :installed_environment_id),
       container: Keyword.get(opts, :container, :unknown),
       data: Keyword.get(opts, :data, :unknown),
-      failure: Keyword.get(opts, :failure),
-      applied_access_revision: Keyword.get(opts, :applied_access_revision, 1)
+      failure: Keyword.get(opts, :failure)
     }
   end
 

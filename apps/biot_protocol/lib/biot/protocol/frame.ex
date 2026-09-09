@@ -7,6 +7,9 @@ defmodule Biot.Protocol.Frame do
     [<<size::unsigned-big-32>>, data]
   end
 
+  @spec overhead_bytes() :: pos_integer()
+  def overhead_bytes, do: encode([]) |> IO.iodata_length()
+
   @spec decode(binary(), pos_integer()) ::
           {:ok, [binary()], binary()} | {:error, {:frame_too_large, non_neg_integer()}}
   def decode(buffer, max_frame_bytes) when is_binary(buffer) and max_frame_bytes > 0 do

@@ -3,8 +3,12 @@ defmodule Biot.Server.Application do
 
   use Application
 
+  alias Biot.Protocol.Wire
+
   @impl true
   def start(_type, _args) do
+    Wire.check_frame_limit!(Application.fetch_env!(:biot_server, :max_frame_bytes))
+
     children = [
       Biot.Server.Repo,
       {Phoenix.PubSub, name: Biot.Server.PubSub},

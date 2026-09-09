@@ -40,8 +40,7 @@ defmodule Biot.Node.Observation do
       installed_environment_id: installed_environment_id(state.installation),
       container: container(state.container),
       data: data(state.data),
-      failure: state.failure,
-      applied_access_revision: spec.access_revision
+      failure: state.failure
     }
   end
 

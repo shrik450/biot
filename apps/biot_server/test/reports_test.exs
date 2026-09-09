@@ -10,8 +10,10 @@ defmodule Biot.Server.ReportsTest do
   alias Biot.Server.Biots
   alias Biot.Server.Biots.Accepted
   alias Biot.Server.Biots.SelectEnvironment
+  alias Biot.Server.NodeConnections
   alias Biot.Server.Repo
   alias Biot.Server.Reports
+  alias Biot.Server.Schema.AccessObservation
   alias Biot.Server.Schema.Biot, as: BiotRow
   alias Biot.Server.Schema.Environment
   alias Biot.Server.Schema.NodeObservation
@@ -28,12 +30,16 @@ defmodule Biot.Server.ReportsTest do
     {:ok, %Accepted{}} =
       Biots.create(actor, biot_id, TestFixtures.create_command(node_id: node.id))
 
+    connection_id = TestFixtures.connection_id(1)
+    :ok = NodeConnections.put(node.id, %{connection_id: connection_id, state: :ready})
+    on_exit(fn -> NodeConnections.delete(node.id) end)
+
     %{
       owner: owner,
       actor: actor,
       node: node,
       biot_id: biot_id,
-      connection_id: TestFixtures.connection_id(1)
+      connection_id: connection_id
     }
   end
 
@@ -63,14 +69,15 @@ defmodule Biot.Server.ReportsTest do
       TestFixtures.execution_report(
         accepted_revision: 1,
         container: :absent,
-        data: :uninitialized,
-        applied_access_revision: 1
+        data: :uninitialized
       )
 
     later_connection = TestFixtures.connection_id(2)
 
     assert {:ok, :stored} =
              Reports.observation(context.node.id, context.connection_id, context.biot_id, first)
+
+    :ok = NodeConnections.put(context.node.id, %{connection_id: later_connection, state: :ready})
 
     assert {:ok, :stored} =
              Reports.observation(context.node.id, later_connection, context.biot_id, second)
@@ -87,10 +94,86 @@ defmodule Biot.Server.ReportsTest do
     report = TestFixtures.execution_report(accepted_revision: 2)
 
     assert Reports.observation(context.node.id, context.connection_id, context.biot_id, report) ==
-             {:ok, :ignored}
+             {:ok, {:ignored, :revision_ahead}}
 
     refute Repo.exists?(from(o in Observation, where: o.biot_id == ^context.biot_id))
     assert operation(context.biot_id, 1).outcome == :pending
+  end
+
+  test "access progress never decreases within a connection and a new connection replaces it",
+       context do
+    assert {:ok, :stored} =
+             Reports.access_applied(context.node.id, context.connection_id, context.biot_id, 3)
+
+    assert %AccessObservation{
+             connection_id: connection_id,
+             applied_access_revision: 3
+           } = Repo.get!(AccessObservation, context.biot_id)
+
+    assert connection_id == context.connection_id
+
+    for revision <- [3, 2] do
+      assert Reports.access_applied(
+               context.node.id,
+               context.connection_id,
+               context.biot_id,
+               revision
+             ) == {:ok, {:ignored, :revision_ahead}}
+
+      assert Repo.get!(AccessObservation, context.biot_id).applied_access_revision == 3
+    end
+
+    replacement = TestFixtures.connection_id(2)
+    :ok = NodeConnections.put(context.node.id, %{connection_id: replacement, state: :ready})
+
+    assert {:ok, :stored} =
+             Reports.access_applied(context.node.id, replacement, context.biot_id, 1)
+
+    assert %AccessObservation{connection_id: ^replacement, applied_access_revision: 1} =
+             Repo.get!(AccessObservation, context.biot_id)
+
+    assert Reports.access_applied(context.node.id, context.connection_id, context.biot_id, 4) ==
+             {:ok, {:ignored, :stale_connection}}
+
+    assert Repo.get!(AccessObservation, context.biot_id).connection_id == replacement
+  end
+
+  test "observation ignores stale connections and stores from the current connection", context do
+    stale = TestFixtures.connection_id(2)
+    report = TestFixtures.execution_report()
+
+    assert Reports.observation(context.node.id, stale, context.biot_id, report) ==
+             {:ok, {:ignored, :stale_connection}}
+
+    assert Repo.get(Observation, context.biot_id) == nil
+
+    assert Reports.observation(
+             context.node.id,
+             context.connection_id,
+             context.biot_id,
+             report
+           ) == {:ok, :stored}
+
+    assert Repo.get!(Observation, context.biot_id).connection_id == context.connection_id
+  end
+
+  test "an execution report never changes access progress", context do
+    assert {:ok, :stored} =
+             Reports.access_applied(context.node.id, context.connection_id, context.biot_id, 2)
+
+    before = Repo.get!(AccessObservation, context.biot_id)
+
+    assert {:ok, :stored} =
+             Reports.observation(
+               context.node.id,
+               context.connection_id,
+               context.biot_id,
+               TestFixtures.execution_report()
+             )
+
+    after_report = Repo.get!(AccessObservation, context.biot_id)
+    assert after_report.connection_id == before.connection_id
+    assert after_report.applied_access_revision == before.applied_access_revision
   end
 
   test "the completion evidence table decides each kind through the transaction", context do

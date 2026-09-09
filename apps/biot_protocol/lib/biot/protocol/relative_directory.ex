@@ -1,16 +1,23 @@
 defmodule Biot.Protocol.RelativeDirectory do
   @moduledoc "A non-empty relative directory inside a checkout. Its value rejects `.` and `..` segments."
 
+  alias Biot.Protocol.Limits
+
   @enforce_keys [:path]
   defstruct [:path]
 
   @type t :: %__MODULE__{path: String.t()}
 
-  @spec parse(term()) :: {:ok, t()} | {:error, :invalid_format | :absolute_path | :parent_segment}
+  @spec parse(term()) ::
+          {:ok, t()}
+          | {:error, :invalid_format | :absolute_path | :parent_segment | :directory_too_long}
   def parse(value) when is_binary(value) do
     segments = String.split(value, "/", trim: false)
 
     cond do
+      byte_size(value) > Limits.max_relative_directory_bytes() ->
+        {:error, :directory_too_long}
+
       invalid_value?(value) ->
         {:error, :invalid_format}
 

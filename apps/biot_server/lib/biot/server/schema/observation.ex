@@ -23,7 +23,6 @@ defmodule Biot.Server.Schema.Observation do
     field(:data, Ecto.Enum, values: ExecutionReport.data_states())
 
     field(:failure, ObservationFailure)
-    field(:applied_access_revision, :integer)
 
     timestamps(type: :utc_datetime_usec)
   end

@@ -12,6 +12,7 @@ defmodule Biot.Node.Control.Connection do
 
   alias Biot.Node.Control
   alias Biot.Node.Control.Outbox
+  alias Biot.Node.Control.Staging
   alias Biot.Node.Controllers
   alias Biot.Node.Diagnostics
   alias Biot.Node.Journal
@@ -27,26 +28,37 @@ defmodule Biot.Node.Control.Connection do
   alias Biot.Protocol.Wire
 
   defmodule State do
-    @moduledoc false
-    defstruct status: :disconnected,
-              socket: nil,
-              buffer: <<>>,
-              version: nil,
-              connection_id: nil,
-              heartbeat_challenge: nil,
-              reconnect_token: nil,
-              backoff_ms: 250,
-              server_host: nil,
-              server_port: nil,
-              server_fingerprint: nil,
-              registration_id: nil,
-              platform: nil,
-              tls: nil,
-              max_frame_bytes: 1_000_000,
-              heartbeat_interval_ms: 30_000,
-              heartbeat_timeout_ms: 10_000,
-              backoff_min_ms: 250,
-              backoff_max_ms: 30_000
+    @moduledoc """
+    Holds one control link state.
+
+    `:disconnected` accepts reconnect timers. `:handshake` accepts `connected` or `reject`.
+    `:synchronizing` accepts snapshot messages and heartbeats. A staged snapshot accepts only
+    items, its matching end, and heartbeats. `:ready` accepts desired intent, diagnostics, and
+    heartbeats.
+    """
+    defstruct [
+      :max_frame_bytes,
+      :max_staged_specs,
+      status: :disconnected,
+      socket: nil,
+      buffer: <<>>,
+      version: nil,
+      connection_id: nil,
+      staging: nil,
+      heartbeat_challenge: nil,
+      reconnect_token: nil,
+      backoff_ms: 250,
+      server_host: nil,
+      server_port: nil,
+      server_fingerprint: nil,
+      registration_id: nil,
+      platform: nil,
+      tls: nil,
+      heartbeat_interval_ms: 30_000,
+      heartbeat_timeout_ms: 10_000,
+      backoff_min_ms: 250,
+      backoff_max_ms: 30_000
+    ]
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -120,12 +132,7 @@ defmodule Biot.Node.Control.Connection do
 
   def handle_info({:reconnect, _token}, state), do: {:noreply, state}
 
-  # Announcing runs after the link is ready so that every controller's first report has somewhere
-  # to go, and the drain then sends what the controllers and the orphan report just wrote, plus
-  # anything the outbox held while the link was down.
-  def handle_info({:announce, biot_ids}, %State{status: :ready} = state) do
-    warn_missing_controller(Controllers.synchronized(biot_ids))
-
+  def handle_info({:announce, _biot_ids}, %State{status: :ready} = state) do
     :ok =
       Control.report_node_observation(Orphans.detect(Journal.allocations(), Journal.intents()))
 
@@ -249,7 +256,14 @@ defmodule Biot.Node.Control.Connection do
        ) do
     if version in Version.supported() do
       Process.send_after(self(), {:send_heartbeat, state.socket}, state.heartbeat_interval_ms)
-      %{state | status: :synchronizing, connection_id: connection_id, version: version}
+
+      %{
+        state
+        | status: :synchronizing,
+          connection_id: connection_id,
+          version: version,
+          staging: nil
+      }
     else
       disconnect(state, :unsupported_protocol_version)
     end
@@ -260,29 +274,47 @@ defmodule Biot.Node.Control.Connection do
   end
 
   defp handle_message(
-         %Message.Synchronize{connection_id: connection_id, biot_specs: specs},
-         %State{status: :synchronizing, connection_id: connection_id} = state
+         %Message.SynchronizeBegin{connection_id: connection_id, count: count},
+         %State{status: :synchronizing, connection_id: connection_id, staging: nil} = state
        ) do
-    :ok = Journal.replace_intents(specs)
-
-    case send_message(
-           state.socket,
-           %Message.Synchronized{connection_id: connection_id},
-           state.version
-         ) do
-      :ok ->
-        send(self(), {:announce, Enum.map(specs, & &1.execution.biot_id)})
-        publish(%{state | status: :ready, backoff_ms: state.backoff_min_ms})
-
-      {:error, reason} ->
-        disconnect(state, reason)
+    case Staging.begin(connection_id, count, state.max_staged_specs) do
+      {:ok, staging} -> %{state | staging: staging}
+      {:error, reason} -> disconnect(state, reason)
     end
   end
 
+  defp handle_message(
+         %Message.SynchronizeItem{biot_spec: spec},
+         %State{status: :synchronizing, staging: %Staging{} = staging} = state
+       ) do
+    case Staging.add(staging, spec) do
+      {:ok, staging} -> %{state | staging: staging}
+      {:error, reason} -> disconnect(state, reason)
+    end
+  end
+
+  defp handle_message(
+         %Message.SynchronizeEnd{connection_id: connection_id},
+         %State{status: :synchronizing, staging: %Staging{} = staging} = state
+       ) do
+    case Staging.complete(staging, connection_id) do
+      {:ok, specs} -> commit_synchronization(specs, state)
+      {:error, reason} -> disconnect(state, reason)
+    end
+  end
+
+  defp handle_message(
+         %Message.Desired{},
+         %State{staging: %Staging{}} = state
+       ) do
+    disconnect(state, :desired_during_snapshot)
+  end
+
   defp handle_message(%Message.Desired{biot_spec: spec}, %State{status: :ready} = state) do
-    {:ok, _intent} = Journal.put_intent(spec)
-    warn_missing_controller(Controllers.intent_changed(spec.execution.biot_id))
-    state
+    case Journal.put_intent(spec) do
+      {:ok, _intent} -> acknowledge_desired(spec, state)
+      {:error, reason} -> disconnect(state, reason)
+    end
   end
 
   defp handle_message(%Message.Diagnostic{} = request, %State{status: :ready} = state) do
@@ -300,7 +332,11 @@ defmodule Biot.Node.Control.Connection do
     end
   end
 
-  defp handle_message(%Message.Heartbeat{challenge: challenge}, state) do
+  defp handle_message(
+         %Message.Heartbeat{challenge: challenge},
+         %State{status: status} = state
+       )
+       when status in [:synchronizing, :ready] do
     case send_message(
            state.socket,
            %Message.HeartbeatResponse{challenge: challenge},
@@ -311,7 +347,11 @@ defmodule Biot.Node.Control.Connection do
     end
   end
 
-  defp handle_message(%Message.HeartbeatResponse{challenge: response}, state) do
+  defp handle_message(
+         %Message.HeartbeatResponse{challenge: response},
+         %State{status: status} = state
+       )
+       when status in [:synchronizing, :ready] do
     if Liveness.response_matches?(state.heartbeat_challenge, response),
       do: %{state | heartbeat_challenge: nil},
       else: state
@@ -319,18 +359,67 @@ defmodule Biot.Node.Control.Connection do
 
   defp handle_message(_message, state), do: disconnect(state, :unexpected_message)
 
+  defp commit_synchronization(specs, state) do
+    case Journal.replace_intents(specs) do
+      :ok -> acknowledge_synchronization(specs, state)
+      {:error, reason} -> disconnect(state, reason)
+    end
+  end
+
+  defp acknowledge_synchronization(specs, state) do
+    case send_access_applied(specs, state) do
+      :ok -> finish_synchronization(specs, state)
+      {:error, reason} -> disconnect(state, reason)
+    end
+  end
+
+  defp finish_synchronization(specs, state) do
+    biot_ids = Enum.map(specs, & &1.execution.biot_id)
+    warn_missing_controller(Controllers.synchronized(biot_ids))
+
+    case send_message(
+           state.socket,
+           %Message.Synchronized{connection_id: state.connection_id},
+           state.version
+         ) do
+      :ok ->
+        send(self(), {:announce, biot_ids})
+
+        publish(%{
+          state
+          | status: :ready,
+            staging: nil,
+            backoff_ms: state.backoff_min_ms
+        })
+
+      {:error, reason} ->
+        disconnect(state, reason)
+    end
+  end
+
+  defp acknowledge_desired(spec, state) do
+    case send_access_applied([spec], state) do
+      :ok ->
+        warn_missing_controller(Controllers.intent_changed(spec.execution.biot_id))
+        state
+
+      {:error, reason} ->
+        disconnect(state, reason)
+    end
+  end
+
   defp activate(%State{socket: nil}), do: :ok
   defp activate(%State{socket: socket}), do: :ssl.setopts(socket, active: :once)
 
   # A failed send loses the reports this drain took. That costs nothing: the reconnect
   # synchronizes, which pokes every controller into reporting what it inspects then.
   defp drain(%State{} = state) do
-    Enum.reduce_while(Outbox.drain(), state, fn report, state ->
-      case send_message(state.socket, report_message(report), state.version) do
-        :ok -> {:cont, state}
-        {:error, reason} -> {:halt, disconnect(state, reason)}
-      end
-    end)
+    messages = Enum.map(Outbox.drain(), &report_message/1)
+
+    case send_all(state.socket, messages, state.version) do
+      :ok -> state
+      {:error, reason} -> disconnect(state, reason)
+    end
   end
 
   # Durable intent without a live controller is a node fault, not a link fault. The controller's
@@ -360,6 +449,7 @@ defmodule Biot.Node.Control.Connection do
         buffer: <<>>,
         version: nil,
         connection_id: nil,
+        staging: nil,
         heartbeat_challenge: nil,
         reconnect_token: token,
         backoff_ms: min(state.backoff_ms * 2, state.backoff_max_ms)
@@ -394,7 +484,8 @@ defmodule Biot.Node.Control.Connection do
       server_fingerprint: option(options, :server_fingerprint, nil),
       registration_id: registration_id(option(options, :registration_id, nil)),
       tls: option(options, :tls, nil),
-      max_frame_bytes: option(options, :max_frame_bytes, 1_000_000),
+      max_frame_bytes: Application.fetch_env!(:biot_node, :max_frame_bytes),
+      max_staged_specs: Application.fetch_env!(:biot_node, :max_staged_specs),
       heartbeat_interval_ms: option(options, :heartbeat_interval_ms, 30_000),
       heartbeat_timeout_ms: option(options, :heartbeat_timeout_ms, 10_000),
       backoff_min_ms: backoff_min,
@@ -453,6 +544,28 @@ defmodule Biot.Node.Control.Connection do
     with {:ok, encoded} <- Wire.encode(message, version) do
       :ssl.send(socket, Frame.encode(encoded))
     end
+  end
+
+  defp send_access_applied(specs, state) do
+    # The durable journal write is the honest acknowledgement until step 20 owns stream revisions.
+    messages =
+      Enum.map(specs, fn spec ->
+        %Message.AccessApplied{
+          biot_id: spec.execution.biot_id,
+          access_revision: spec.access_revision
+        }
+      end)
+
+    send_all(state.socket, messages, state.version)
+  end
+
+  defp send_all(socket, messages, version) do
+    Enum.reduce_while(messages, :ok, fn message, :ok ->
+      case send_message(socket, message, version) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp random_token, do: :crypto.strong_rand_bytes(16) |> Base.url_encode64(padding: false)

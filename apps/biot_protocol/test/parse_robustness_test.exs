@@ -18,9 +18,12 @@ defmodule Biot.Protocol.ParseRobustnessTest do
     {Biot.Protocol.Digest, [:invalid_format]},
     {Biot.Protocol.Hostname, [:invalid_format]},
     {Biot.Protocol.Port, [:invalid_format, :out_of_range]},
-    {Biot.Protocol.RelativeDirectory, [:invalid_format, :absolute_path, :parent_segment]},
-    {Biot.Protocol.RepositorySource, [:invalid_format, :embedded_credentials]},
-    {Biot.Protocol.SourceSelector, [:invalid_format, :embedded_credentials]},
+    {Biot.Protocol.RelativeDirectory,
+     [:invalid_format, :absolute_path, :parent_segment, :directory_too_long]},
+    {Biot.Protocol.RepositorySource,
+     [:invalid_format, :embedded_credentials, :repository_url_too_long]},
+    {Biot.Protocol.SourceSelector,
+     [:invalid_format, :embedded_credentials, :repository_url_too_long, :source_ref_too_long]},
     {Biot.Protocol.PinnedSource, [:invalid_format, :embedded_credentials]}
   ]
 

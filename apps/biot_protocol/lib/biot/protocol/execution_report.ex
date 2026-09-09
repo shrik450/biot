@@ -12,8 +12,7 @@ defmodule Biot.Protocol.ExecutionReport do
     "installed_environment_id",
     "container",
     "data",
-    "failure",
-    "applied_access_revision"
+    "failure"
   ]
   @present_container_fields ["state", "incarnation_id", "container_state"]
   @reported_failure_fields ["target_revision", "failure"]
@@ -29,16 +28,14 @@ defmodule Biot.Protocol.ExecutionReport do
     :installed_environment_id,
     :container,
     :data,
-    :failure,
-    :applied_access_revision
+    :failure
   ]
   defstruct [
     :accepted_revision,
     :installed_environment_id,
     :container,
     :data,
-    :failure,
-    :applied_access_revision
+    :failure
   ]
 
   @type t :: %__MODULE__{
@@ -46,8 +43,7 @@ defmodule Biot.Protocol.ExecutionReport do
           installed_environment_id: EnvironmentId.t() | nil,
           container: container(),
           data: data_state(),
-          failure: reported_failure(),
-          applied_access_revision: pos_integer()
+          failure: reported_failure()
         }
 
   @spec data_states() :: [data_state()]
@@ -60,8 +56,7 @@ defmodule Biot.Protocol.ExecutionReport do
       "installed_environment_id" => encode_environment_id(report.installed_environment_id),
       "container" => encode_container(report.container),
       "data" => Atom.to_string(report.data),
-      "failure" => encode_failure(report.failure),
-      "applied_access_revision" => report.applied_access_revision
+      "failure" => encode_failure(report.failure)
     }
   end
 
@@ -73,11 +68,9 @@ defmodule Biot.Protocol.ExecutionReport do
             "installed_environment_id" => installed_environment_id,
             "container" => container,
             "data" => data,
-            "failure" => failure,
-            "applied_access_revision" => applied_access_revision
+            "failure" => failure
           }} <- StrictMap.fetch_exact(value, @fields),
          true <- is_integer(accepted_revision) and accepted_revision > 0,
-         true <- is_integer(applied_access_revision) and applied_access_revision > 0,
          {:ok, installed_environment_id} <- parse_environment_id(installed_environment_id),
          {:ok, container} <- parse_container(container),
          {:ok, data} <- parse_data(data),
@@ -88,8 +81,7 @@ defmodule Biot.Protocol.ExecutionReport do
          installed_environment_id: installed_environment_id,
          container: container,
          data: data,
-         failure: failure,
-         applied_access_revision: applied_access_revision
+         failure: failure
        }}
     else
       _error -> {:error, :invalid_format}

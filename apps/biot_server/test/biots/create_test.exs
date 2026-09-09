@@ -10,6 +10,7 @@ defmodule Biot.Server.Biots.CreateTest do
   alias Biot.Server.Biots.Accepted
   alias Biot.Server.Biots.CreationFingerprint
   alias Biot.Server.Biots.Unchanged
+  alias Biot.Server.NodeConnections
   alias Biot.Server.Repo
   alias Biot.Server.Reports
   alias Biot.Server.Schema.Biot, as: BiotRow
@@ -201,6 +202,8 @@ defmodule Biot.Server.Biots.CreateTest do
   test "a destroyed biot holds capacity until the node reports no allocation", context do
     node = TestFixtures.node(2, max_biots: 1)
     connection_id = TestFixtures.connection_id(1)
+    :ok = NodeConnections.put(node.id, %{connection_id: connection_id, state: :ready})
+    on_exit(fn -> NodeConnections.delete(node.id) end)
 
     first = TestFixtures.create_command(name: "first", node_id: node.id)
     second = TestFixtures.create_command(name: "second", node_id: node.id)
@@ -215,8 +218,7 @@ defmodule Biot.Server.Biots.CreateTest do
       TestFixtures.execution_report(
         accepted_revision: 2,
         container: :absent,
-        data: :present,
-        applied_access_revision: 2
+        data: :present
       )
 
     assert {:ok, :stored} =
@@ -229,8 +231,7 @@ defmodule Biot.Server.Biots.CreateTest do
       TestFixtures.execution_report(
         accepted_revision: 2,
         container: :absent,
-        data: :no_allocation,
-        applied_access_revision: 2
+        data: :no_allocation
       )
 
     assert {:ok, :stored} = Reports.observation(node.id, connection_id, context.biot_id, released)

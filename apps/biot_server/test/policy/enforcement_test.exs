@@ -3,7 +3,7 @@ defmodule Biot.Server.Policy.EnforcementTest do
 
   alias Biot.Protocol.{BiotId, ConnectionId, NodeId}
   alias Biot.Server.Policy.Enforcement
-  alias Biot.Server.Schema.{Biot, Observation}
+  alias Biot.Server.Schema.{AccessObservation, Biot}
 
   setup_all do
     {:ok, biot_id} = BiotId.parse("10000000-0000-4000-8000-000000000001")
@@ -18,41 +18,33 @@ defmodule Biot.Server.Policy.EnforcementTest do
     }
   end
 
-  test "freshness covers every observation and connection relationship", context do
-    observation = %Observation{connection_id: context.current}
-    stale_observation = %Observation{connection_id: context.stale}
-
+  test "access covers nil rows, connection currency, and every revision relationship", context do
     cases = [
-      {nil, nil, :stale},
-      {observation, nil, :stale},
-      {nil, connection(context.current, :ready), :stale},
-      {observation, connection(context.current, :ready), :current},
-      {observation, connection(context.current, :synchronizing), :current},
-      {stale_observation, connection(context.current, :ready), :stale}
+      {nil, nil, {:pending, context.biot.node_id}},
+      {nil, connection(context.current, :ready), {:pending, context.biot.node_id}},
+      {access_observation(context.current, 1), nil, {:pending, context.biot.node_id}},
+      {access_observation(context.stale, 1), connection(context.current, :ready),
+       {:pending, context.biot.node_id}},
+      {access_observation(context.stale, 2), connection(context.current, :ready),
+       {:pending, context.biot.node_id}},
+      {access_observation(context.stale, 3), connection(context.current, :ready),
+       {:pending, context.biot.node_id}},
+      {access_observation(context.current, 1), connection(context.current, :ready),
+       {:pending, context.biot.node_id}},
+      {access_observation(context.current, 2), connection(context.current, :ready), :applied},
+      {access_observation(context.current, 3), connection(context.current, :ready), :applied},
+      {access_observation(context.current, 2), connection(context.current, :synchronizing),
+       :applied}
     ]
 
-    for {reported, live, expected} <- cases do
-      assert Enforcement.freshness(reported, live) == expected
-    end
-  end
-
-  test "access covers every freshness and revision relationship", context do
-    cases = [
-      {nil, :stale, {:pending, context.biot.node_id}},
-      {nil, :current, {:pending, context.biot.node_id}},
-      {observation(1), :stale, {:pending, context.biot.node_id}},
-      {observation(2), :stale, {:pending, context.biot.node_id}},
-      {observation(3), :stale, {:pending, context.biot.node_id}},
-      {observation(1), :current, {:pending, context.biot.node_id}},
-      {observation(2), :current, :applied},
-      {observation(3), :current, :applied}
-    ]
-
-    for {reported, freshness, expected} <- cases do
-      assert Enforcement.access(context.biot, reported, freshness) == expected
+    for {access_observation, connection, expected} <- cases do
+      assert Enforcement.access(context.biot, access_observation, connection) == expected
     end
   end
 
   defp connection(connection_id, state), do: %{connection_id: connection_id, state: state}
-  defp observation(revision), do: %Observation{applied_access_revision: revision}
+
+  defp access_observation(connection_id, revision) do
+    %AccessObservation{connection_id: connection_id, applied_access_revision: revision}
+  end
 end

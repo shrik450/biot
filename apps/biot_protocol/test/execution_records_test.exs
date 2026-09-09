@@ -87,9 +87,6 @@ defmodule Biot.Protocol.ExecutionRecordsTest do
       encoded = Map.put(ExecutionReport.encode(report), "accepted_revision", bad_revision)
       assert ExecutionReport.parse(encoded) == {:error, :invalid_format}
 
-      encoded = Map.put(ExecutionReport.encode(report), "applied_access_revision", bad_revision)
-      assert ExecutionReport.parse(encoded) == {:error, :invalid_format}
-
       encoded = Map.put(BiotSpec.encode(spec), "access_revision", bad_revision)
       assert BiotSpec.parse(encoded) == {:error, :invalid_format}
     end
@@ -99,6 +96,13 @@ defmodule Biot.Protocol.ExecutionRecordsTest do
     report = pick(execution_report())
     encoded = Map.put(ExecutionReport.encode(report), "data", "vanished")
 
+    assert ExecutionReport.parse(encoded) == {:error, :invalid_format}
+  end
+
+  test "ExecutionReport rejects the removed access progress field" do
+    report = pick(execution_report())
+
+    encoded = Map.put(ExecutionReport.encode(report), "applied_access_revision", 1)
     assert ExecutionReport.parse(encoded) == {:error, :invalid_format}
   end
 
@@ -131,16 +135,14 @@ defmodule Biot.Protocol.ExecutionRecordsTest do
             StreamData.one_of([StreamData.constant(nil), Generators.environment_id()]),
           container <- container(),
           data <- StreamData.member_of(ExecutionReport.data_states()),
-          failure <- reported_failure(),
-          applied_access_revision <- StreamData.positive_integer()
+          failure <- reported_failure()
         ) do
       %ExecutionReport{
         accepted_revision: accepted_revision,
         installed_environment_id: installed_environment_id,
         container: container,
         data: data,
-        failure: failure,
-        applied_access_revision: applied_access_revision
+        failure: failure
       }
     end
   end
