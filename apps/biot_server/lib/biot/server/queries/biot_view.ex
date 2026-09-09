@@ -6,44 +6,44 @@ defmodule Biot.Server.Queries.BiotView do
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.Port
   alias Biot.Protocol.PrincipalId
+  alias Biot.Server.Authorization
+  alias Biot.Server.NodeConnections
   alias Biot.Server.Policy
   alias Biot.Server.Policy.Enforcement
   alias Biot.Server.Queries.OperationView
-  alias Biot.Server.Schema.{Biot, Node, Observation, Operation}
+  alias Biot.Server.Schema.Biot, as: BiotRow
+  alias Biot.Server.Schema.{Node, Observation, Operation}
 
   defmodule Input do
     @moduledoc "Lists every durable and live value required to project one Biot view."
 
-    alias Biot.Server.NodeConnections
-    alias Biot.Server.Schema.{Biot, Node, Observation, Operation}
-
     @enforce_keys [
       :biot,
+      :role,
       :observation,
       :node,
       :operation,
       :connection,
-      :publications,
-      :direct_secrets_ever_delivered
+      :publications
     ]
     defstruct [
       :biot,
+      :role,
       :observation,
       :node,
       :operation,
       :connection,
-      :publications,
-      :direct_secrets_ever_delivered
+      :publications
     ]
 
     @type t :: %__MODULE__{
-            biot: Biot.t(),
+            biot: BiotRow.t(),
+            role: Authorization.role(),
             observation: Observation.t() | nil,
             node: Node.t(),
             operation: Operation.t() | nil,
             connection: NodeConnections.connection() | nil,
-            publications: list(),
-            direct_secrets_ever_delivered: boolean()
+            publications: list()
           }
   end
 
@@ -52,26 +52,28 @@ defmodule Biot.Server.Queries.BiotView do
     :name,
     :owner_id,
     :node_id,
+    :role,
     :desired,
     :actual,
     :node,
     :operation,
     :access,
     :publications,
-    :direct_secrets_ever_delivered
+    :direct_secret_exposure_possible
   ]
   defstruct [
     :id,
     :name,
     :owner_id,
     :node_id,
+    :role,
     :desired,
     :actual,
     :node,
     :operation,
     :access,
     :publications,
-    :direct_secrets_ever_delivered
+    :direct_secret_exposure_possible
   ]
 
   @type t :: %__MODULE__{
@@ -79,24 +81,25 @@ defmodule Biot.Server.Queries.BiotView do
           name: String.t(),
           owner_id: PrincipalId.t(),
           node_id: NodeId.t(),
+          role: Authorization.role(),
           desired: Desired.t(),
           actual: :never_reported | map(),
-          node: :connecting | :ready | :unavailable | :disabled | :retired,
+          node: :connecting | :ready | :unavailable | :disabled | :retired | :abandoned,
           operation: OperationView.t() | nil,
           access: %{revision: pos_integer(), enforcement: Policy.enforcement()},
           publications: [%{port: Port.t(), url: String.t()}],
-          direct_secrets_ever_delivered: boolean()
+          direct_secret_exposure_possible: boolean()
         }
 
   @spec project(Input.t()) :: t()
   def project(%Input{
-        biot: %Biot{} = biot,
+        biot: %BiotRow{} = biot,
+        role: role,
         observation: observation,
         node: %Node{} = node,
         operation: operation,
         connection: connection,
-        publications: publications,
-        direct_secrets_ever_delivered: direct_secrets_ever_delivered
+        publications: publications
       }) do
     freshness = Enforcement.freshness(observation, connection)
 
@@ -105,7 +108,8 @@ defmodule Biot.Server.Queries.BiotView do
       name: biot.name,
       owner_id: biot.owner_id,
       node_id: biot.node_id,
-      desired: Biot.desired(biot),
+      role: role,
+      desired: BiotRow.desired(biot),
       actual: actual(observation, freshness),
       node: node_status(node.status, connection_state(connection)),
       operation: operation(operation),
@@ -114,7 +118,7 @@ defmodule Biot.Server.Queries.BiotView do
         enforcement: Enforcement.access(biot, observation, freshness)
       },
       publications: publications,
-      direct_secrets_ever_delivered: direct_secrets_ever_delivered
+      direct_secret_exposure_possible: biot.direct_secret_exposure_possible
     }
   end
 
@@ -133,6 +137,7 @@ defmodule Biot.Server.Queries.BiotView do
 
   defp node_status(:disabled, _connection_state), do: :disabled
   defp node_status(:retired, _connection_state), do: :retired
+  defp node_status(:abandoned, _connection_state), do: :abandoned
   defp node_status(:enabled, :synchronizing), do: :connecting
   defp node_status(:enabled, :ready), do: :ready
   defp node_status(:enabled, nil), do: :unavailable

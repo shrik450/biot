@@ -32,11 +32,11 @@ defmodule Biot.Server.Control.Connection do
               handshake_timer: nil,
               heartbeat_interval_ms: 30_000,
               heartbeat_timeout_ms: 10_000,
+              desired_sweep_interval_ms: 60_000,
               heartbeat_challenge: nil,
               version: nil,
               node_id: nil,
               connection_id: nil,
-              changed_biot_ids: MapSet.new(),
               pending_diagnostics: %{}
   end
 
@@ -84,11 +84,22 @@ defmodule Biot.Server.Control.Connection do
   end
 
   def handle_info(
-        {:biot_spec_changed, biot_id},
+        {:biot_spec_changed, _biot_id},
         {socket, %State{phase: :synchronizing} = state}
       ) do
-    changed_biot_ids = MapSet.put(state.changed_biot_ids, biot_id)
-    {:noreply, {socket, %{state | changed_biot_ids: changed_biot_ids}}}
+    # Synchronize sends the set; the sweep covers later intent, including dropped wakes.
+    {:noreply, {socket, state}}
+  end
+
+  def handle_info(:desired_sweep, {socket, %State{phase: :ready} = state}) do
+    case send_behind_specs(socket, state) do
+      :ok ->
+        Process.send_after(self(), :desired_sweep, state.desired_sweep_interval_ms)
+        {:noreply, {socket, state}}
+
+      {:error, reason} ->
+        {:stop, {:shutdown, reason}, {socket, state}}
+    end
   end
 
   def handle_info(:handshake_deadline, {socket, %State{phase: :handshake} = state}) do
@@ -200,7 +211,8 @@ defmodule Biot.Server.Control.Connection do
       max_frame_bytes: option(options, :max_frame_bytes, 1_000_000),
       handshake_timeout_ms: option(options, :handshake_timeout_ms, 10_000),
       heartbeat_interval_ms: option(options, :heartbeat_interval_ms, 30_000),
-      heartbeat_timeout_ms: option(options, :heartbeat_timeout_ms, 10_000)
+      heartbeat_timeout_ms: option(options, :heartbeat_timeout_ms, 10_000),
+      desired_sweep_interval_ms: option(options, :desired_sweep_interval_ms, 60_000)
     }
   end
 
@@ -258,14 +270,17 @@ defmodule Biot.Server.Control.Connection do
 
   defp handle_message(
          %Message.Synchronized{connection_id: connection_id},
-         socket,
+         _socket,
          %State{phase: :synchronizing, connection_id: connection_id} = state
        ) do
-    with :ok <- send_changed_specs(socket, state.changed_biot_ids, state.version),
-         :ok <- NodeConnections.put(state.node_id, %{connection_id: connection_id, state: :ready}) do
-      {:continue, %{state | phase: :ready, changed_biot_ids: MapSet.new()}}
-    else
-      {:error, reason} -> close(reason, state)
+    case NodeConnections.put(state.node_id, %{connection_id: connection_id, state: :ready}) do
+      :ok ->
+        # Synchronize sends the set; the sweep covers later intent, including dropped wakes.
+        Process.send_after(self(), :desired_sweep, state.desired_sweep_interval_ms)
+        {:continue, %{state | phase: :ready}}
+
+      {:error, reason} ->
+        close(reason, state)
     end
   end
 
@@ -432,9 +447,11 @@ defmodule Biot.Server.Control.Connection do
     %{state | handshake_timer: nil}
   end
 
-  defp send_changed_specs(socket, biot_ids, version) do
-    Enum.reduce_while(biot_ids, :ok, fn biot_id, :ok ->
-      case send_desired(socket, biot_id, version) do
+  defp send_behind_specs(socket, state) do
+    state.node_id
+    |> Synchronization.behind(state.connection_id)
+    |> Enum.reduce_while(:ok, fn biot_id, :ok ->
+      case send_desired(socket, biot_id, state.version) do
         :ok -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, reason}}
       end

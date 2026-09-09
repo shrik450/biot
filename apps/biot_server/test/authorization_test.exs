@@ -4,7 +4,8 @@ defmodule Biot.Server.AuthorizationTest do
   alias Biot.Protocol.PrincipalId
   alias Biot.Server.Actor
   alias Biot.Server.Authorization
-  alias Biot.Server.Schema.Biot
+  alias Biot.Server.Schema.Biot, as: BiotRow
+  alias Biot.Server.TestFixtures
 
   @owner_uuid "11111111-1111-4111-8111-111111111111"
   @stranger_uuid "22222222-2222-4222-8222-222222222222"
@@ -14,9 +15,10 @@ defmodule Biot.Server.AuthorizationTest do
     {:ok, stranger_id} = PrincipalId.parse(@stranger_uuid)
 
     %{
-      biot: %Biot{owner_id: owner_id},
+      biot: %BiotRow{owner_id: owner_id},
       owner: %Actor{principal_id: owner_id},
-      stranger: %Actor{principal_id: stranger_id}
+      stranger: %Actor{principal_id: stranger_id},
+      port: TestFixtures.port(4_000)
     }
   end
 
@@ -47,14 +49,27 @@ defmodule Biot.Server.AuthorizationTest do
     refute Authorization.may_read_grants?(nil, context.biot)
   end
 
-  test "the owner and shell-grant holders may discover publications", context do
-    assert Authorization.may_discover?(context.owner, context.biot, [])
+  test "the owner is the owner whatever grants they hold", context do
+    assert Authorization.role(context.owner, context.biot, %{shell: false, view_ports: []}) ==
+             :owner
 
-    assert Authorization.may_discover?(context.stranger, context.biot, [
-             context.stranger.principal_id
-           ])
+    assert Authorization.role(context.owner, context.biot, %{
+             shell: true,
+             view_ports: [context.port]
+           }) == :owner
+  end
 
-    refute Authorization.may_discover?(context.stranger, context.biot, [])
-    refute Authorization.may_discover?(nil, context.biot, [context.stranger.principal_id])
+  test "anyone else is a collaborator carrying their own grants", context do
+    grants = %{shell: true, view_ports: [context.port]}
+
+    assert Authorization.role(context.stranger, context.biot, grants) ==
+             {:collaborator, grants}
+  end
+
+  test "a collaborator with no grants still reports the empty grants", context do
+    empty = %{shell: false, view_ports: []}
+
+    assert Authorization.role(context.stranger, context.biot, empty) ==
+             {:collaborator, empty}
   end
 end

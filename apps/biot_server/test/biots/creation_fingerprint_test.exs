@@ -31,12 +31,25 @@ defmodule Biot.Server.Biots.CreationFingerprintTest do
       command(project_context: relative_directory("services/api")),
       command(project_context: relative_directory("services/web")),
       command(node_id: :default),
-      command(node_id: node_id(@second_node_uuid))
+      command(node_id: node_id(@second_node_uuid)),
+      command(initial_state: :stopped)
     ]
 
     digests = Enum.map(variants, &CreationFingerprint.compute/1)
 
     assert length(Enum.uniq(digests)) == length(digests)
+  end
+
+  test "the requested initial state changes the fingerprint" do
+    refute CreationFingerprint.compute(command(initial_state: :running)) ==
+             CreationFingerprint.compute(command(initial_state: :stopped))
+  end
+
+  test "a command that omits the initial state fingerprints as a running request" do
+    explicit = command(initial_state: :running)
+    omitted = struct!(Create, Map.take(explicit, [:name, :repository, :environment, :node_id]))
+
+    assert CreationFingerprint.compute(omitted) == CreationFingerprint.compute(explicit)
   end
 
   test "a default node and an explicit node differ" do
@@ -70,7 +83,8 @@ defmodule Biot.Server.Biots.CreationFingerprintTest do
         layers: Keyword.get(opts, :layers, []),
         project_context: Keyword.get(opts, :project_context)
       },
-      node_id: Keyword.get(opts, :node_id, node_id(@first_node_uuid))
+      node_id: Keyword.get(opts, :node_id, node_id(@first_node_uuid)),
+      initial_state: Keyword.get(opts, :initial_state, :running)
     }
   end
 

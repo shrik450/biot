@@ -13,6 +13,7 @@ defmodule Biot.Server.TestFixtures do
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.OperationId
+  alias Biot.Protocol.OrphanedAllocation
   alias Biot.Protocol.PinnedSource
   alias Biot.Protocol.Port
   alias Biot.Protocol.PrincipalId
@@ -26,6 +27,7 @@ defmodule Biot.Server.TestFixtures do
   alias Biot.Server.Schema.Biot, as: BiotSchema
   alias Biot.Server.Schema.Environment
   alias Biot.Server.Schema.Node
+  alias Biot.Server.Schema.NodeObservation
   alias Biot.Server.Schema.Observation
   alias Biot.Server.Schema.Principal
 
@@ -85,7 +87,8 @@ defmodule Biot.Server.TestFixtures do
       desired_revision: Keyword.get(opts, :desired_revision, 1),
       desired_state: Keyword.get(opts, :desired_state, :running),
       desired_environment_id: environment_id,
-      access_revision: Keyword.get(opts, :access_revision, 1)
+      access_revision: Keyword.get(opts, :access_revision, 1),
+      direct_secret_exposure_possible: Keyword.get(opts, :direct_secret_exposure_possible, false)
     }
 
     environment = %Environment{
@@ -121,12 +124,29 @@ defmodule Biot.Server.TestFixtures do
 
   def actor(%Principal{} = principal), do: %Actor{principal_id: principal.id}
 
+  def node_observation(node, number, opts \\ []) do
+    Repo.insert!(%NodeObservation{
+      node_id: node.id,
+      connection_id: Keyword.get(opts, :connection_id, id(ConnectionId, number + 5_000)),
+      received_at: Keyword.get(opts, :received_at, DateTime.utc_now()),
+      orphaned_allocations: Keyword.get(opts, :orphaned_allocations, [])
+    })
+  end
+
+  def orphaned_allocation(number) do
+    %OrphanedAllocation{
+      biot_id: id(BiotId, number + 2_000),
+      uid_range: %{start: 100_000 + number * 65_536, count: 65_536}
+    }
+  end
+
   def create_command(opts \\ []) do
     %Create{
       name: Keyword.get(opts, :name, "created-biot"),
       repository: Keyword.get(opts, :repository, repository()),
       environment: Keyword.get(opts, :environment, selection()),
-      node_id: Keyword.get(opts, :node_id, :default)
+      node_id: Keyword.get(opts, :node_id, :default),
+      initial_state: Keyword.get(opts, :initial_state, :running)
     }
   end
 

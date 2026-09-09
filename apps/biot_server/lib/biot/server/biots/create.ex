@@ -6,12 +6,13 @@ defmodule Biot.Server.Biots.Create do
   alias Biot.Protocol.RepositorySource
 
   @enforce_keys [:name, :repository, :environment, :node_id]
-  defstruct [:name, :repository, :environment, :node_id]
+  defstruct [:name, :repository, :environment, :node_id, initial_state: :running]
 
   @type t :: %__MODULE__{
           name: String.t(),
           repository: RepositorySource.t(),
           environment: EnvironmentSelection.t(),
-          node_id: NodeId.t() | :default
+          node_id: NodeId.t() | :default,
+          initial_state: :running | :stopped
         }
 end

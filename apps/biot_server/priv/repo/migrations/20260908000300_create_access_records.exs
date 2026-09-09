@@ -12,6 +12,15 @@ defmodule Biot.Server.Repo.Migrations.CreateAccessRecords do
       add(:port, :string, null: false)
       add(:hostname, :string, null: false)
 
+      add(:state, :string,
+        null: false,
+        default: "active",
+        check: %{
+          name: "publications_state_valid",
+          expr: "state IN ('active', 'inactive')"
+        }
+      )
+
       timestamps(type: :utc_datetime_usec)
     end
 

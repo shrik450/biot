@@ -334,15 +334,15 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     :ssl.close(socket)
   end
 
-  test "a create committed during synchronization arrives once as desired", context do
-    listener = start_listener(context.certificates)
+  test "a biot created during synchronization arrives on the first sweep", context do
+    listener = start_listener(context.certificates, desired_sweep_interval_ms: 100)
     owner = TestFixtures.principal(1)
     actor = TestFixtures.actor(owner)
     node = node_for_certificate(1, context.certificates, 0)
     socket = connect(listener.port, context.certificates, 0)
     send_hello(socket, node.registration, [1])
     connected = await_message(socket, :handshake, Message.Connected)
-    assert %Message.Synchronize{} = await_message(socket, 1, Message.Synchronize)
+    assert %Message.Synchronize{biot_specs: []} = await_message(socket, 1, Message.Synchronize)
 
     eventually(fn ->
       match?(%{state: :synchronizing}, NodeConnections.current(node.id))
@@ -357,15 +357,65 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
                TestFixtures.create_command(name: "mid-sync", node_id: node.id)
              )
 
+    # The wake arrives while the connection is still synchronizing, so the handler drops it.
     [{handler, _connection_id}] = Registry.lookup(Biot.Server.Control.Registry, node.id)
     _state = :sys.get_state(handler)
     assert_no_non_heartbeat_message(socket, 1, 100)
     send_message(socket, %Message.Synchronized{connection_id: connected.connection_id}, 1)
 
-    assert %Message.Desired{biot_spec: desired} = await_message(socket, 1, Message.Desired)
-    assert desired.execution.biot_id == biot_id
-    assert desired.execution.desired.revision == 1
-    assert_no_non_heartbeat_message(socket, 1, 100)
+    eventually(fn -> match?(%{state: :ready}, NodeConnections.current(node.id)) end)
+    assert_no_non_heartbeat_message(socket, 1, 50)
+
+    assert_desired_revision(socket, biot_id, 1)
+    assert_desired_revision(socket, biot_id, 1)
+    :ssl.close(socket)
+  end
+
+  test "the sweep skips a biot whose observation accepted the desired revision", context do
+    listener = start_listener(context.certificates, desired_sweep_interval_ms: 100)
+    owner = TestFixtures.principal(1)
+    actor = TestFixtures.actor(owner)
+    node = node_for_certificate(1, context.certificates, 0)
+    socket = connect(listener.port, context.certificates, 0)
+    send_hello(socket, node.registration, [1])
+    connected = await_message(socket, :handshake, Message.Connected)
+    assert %Message.Synchronize{biot_specs: []} = await_message(socket, 1, Message.Synchronize)
+
+    eventually(fn ->
+      match?(%{state: :synchronizing}, NodeConnections.current(node.id))
+    end)
+
+    biot_id = TestFixtures.id(BiotId, 8_013)
+
+    assert {:ok, %Accepted{revision: 1}} =
+             Biots.create(
+               actor,
+               biot_id,
+               TestFixtures.create_command(name: "accepted", node_id: node.id)
+             )
+
+    send_message(socket, %Message.Synchronized{connection_id: connected.connection_id}, 1)
+    eventually(fn -> match?(%{state: :ready}, NodeConnections.current(node.id)) end)
+
+    send_message(
+      socket,
+      %Message.Observation{
+        biot_id: biot_id,
+        execution_report: TestFixtures.execution_report(accepted_revision: 1)
+      },
+      1
+    )
+
+    connection_id = connected.connection_id
+
+    eventually(fn ->
+      match?(
+        %Observation{accepted_revision: 1, connection_id: ^connection_id},
+        Repo.get(Observation, biot_id)
+      )
+    end)
+
+    assert_no_non_heartbeat_message(socket, 1, 350)
     :ssl.close(socket)
   end
 

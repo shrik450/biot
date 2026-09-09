@@ -24,6 +24,7 @@ defmodule Biot.Server.Schema.Biot do
     field(:desired_state, Ecto.Enum, values: Desired.states())
     field(:desired_environment_id, ProtocolValue, module: EnvironmentId)
     field(:access_revision, :integer)
+    field(:direct_secret_exposure_possible, :boolean, default: false)
 
     timestamps(type: :utc_datetime_usec)
   end

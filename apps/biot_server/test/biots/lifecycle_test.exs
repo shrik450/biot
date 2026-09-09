@@ -187,11 +187,15 @@ defmodule Biot.Server.Biots.LifecycleTest do
 
     assert {:ok, %Accepted{revision: 2}} = Biots.destroy(context.actor, context.biot_id)
 
-    refute Repo.exists?(from(p in Publication, where: p.biot_id == ^context.biot_id))
+    assert Repo.all(from(p in Publication, where: p.biot_id == ^context.biot_id))
+           |> Enum.map(& &1.state) == [:inactive]
+
     refute Repo.exists?(from(g in ShellGrant, where: g.biot_id == ^context.biot_id))
     refute Repo.exists?(from(g in ViewGrant, where: g.biot_id == ^context.biot_id))
 
-    assert Repo.exists?(from(p in Publication, where: p.biot_id == ^other_id))
+    assert Repo.all(from(p in Publication, where: p.biot_id == ^other_id))
+           |> Enum.map(& &1.state) == [:active]
+
     assert Repo.exists?(from(g in ShellGrant, where: g.biot_id == ^other_id))
     assert Repo.exists?(from(g in ViewGrant, where: g.biot_id == ^other_id))
 
@@ -254,7 +258,8 @@ defmodule Biot.Server.Biots.LifecycleTest do
     Repo.insert!(%Publication{
       biot_id: biot_id,
       port: port,
-      hostname: TestFixtures.hostname(number)
+      hostname: TestFixtures.hostname(number),
+      state: :active
     })
 
     Repo.insert!(%ViewGrant{biot_id: biot_id, port: port, principal_id: principal.id})

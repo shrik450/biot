@@ -98,33 +98,46 @@ A new status cannot compile until all six functions answer it.
 
 ### Application modules
 
-- `Biots` handles `create`, `start`, `stop`, `update_environment`, `destroy`, `get`, `list`, and `spec`.
-- `Biots.Create`, `Biots.SelectEnvironment`, `Biots.Accepted`, `Biots.Unchanged`, and `Biots.CreationFingerprint` define lifecycle inputs, results, and fingerprints.
+- `Biots` handles `create`, `start`, `stop`, `update_environment`, `destroy`, and `spec`. Its old `get` and `list` functions are gone. `spec/1` remains the node-facing intent query.
+- `Biots.Create`, `Biots.SelectEnvironment`, `Biots.Accepted`, `Biots.Unchanged`, and `Biots.CreationFingerprint` define lifecycle inputs, results, and fingerprints. `Create.initial_state` defaults to `:running`, and the fingerprint uses `:biot_creation_v2`.
+- `Biots.Capacity.room?/2` admits creation, and `counts/2` projects capacity held on assigned nodes. Together they define which Biots still hold capacity.
 - `Operations` owns operation queries.
-- `Operations.Completion` provides pure completion evidence.
+- `Operations.Completion` provides pure completion evidence. `:create` and `:update_environment` use one clause set for each desired state.
 - `Reports` handles node-facing ingestion through `observation`, `resolution`, and `node_observation`.
-- `Queries.BiotView` and `Queries.OperationView` provide pure projections.
-- `Authorization` provides pure predicates.
+- `Queries.Biots.get/2` and `list/2` build owner and collaborator `BiotView` values. `Access.readable/2` supplies their single read rule. `PublicationView.visible/2` limits collaborator publications to their view grants.
+- `Queries.Nodes.list/1` and `Queries.NodeView` build the node inventory with capacity counts, live connections, and latest orphan reports.
+- `Queries.Deployment.get/1` returns the publication and SSH settings in `DeploymentView`.
+- `Queries.BiotView`, `Queries.PublicationView`, and `Queries.OperationView` provide pure projections. `BiotView` includes the actor's `role` and the row's `direct_secret_exposure_possible` column. Creation sets that column to `false`.
+- `Authorization` owns the `grants` and `role` types and the pure role and policy predicates.
 - `NodeConnections` is an ETS registry of current node connections written by the control link.
 - `NodeWake` provides one PubSub topic per node, plus `spec_changed/2` and `subscribe/1`.
 
 #### `Biot.Server.Publications`
 
-`publish/3` adds one published port and its derived hostname. `unpublish/3`
-withdraws the publication and its view grants. `discover/2` returns the owner's
-or a shell-grant holder's published URLs. Each mutation returns a
+`publish/3` allocates a random hostname for a new port or reactivates its retained
+inactive row. A row has state `:active` or `:inactive`. Republish keeps the same
+hostname. `unpublish/3` makes the row inactive and deletes that port's view grants.
+`withdraw_all/2` deactivates every row and deletes every view grant during destroy.
+`active?/3` and `active_for/1` are the only reads of active publication rows.
+`discover/2` returns active URLs allowed by the actor's role. Each mutation returns a
 `Policy.Applied` result when it changes records, or a `Policy.Unchanged` result
 when the requested policy already exists. Both result structs carry the Biot ID,
 access revision, and `enforcement`.
 
 #### `Biot.Server.Access`
 
+`readable/2` builds one composable query. It is the only definition of which Biots
+an actor may read. Owners, shell-grant holders, and view-grant holders match it.
+`fetch_readable/2` returns the Biot and the actor's role, or `not_found` or
+`forbidden`. `grants_for/2` is total over the requested IDs and returns an entry
+for each one. `revoke_shell_grants/2` removes all shell grants during destroy.
+
 `grant_shell/3` and `revoke_shell/3` manage Biot shell grants.
 `grant_view/4` and `revoke_view/4` manage a principal's access to one published
 port. `get_grants/2` returns the owner and explicit grants for the Biot. Mutation
 results use `Policy.Applied` or `Policy.Unchanged`, with the same `enforcement`
-field. Grants require known principals; view grants require a publication for the
-same Biot and port.
+field. Grants require known principals; view grants require an active publication
+for the same Biot and port.
 
 #### `Biot.Server.Policy`
 
@@ -149,16 +162,11 @@ policy commands and `Queries.BiotView`.
 
 #### Hostnames and projections
 
-`Publications.HostnameDerivation` builds each hostname from a version byte, the
-16 UUID bytes, and the port as a big-endian unsigned 16-bit integer. It signs
-that input with HMAC-SHA-256, keeps the first 128 bits, and encodes them as
-lowercase, unpadded base32. The server stores the derived label on the active
-publication row. The URL format is `https://<hostname>.<domain>`.
-
-`publication_hmac_key` reads `BIOT_SERVER_PUBLICATION_HMAC_KEY` in production.
-`publication_domain` reads `BIOT_SERVER_PUBLICATION_DOMAIN`. The key and domain
-are server configuration; the key and derivation version must remain durable
-for URL stability.
+`Publications.Hostname.allocate/0` encodes 128 random bits as lowercase,
+unpadded base32 and parses the label as a protocol hostname. The publication row
+keeps that label while inactive. `publication_domain` reads
+`BIOT_SERVER_PUBLICATION_DOMAIN`. `Queries.PublicationView` owns the URL format:
+`https://<hostname>.<domain>`.
 
 `Queries.PublicationView` sorts publications by port and projects each row into
 its port and HTTPS URL. `Queries.AccessView` projects loaded shell and view rows
@@ -166,24 +174,31 @@ into the owner ID, sorted shell principal IDs, and sorted `{port, principal_id}`
 view grants. `Queries.BiotView` uses `Policy.Enforcement` for the access status
 shown with the rest of the Biot view.
 
-`Authorization.may_change_policy?/2` permits policy mutations for the owner.
-`Authorization.may_discover?/3` permits discovery for the owner or a principal
-in the loaded shell-grant IDs. `may_read_grants?/2` remains owner-only.
+`Authorization.role/3` returns `:owner` or `{:collaborator, grants}`. Its policy
+predicates keep lifecycle, policy, and grant reads owner-only. `Access.readable/2`
+owns Biot read access instead of a predicate in `Authorization`.
 
 These modules follow the model contract. Additions never move the access
-revision. Unpublish relies on the view-grant foreign-key cascade. A
-`hostname_conflict` returns an error and never routes to the existing
-publication.
+revision. Unpublish deletes the port's view grants in the same transaction.
+Destroy deactivates publications and removes shell and view grants in one
+transaction.
 
 ### Control protocol
 
 - `Control.Listener` accepts mutually authenticated TLS node connections.
 - `Control.Connection` owns one process per node connection.
-  It handles hello, synchronize, ready, wake, reports, heartbeats, and diagnostics.
+  It handles hello, synchronize, ready, wake, desired sweeps, reports, heartbeats,
+  and diagnostics.
   It sends `registration_abandoned` when an abandoned node attempts a connection.
+  `Synchronize` carries the full set, so ready sends no desired message. The connection
+  schedules its first sweep one `desired_sweep_interval_ms` after ready and reschedules
+  after each sweep. Wakes during synchronization are dropped because the next sweep
+  repeats the comparison.
 - The server starts the Registry before `Nodes.Startup` and starts the listener after `Nodes.Startup`.
   The Registry enforces newest-wins connection replacement.
-- `Control.Synchronization` builds the complete intent set for a node.
+- `Control.Synchronization` builds complete intent sets and finds Biots behind on
+  the current connection. `behind/2` excludes destroyed Biots after cleanup and
+  returns Biots whose intent this connection has not accepted.
 - `Diagnostics` authorizes and retrieves bounded node-held diagnostics.
 
 ### Node status and lifecycle
@@ -217,21 +232,19 @@ Step 10 adds focused server evidence:
 
 - `policy/enforcement_test.exs` proves current-connection freshness and access
   enforcement for missing, stale, and caught-up observations.
-- `publications/hostname_derivation_test.exs` proves fixed derivation vectors,
-  valid stable labels, and sensitivity to the key, Biot ID, port, and version.
-- `queries/publication_view_test.exs` proves HTTPS URL projection, port sorting,
-  and empty-list handling.
+- `queries/publication_view_test.exs` proves role-based publication visibility,
+  HTTPS URL projection, port sorting, and empty-list handling.
 - `queries/access_view_test.exs` proves owner projection and deterministic shell
   and view grant ordering, including empty lists.
-- `queries/biot_view_test.exs` proves the product view uses current connection
-  state for node and access status.
+- `queries/biot_view_test.exs` proves role, exposure, current connection state,
+  node status, and access enforcement in the product view.
 - `queries/operation_view_test.exs` proves operation kinds and outcomes remain
   unchanged in the projection, including failures.
 - `policy_records_test.exs` uses real SQLite transactions to prove policy
   idempotence, authorization, revision and wake behavior, destroyed checks,
-  view-grant cascades, hostname conflicts, and enforcement progress.
-- `authorization_test.exs` proves owner, policy-change, grant-read, and
-  discovery predicates.
+  publication state, view-grant cleanup, and enforcement progress.
+- `authorization_test.exs` proves owner, policy-change, grant-read, and role
+  predicates.
 
 Step 11 adds node enrollment and abandonment evidence:
 
@@ -242,6 +255,30 @@ Step 11 adds node enrollment and abandonment evidence:
   and the reject reasons.
 - `control_protocol_test.exs` and `failure_test.exs` cover the new `Reject` and
   `Failure` values.
+
+Step 12 adds lifecycle, access, query, publication, and redelivery evidence:
+
+- `authorization_test.exs` covers owner-only commands and the owner and collaborator roles.
+- `biots/create_test.exs` covers running and stopped creation, capacity, fingerprints, exposure, and retries.
+- `biots/creation_fingerprint_test.exs` covers the `:biot_creation_v2` fields and boundaries.
+- `biots/lifecycle_test.exs` covers lifecycle transitions, destroy cleanup, and access revisions.
+- `control_protocol_integration_test.exs` covers synchronization, interval sweeps, dropped wakes, reports, reconnects, heartbeats, and diagnostics.
+- `nodes_test.exs` covers status reloads, abandoned nodes, access revisions, failed operations, and connection closure.
+- `operations/completion_test.exs` covers completion for create and environment updates in each desired state.
+- `policy_records_test.exs` covers random hostnames, inactive publication rows, republish behavior, and grant cleanup.
+- `queries/biot_view_test.exs` covers roles, exposure markers, live connection state, and access enforcement.
+- `queries/publication_view_test.exs` covers role-based visibility and URL projection.
+- `access_readable_test.exs` property-tests the single owner, shell-grant, and view-grant read rule.
+- `biots/capacity_test.exs` covers room and counts, including destroyed Biots waiting for release.
+- `biots/create_command_test.exs` property-tests accepted initial states and the running default.
+- `biots/spec_test.exs` covers node-facing specs, selected environments, and access revisions.
+- `control/synchronization_behind_test.exs` covers connection-specific accepted revisions and cleanup exclusion.
+- `control/synchronization_test.exs` covers the shared inclusion rule for desired state and observed data.
+- `publications/hostname_test.exs` property-tests 128-bit lowercase unpadded base32 allocation.
+- `queries/biots_test.exs` covers readable get and list results, roles, collaborator visibility, pagination, and operation selection.
+- `queries/deployment_test.exs` covers authenticated deployment settings and runtime reads.
+- `queries/node_view_test.exs` covers node facts, capacity, connection state, status, and orphan reports.
+- `queries/nodes_test.exs` covers node listing, capacity counts, live connections, and orphan reports.
 
 ## `apps/biot_node`
 
@@ -590,6 +627,12 @@ It runs `mix deps.get`, `mix check`, `mix test`, `go build ./...`, and `go vet .
 `config/test.exs` uses `_build/test/biot_server_test.sqlite3` and the Ecto SQL sandbox.
 `config/runtime.exs` also reads node data-root, UID-range, command, Nix, Podman,
 and control settings for the production node release.
+
+Server configuration includes `publication_domain`, `ssh_advertised_host`,
+integer `ssh_port`, and `desired_sweep_interval_ms`. Production reads them from
+`BIOT_SERVER_PUBLICATION_DOMAIN`, `BIOT_SSH_ADVERTISED_HOST`, `BIOT_SSH_PORT`,
+and `BIOT_DESIRED_SWEEP_INTERVAL_MS`. No `BIOT_SERVER_PUBLICATION_HMAC_KEY`
+setting remains.
 
 ## Host tests in Docker
 

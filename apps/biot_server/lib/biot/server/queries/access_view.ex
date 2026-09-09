@@ -3,18 +3,17 @@ defmodule Biot.Server.Queries.AccessView do
 
   alias Biot.Protocol.Port
   alias Biot.Protocol.PrincipalId
-  alias Biot.Server.Schema.{Biot, ShellGrant, ViewGrant}
+  alias Biot.Server.Schema.Biot, as: BiotRow
+  alias Biot.Server.Schema.{ShellGrant, ViewGrant}
 
   defmodule Input do
     @moduledoc "Lists every row required to project one access view."
-
-    alias Biot.Server.Schema.{Biot, ShellGrant, ViewGrant}
 
     @enforce_keys [:biot, :shell_grants, :view_grants]
     defstruct [:biot, :shell_grants, :view_grants]
 
     @type t :: %__MODULE__{
-            biot: Biot.t(),
+            biot: BiotRow.t(),
             shell_grants: [ShellGrant.t()],
             view_grants: [ViewGrant.t()]
           }
@@ -31,7 +30,7 @@ defmodule Biot.Server.Queries.AccessView do
 
   @spec project(Input.t()) :: t()
   def project(%Input{
-        biot: %Biot{owner_id: owner_id},
+        biot: %BiotRow{owner_id: owner_id},
         shell_grants: shell_grants,
         view_grants: view_grants
       }) do

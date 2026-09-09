@@ -106,6 +106,64 @@ defmodule Biot.Server.Operations.CompletionTest do
     end
   end
 
+  test "create and update_environment share one rule for each desired state", context do
+    installed_and_running = %{
+      installed_environment_id: context.desired_environment,
+      container: {:present, context.incarnation, :running}
+    }
+
+    installed_and_absent = %{
+      installed_environment_id: context.desired_environment,
+      container: :absent
+    }
+
+    for kind <- [:create, :update_environment] do
+      assert Completion.decide(
+               kind,
+               @target_revision,
+               desired(:running, context.desired_environment),
+               report(installed_and_running)
+             ) == :succeeded
+
+      assert Completion.decide(
+               kind,
+               @target_revision,
+               desired(:running, context.desired_environment),
+               report(installed_and_absent)
+             ) == :pending
+
+      assert Completion.decide(
+               kind,
+               @target_revision,
+               desired(:stopped, context.desired_environment),
+               report(installed_and_absent)
+             ) == :succeeded
+
+      assert Completion.decide(
+               kind,
+               @target_revision,
+               desired(:stopped, context.desired_environment),
+               report(installed_and_running)
+             ) == :pending
+    end
+  end
+
+  test "a stopped create waits for the desired environment, not any environment", context do
+    report =
+      report(%{installed_environment_id: context.other_environment, container: :absent})
+
+    assert Completion.decide(
+             :create,
+             @target_revision,
+             desired(:stopped, context.desired_environment),
+             report
+           ) == :pending
+  end
+
+  defp desired(state, environment_id) do
+    %Desired{revision: @target_revision, state: state, environment_id: environment_id}
+  end
+
   defp desired_values(context) do
     for state <- Desired.states(),
         environment_id <- [context.desired_environment, context.other_environment] do
@@ -154,19 +212,25 @@ defmodule Biot.Server.Operations.CompletionTest do
     end
   end
 
-  defp evidence(kind, desired, report) when kind in [:create, :start] do
+  defp evidence(:start, desired, report) do
     if running_desired_environment?(desired, report), do: :succeeded, else: :pending
   end
 
-  defp evidence(:update_environment, %Desired{state: :running} = desired, report) do
+  defp evidence(kind, %Desired{state: :running} = desired, report)
+       when kind in [:create, :update_environment] do
     if running_desired_environment?(desired, report), do: :succeeded, else: :pending
   end
 
-  defp evidence(:update_environment, %Desired{state: :stopped} = desired, report) do
-    if report.installed_environment_id == desired.environment_id, do: :succeeded, else: :pending
+  defp evidence(kind, %Desired{state: :stopped} = desired, report)
+       when kind in [:create, :update_environment] do
+    if report.installed_environment_id == desired.environment_id and report.container == :absent,
+      do: :succeeded,
+      else: :pending
   end
 
-  defp evidence(:update_environment, %Desired{state: :destroyed}, _report), do: :pending
+  defp evidence(kind, %Desired{state: :destroyed}, _report)
+       when kind in [:create, :update_environment],
+       do: :pending
 
   defp evidence(:stop, _desired, report) do
     if report.container == :absent, do: :succeeded, else: :pending

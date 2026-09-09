@@ -1,6 +1,6 @@
 import Config
 
-alias Biot.Protocol.NodeId
+alias Biot.Protocol.{NodeId, Port}
 
 default_node_id =
   case System.get_env("BIOT_DEFAULT_NODE_ID") do
@@ -36,15 +36,17 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "node" do
     System.get_env(name) || raise "environment variable #{name} is missing"
   end
 
-  publication_hmac_key =
-    case Base.decode64(required_env.("BIOT_SERVER_PUBLICATION_HMAC_KEY")) do
-      {:ok, key} when byte_size(key) >= 16 -> key
-      _error -> raise "BIOT_SERVER_PUBLICATION_HMAC_KEY must be base64 for at least 16 bytes"
+  port_env = fn name ->
+    case Port.parse(required_env.(name)) do
+      {:ok, port} -> port.value
+      {:error, _reason} -> raise "#{name} must be a valid TCP port"
     end
+  end
 
   config :biot_server,
-    publication_hmac_key: publication_hmac_key,
     publication_domain: required_env.("BIOT_SERVER_PUBLICATION_DOMAIN"),
+    ssh_advertised_host: required_env.("BIOT_SSH_ADVERTISED_HOST"),
+    ssh_port: port_env.("BIOT_SSH_PORT"),
     control_port: integer_env.("BIOT_CONTROL_PORT", 4443),
     control_tls: [
       certfile: required_env.("BIOT_CONTROL_CERTFILE"),
@@ -54,6 +56,7 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "node" do
     handshake_timeout_ms: integer_env.("BIOT_HANDSHAKE_TIMEOUT_MS", 10_000),
     heartbeat_interval_ms: integer_env.("BIOT_HEARTBEAT_INTERVAL_MS", 30_000),
     heartbeat_timeout_ms: integer_env.("BIOT_HEARTBEAT_TIMEOUT_MS", 10_000),
+    desired_sweep_interval_ms: integer_env.("BIOT_DESIRED_SWEEP_INTERVAL_MS", 60_000),
     diagnostic_timeout_ms: integer_env.("BIOT_DIAGNOSTIC_TIMEOUT_MS", 10_000),
     diagnostic_max_bytes: integer_env.("BIOT_DIAGNOSTIC_MAX_BYTES", 256_000),
     max_frame_bytes: integer_env.("BIOT_MAX_FRAME_BYTES", 1_000_000)

@@ -41,7 +41,8 @@ defmodule Biot.Server.Queries.BiotViewTest do
       desired_revision: 3,
       desired_state: :running,
       desired_environment_id: environment_id,
-      access_revision: 2
+      access_revision: 2,
+      direct_secret_exposure_possible: false
     }
 
     %{
@@ -70,7 +71,21 @@ defmodule Biot.Server.Queries.BiotViewTest do
            }
 
     assert view.publications == []
-    assert view.direct_secrets_ever_delivered == false
+    assert view.role == :owner
+    assert view.direct_secret_exposure_possible == false
+  end
+
+  test "the exposure marker is copied from the row", context do
+    exposed = %{context.biot | direct_secret_exposure_possible: true}
+    view = BiotView.project(input(context, %{biot: exposed}))
+
+    assert view.direct_secret_exposure_possible == true
+  end
+
+  test "the role is copied through unchanged", context do
+    role = {:collaborator, %{shell: true, view_ports: []}}
+
+    assert BiotView.project(input(context, %{role: role})).role == role
   end
 
   test "a biot with no observation has never reported", context do
@@ -122,7 +137,9 @@ defmodule Biot.Server.Queries.BiotViewTest do
       {:disabled, nil, :disabled},
       {:disabled, %{connection_id: context.live_connection, state: :ready}, :disabled},
       {:retired, nil, :retired},
-      {:retired, %{connection_id: context.live_connection, state: :ready}, :retired}
+      {:retired, %{connection_id: context.live_connection, state: :ready}, :retired},
+      {:abandoned, nil, :abandoned},
+      {:abandoned, %{connection_id: context.live_connection, state: :ready}, :abandoned}
     ]
 
     for {status, connection, expected} <- cases do
@@ -196,7 +213,7 @@ defmodule Biot.Server.Queries.BiotViewTest do
       operation: nil,
       connection: %{connection_id: context.live_connection, state: :ready},
       publications: [],
-      direct_secrets_ever_delivered: false
+      role: :owner
     }
 
     struct!(Input, Map.merge(defaults, overrides))

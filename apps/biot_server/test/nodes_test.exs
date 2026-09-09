@@ -208,7 +208,10 @@ defmodule Biot.Server.NodesTest do
     assert operation.kind == :destroy
     assert operation.outcome == :failed
     assert operation.failure == Nodes.abandonment_failure()
-    refute Repo.exists?(from(publication in Publication, where: publication.biot_id == ^biot_id))
+
+    assert Repo.all(from(publication in Publication, where: publication.biot_id == ^biot_id))
+           |> Enum.map(& &1.state) == [:inactive]
+
     refute Repo.exists?(from(grant in ShellGrant, where: grant.biot_id == ^biot_id))
     refute Repo.exists?(from(grant in ViewGrant, where: grant.biot_id == ^biot_id))
   end

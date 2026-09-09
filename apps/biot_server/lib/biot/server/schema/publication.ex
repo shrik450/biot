@@ -13,6 +13,7 @@ defmodule Biot.Server.Schema.Publication do
     field(:biot_id, ProtocolValue, module: BiotId, primary_key: true)
     field(:port, ProtocolValue, module: Port, primary_key: true)
     field(:hostname, ProtocolValue, module: Hostname)
+    field(:state, Ecto.Enum, values: [:active, :inactive], default: :active)
 
     timestamps(type: :utc_datetime_usec)
   end

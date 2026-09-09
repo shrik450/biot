@@ -1,5 +1,5 @@
 defmodule Biot.Server.Biots do
-  @moduledoc "Owns biot lifecycle transactions and their product-facing queries."
+  @moduledoc "Owns biot lifecycle transactions and control-link specifications."
 
   import Ecto.Query
 
@@ -10,31 +10,27 @@ defmodule Biot.Server.Biots do
   alias Biot.Protocol.ExecutionSpec
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.OperationId
+  alias Biot.Server.Access
   alias Biot.Server.Actor
   alias Biot.Server.Authorization
   alias Biot.Server.Biots.Accepted
+  alias Biot.Server.Biots.Capacity
   alias Biot.Server.Biots.Create
   alias Biot.Server.Biots.CreationFingerprint
   alias Biot.Server.Biots.SelectEnvironment
   alias Biot.Server.Biots.Unchanged
   alias Biot.Server.CommandError
-  alias Biot.Server.NodeConnections
   alias Biot.Server.Nodes
   alias Biot.Server.Nodes.Status
   alias Biot.Server.NodeWake
-  alias Biot.Server.Queries.BiotView
-  alias Biot.Server.Queries.BiotView.Input
-  alias Biot.Server.Queries.PublicationView
+  alias Biot.Server.Publications
   alias Biot.Server.Repo
   alias Biot.Server.Schema.Biot, as: BiotRow
 
   alias Biot.Server.Schema.{
     Environment,
     Node,
-    Observation,
-    Operation,
-    Publication,
-    ShellGrant
+    Operation
   }
 
   @type lifecycle_result ::
@@ -107,62 +103,6 @@ defmodule Biot.Server.Biots do
     |> lifecycle_transaction_result()
   end
 
-  @spec get(Actor.t() | nil, BiotId.t()) :: {:ok, BiotView.t()} | {:error, CommandError.t()}
-  def get(nil, %BiotId{}), do: {:error, :unauthenticated}
-
-  def get(%Actor{} = actor, %BiotId{} = biot_id) do
-    publication_domain = Application.fetch_env!(:biot_server, :publication_domain)
-
-    with %BiotRow{} = biot <- Repo.get(BiotRow, biot_id),
-         true <- Authorization.owner?(actor, biot) do
-      {:ok, load_view(biot, publication_domain)}
-    else
-      nil -> {:error, :not_found}
-      false -> {:error, :forbidden}
-    end
-  end
-
-  @spec list(Actor.t() | nil, %{after: BiotId.t() | nil, limit: pos_integer()}) ::
-          {:ok, [BiotView.t()]} | {:error, CommandError.t()}
-  def list(nil, %{after: _after_id, limit: _limit}), do: {:error, :unauthenticated}
-
-  def list(%Actor{} = actor, %{after: after_id, limit: limit})
-      when is_integer(limit) and limit > 0 do
-    publication_domain = Application.fetch_env!(:biot_server, :publication_domain)
-
-    rows =
-      BiotRow
-      |> where([biot], biot.owner_id == ^actor.principal_id)
-      |> after_id(after_id)
-      |> order_by([biot], asc: biot.id)
-      |> limit(^limit)
-      |> join(:inner, [biot], node in Node, on: node.id == biot.node_id)
-      |> join(:left, [biot, _node], observation in Observation,
-        on: observation.biot_id == biot.id
-      )
-      |> select([biot, node, observation], {biot, node, observation})
-      |> Repo.all()
-
-    operations = latest_operations(rows)
-
-    publications =
-      publications_for_biots(Enum.map(rows, fn {biot, _node, _observation} -> biot.id end))
-
-    views =
-      Enum.map(rows, fn {biot, node, observation} ->
-        project_view(
-          biot,
-          node,
-          observation,
-          Map.get(operations, biot.id),
-          Map.get(publications, biot.id, []),
-          publication_domain
-        )
-      end)
-
-    {:ok, views}
-  end
-
   @spec spec(BiotId.t()) :: {:ok, BiotSpec.t()} | {:error, :not_found}
   def spec(%BiotId{} = biot_id) do
     with %BiotRow{} = biot <- Repo.get(BiotRow, biot_id),
@@ -213,9 +153,10 @@ defmodule Biot.Server.Biots do
         repository: command.repository,
         creation_fingerprint: fingerprint,
         desired_revision: 1,
-        desired_state: :running,
+        desired_state: command.initial_state,
         desired_environment_id: environment_id,
-        access_revision: 1
+        access_revision: 1,
+        direct_secret_exposure_possible: false
       }
 
       environment = %Environment{
@@ -319,7 +260,7 @@ defmodule Biot.Server.Biots do
   defp lifecycle_writes(%{plan: {:change, biot, node, desired, selection, operation}}) do
     Ecto.Multi.new()
     |> maybe_insert_environment(biot.id, desired.environment_id, selection)
-    |> maybe_delete_access(biot.id, operation.kind)
+    |> withdraw_access(biot.id, operation.kind)
     |> Ecto.Multi.update(:biot, desired_changeset(biot, desired, operation.kind))
     |> Ecto.Multi.insert(:operation, operation)
     |> Ecto.Multi.update_all(
@@ -348,19 +289,15 @@ defmodule Biot.Server.Biots do
     Ecto.Multi.insert(multi, :environment, environment)
   end
 
-  defp maybe_delete_access(multi, biot_id, :destroy) do
+  defp withdraw_access(multi, biot_id, :destroy) do
     multi
-    |> Ecto.Multi.delete_all(
-      :publications,
-      from(publication in Publication, where: publication.biot_id == ^biot_id)
-    )
-    |> Ecto.Multi.delete_all(
-      :shell_grants,
-      from(grant in ShellGrant, where: grant.biot_id == ^biot_id)
-    )
+    |> Publications.withdraw_all(biot_id)
+    |> Access.revoke_shell_grants(biot_id)
   end
 
-  defp maybe_delete_access(multi, _biot_id, _kind), do: multi
+  defp withdraw_access(multi, _biot_id, kind)
+       when kind in [:start, :stop, :update_environment],
+       do: multi
 
   defp desired_changeset(biot, desired, :destroy) do
     Ecto.Changeset.change(biot,
@@ -417,19 +354,7 @@ defmodule Biot.Server.Biots do
   end
 
   defp require_capacity(repo, node) do
-    allocated =
-      from(biot in BiotRow,
-        left_join: observation in Observation,
-        on: observation.biot_id == biot.id,
-        where:
-          biot.node_id == ^node.id and
-            (biot.desired_state != :destroyed or is_nil(observation.biot_id) or
-               observation.data != :no_allocation),
-        select: count(biot.id)
-      )
-      |> repo.one()
-
-    if allocated < node.max_biots, do: :ok, else: {:error, :capacity_exceeded}
+    if Capacity.room?(repo, node), do: :ok, else: {:error, :capacity_exceeded}
   end
 
   defp require_name_available(repo, owner_id, name) do
@@ -511,83 +436,6 @@ defmodule Biot.Server.Biots do
   defp wake_node(nil), do: :ok
 
   defp wake_node({node_id, biot_id}), do: NodeWake.spec_changed(node_id, biot_id)
-
-  defp after_id(query, nil), do: query
-  defp after_id(query, %BiotId{} = biot_id), do: where(query, [biot], biot.id > ^biot_id)
-
-  defp load_view(biot, publication_domain) do
-    node = Repo.get!(Node, biot.node_id)
-    observation = Repo.get(Observation, biot.id)
-    operation = latest_operation(biot.id)
-    publications = Map.get(publications_for_biots([biot.id]), biot.id, [])
-
-    project_view(biot, node, observation, operation, publications, publication_domain)
-  end
-
-  defp latest_operation(biot_id) do
-    current_nonterminal_operation(Repo, biot_id) ||
-      Repo.one(
-        from(operation in Operation,
-          where: operation.biot_id == ^biot_id,
-          order_by: [desc: operation.target_revision],
-          limit: 1
-        )
-      )
-  end
-
-  defp latest_operations(rows) do
-    biot_ids = Enum.map(rows, fn {biot, _node, _observation} -> biot.id end)
-    latest_operations_for(biot_ids)
-  end
-
-  defp latest_operations_for([]), do: %{}
-
-  defp latest_operations_for(biot_ids) do
-    target_revisions =
-      from(operation in Operation,
-        where: operation.biot_id in ^biot_ids,
-        group_by: operation.biot_id,
-        select: %{
-          biot_id: operation.biot_id,
-          target_revision:
-            fragment(
-              "COALESCE(MAX(CASE WHEN ? IN ('pending', 'working') THEN ? END), MAX(?))",
-              operation.outcome,
-              operation.target_revision,
-              operation.target_revision
-            )
-        }
-      )
-
-    from(operation in Operation,
-      join: target in subquery(target_revisions),
-      on:
-        target.biot_id == operation.biot_id and
-          target.target_revision == operation.target_revision,
-      select: operation
-    )
-    |> Repo.all()
-    |> Map.new(&{&1.biot_id, &1})
-  end
-
-  defp project_view(biot, node, observation, operation, publications, publication_domain) do
-    BiotView.project(%Input{
-      biot: biot,
-      observation: observation,
-      node: node,
-      operation: operation,
-      connection: NodeConnections.current(node.id),
-      publications: PublicationView.project(publications, publication_domain),
-      direct_secrets_ever_delivered: false
-    })
-  end
-
-  defp publications_for_biots(biot_ids) do
-    Publication
-    |> where([publication], publication.biot_id in ^biot_ids)
-    |> Repo.all()
-    |> Enum.group_by(& &1.biot_id)
-  end
 
   defp operation_kind(:start), do: :start
   defp operation_kind(:stop), do: :stop

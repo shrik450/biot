@@ -7,7 +7,7 @@ defmodule Biot.Server.PolicyRecordsTest do
   alias Biot.Server.{Access, Biots, NodeConnections, NodeWake, Publications, Reports}
   alias Biot.Server.Biots.Accepted
   alias Biot.Server.Policy.{Applied, Unchanged}
-  alias Biot.Server.Publications.HostnameDerivation
+  alias Biot.Server.Queries
   alias Biot.Server.Queries.AccessView
   alias Biot.Server.Repo
   alias Biot.Server.Schema.Biot, as: BiotRow
@@ -52,14 +52,14 @@ defmodule Biot.Server.PolicyRecordsTest do
     assert_policy(published, context, 1, {:pending, context.node.id})
     assert_no_wake()
 
-    key = Application.fetch_env!(:biot_server, :publication_hmac_key)
     domain = Application.fetch_env!(:biot_server, :publication_domain)
-    label = HostnameDerivation.derive(context.biot_id, context.port, key)
-    expected = %{port: context.port, url: "https://#{label}.#{domain}"}
+    row = Repo.get_by!(Publication, biot_id: context.biot_id, port: context.port)
+    assert row.state == :active
+    expected = %{port: context.port, url: "https://#{row.hostname}.#{domain}"}
 
     assert Publications.discover(context.actor, context.biot_id) == {:ok, [expected]}
 
-    assert {:ok, biot_view} = Biots.get(context.actor, context.biot_id)
+    assert {:ok, biot_view} = Queries.Biots.get(context.actor, context.biot_id)
     assert biot_view.publications == [expected]
     assert biot_view.access == %{revision: 1, enforcement: {:pending, context.node.id}}
 
@@ -69,6 +69,19 @@ defmodule Biot.Server.PolicyRecordsTest do
     assert_policy(repeated, context, 1, {:pending, context.node.id})
     assert_no_wake()
     assert Repo.aggregate(Publication, :count) == 1
+  end
+
+  test "each published port receives its own random hostname", context do
+    other_port = TestFixtures.port(5_000)
+
+    assert {:ok, %Applied{}} = Publications.publish(context.actor, context.biot_id, context.port)
+    assert {:ok, %Applied{}} = Publications.publish(context.actor, context.biot_id, other_port)
+
+    hostnames =
+      Repo.all(from(row in Publication, where: row.biot_id == ^context.biot_id))
+      |> Enum.map(& &1.hostname)
+
+    assert length(Enum.uniq(hostnames)) == 2
   end
 
   test "unpublish advances one revision and republish restores no view grants", context do
@@ -101,6 +114,60 @@ defmodule Biot.Server.PolicyRecordsTest do
 
     assert port == context.port
     assert {:ok, %AccessView{view_grants: []}} = Access.get_grants(context.actor, context.biot_id)
+  end
+
+  test "publish, unpublish, and republish keep one row with one hostname", context do
+    assert {:ok, %Applied{}} = Publications.publish(context.actor, context.biot_id, context.port)
+    first = Repo.get_by!(Publication, biot_id: context.biot_id, port: context.port)
+    assert first.state == :active
+
+    assert {:ok, %Applied{}} =
+             Publications.unpublish(context.actor, context.biot_id, context.port)
+
+    withdrawn = Repo.get_by!(Publication, biot_id: context.biot_id, port: context.port)
+    assert withdrawn.state == :inactive
+    assert withdrawn.hostname == first.hostname
+    assert Repo.aggregate(Publication, :count) == 1
+    assert Publications.discover(context.actor, context.biot_id) == {:ok, []}
+
+    assert {:ok, %Applied{}} = Publications.publish(context.actor, context.biot_id, context.port)
+
+    restored = Repo.get_by!(Publication, biot_id: context.biot_id, port: context.port)
+    assert restored.state == :active
+    assert restored.hostname == first.hostname
+    assert Repo.aggregate(Publication, :count) == 1
+  end
+
+  test "unpublish withdraws one revision and repeats are unchanged", context do
+    other_port = TestFixtures.port(5_000)
+    assert {:ok, %Applied{}} = Publications.publish(context.actor, context.biot_id, context.port)
+    assert {:ok, %Applied{}} = Publications.publish(context.actor, context.biot_id, other_port)
+
+    assert {:ok, %Applied{access_revision: 1}} =
+             Access.grant_view(context.actor, context.biot_id, context.port, context.viewer.id)
+
+    assert {:ok, %Applied{access_revision: 1}} =
+             Access.grant_view(context.actor, context.biot_id, other_port, context.viewer.id)
+
+    assert {:ok, %Applied{access_revision: 2}} =
+             Publications.unpublish(context.actor, context.biot_id, context.port)
+
+    assert Repo.all(from(grant in ViewGrant, where: grant.biot_id == ^context.biot_id))
+           |> Enum.map(& &1.port) == [other_port]
+
+    assert Repo.get_by!(Publication, biot_id: context.biot_id, port: other_port).state == :active
+
+    assert {:ok, %Unchanged{access_revision: 2}} =
+             Publications.unpublish(context.actor, context.biot_id, context.port)
+
+    assert Repo.get!(BiotRow, context.biot_id).access_revision == 2
+  end
+
+  test "unpublishing a port that was never published is unchanged", context do
+    assert {:ok, %Unchanged{access_revision: 1}} =
+             Publications.unpublish(context.actor, context.biot_id, context.port)
+
+    assert Repo.aggregate(Publication, :count) == 0
   end
 
   test "grant additions do not advance the revision or wake the node", context do
@@ -203,39 +270,6 @@ defmodule Biot.Server.PolicyRecordsTest do
     assert_no_wake()
   end
 
-  @tag :hostname_conflict
-  test "a hostname conflict rolls back the second publication", context do
-    other_biot_id = TestFixtures.id(BiotId, 9_002)
-    create_biot(context, other_biot_id, "other-policy-biot")
-    assert_one_wake(other_biot_id)
-
-    other_port = TestFixtures.port(5_000)
-    blocker_port = TestFixtures.port(5_001)
-    key = Application.fetch_env!(:biot_server, :publication_hmac_key)
-    collision = HostnameDerivation.derive(other_biot_id, other_port, key)
-
-    blocker =
-      Repo.insert!(%Publication{
-        biot_id: context.biot_id,
-        port: blocker_port,
-        hostname: collision
-      })
-
-    result =
-      try do
-        Publications.publish(context.actor, other_biot_id, other_port)
-      rescue
-        error -> {:raised, Exception.message(error)}
-      end
-
-    assert Repo.get_by(Publication, biot_id: context.biot_id, port: blocker_port) == blocker
-    refute Repo.get_by(Publication, biot_id: other_biot_id, port: other_port)
-    assert Repo.get!(BiotRow, context.biot_id).access_revision == 1
-    assert Repo.get!(BiotRow, other_biot_id).access_revision == 1
-    assert_no_wake()
-    assert result == {:error, :hostname_conflict}
-  end
-
   test "every policy change rejects a non-owner", context do
     assert {:ok, %Applied{}} = Publications.publish(context.actor, context.biot_id, context.port)
 
@@ -334,10 +368,15 @@ defmodule Biot.Server.PolicyRecordsTest do
     assert {:ok, %Applied{}} =
              Access.grant_shell(context.actor, context.biot_id, context.viewer.id)
 
-    assert {:ok, [%{port: port}]} = Publications.discover(context.viewer_actor, context.biot_id)
-    assert port == context.port
+    assert Publications.discover(context.viewer_actor, context.biot_id) == {:ok, []}
     assert Access.get_grants(context.viewer_actor, context.biot_id) == {:error, :forbidden}
     assert Publications.discover(context.other_actor, context.biot_id) == {:error, :forbidden}
+
+    assert {:ok, %Applied{}} =
+             Access.grant_view(context.actor, context.biot_id, context.port, context.viewer.id)
+
+    assert {:ok, [%{port: port}]} = Publications.discover(context.viewer_actor, context.biot_id)
+    assert port == context.port
     assert_no_wake()
   end
 
@@ -363,7 +402,7 @@ defmodule Biot.Server.PolicyRecordsTest do
 
     assert remaining == context.other_viewer.id
     assert Publications.discover(context.viewer_actor, context.biot_id) == {:error, :forbidden}
-    assert {:ok, [_publication]} = Publications.discover(context.other_actor, context.biot_id)
+    assert Publications.discover(context.other_actor, context.biot_id) == {:ok, []}
   end
 
   test "an unknown Biot is not found by every policy operation", context do
@@ -424,7 +463,7 @@ defmodule Biot.Server.PolicyRecordsTest do
                TestFixtures.execution_report(applied_access_revision: 9)
              )
 
-    assert {:ok, stale_view} = Biots.get(context.actor, context.biot_id)
+    assert {:ok, stale_view} = Queries.Biots.get(context.actor, context.biot_id)
     assert stale_view.access.enforcement == {:pending, context.node.id}
 
     assert {:ok, :stored} =
@@ -435,7 +474,7 @@ defmodule Biot.Server.PolicyRecordsTest do
                TestFixtures.execution_report(applied_access_revision: 2)
              )
 
-    assert {:ok, current_view} = Biots.get(context.actor, context.biot_id)
+    assert {:ok, current_view} = Queries.Biots.get(context.actor, context.biot_id)
     assert current_view.access == %{revision: 2, enforcement: :applied}
 
     assert {:ok, %Unchanged{access_revision: 2, enforcement: :applied}} =
@@ -459,14 +498,32 @@ defmodule Biot.Server.PolicyRecordsTest do
     assert {:ok, %Accepted{revision: 2}} = Biots.destroy(context.actor, context.biot_id)
     assert_one_wake(context.biot_id)
 
-    refute Repo.exists?(from(row in Publication, where: row.biot_id == ^context.biot_id))
+    rows = Repo.all(from(row in Publication, where: row.biot_id == ^context.biot_id))
+    assert Enum.map(rows, & &1.state) == [:inactive]
     refute Repo.exists?(from(row in ShellGrant, where: row.biot_id == ^context.biot_id))
     refute Repo.exists?(from(row in ViewGrant, where: row.biot_id == ^context.biot_id))
 
-    assert {:ok, view} = Biots.get(context.actor, context.biot_id)
+    assert {:ok, view} = Queries.Biots.get(context.actor, context.biot_id)
     assert view.publications == []
     assert view.access.revision == 2
     assert view.desired.state == :destroyed
+  end
+
+  test "destroy deactivates every published port of this biot", context do
+    other_port = TestFixtures.port(5_000)
+    assert {:ok, %Applied{}} = Publications.publish(context.actor, context.biot_id, context.port)
+    assert {:ok, %Applied{}} = Publications.publish(context.actor, context.biot_id, other_port)
+
+    hostnames =
+      Repo.all(from(row in Publication, where: row.biot_id == ^context.biot_id))
+      |> Map.new(&{&1.port, &1.hostname})
+
+    assert {:ok, %Accepted{revision: 2}} = Biots.destroy(context.actor, context.biot_id)
+
+    rows = Repo.all(from(row in Publication, where: row.biot_id == ^context.biot_id))
+    assert Enum.map(rows, & &1.state) == [:inactive, :inactive]
+    assert Map.new(rows, &{&1.port, &1.hostname}) == hostnames
+    assert Repo.get!(BiotRow, context.biot_id).access_revision == 2
   end
 
   defp create_biot(context, biot_id, name) do

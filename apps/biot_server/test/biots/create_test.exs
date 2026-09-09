@@ -61,6 +61,55 @@ defmodule Biot.Server.Biots.CreateTest do
     assert operation.failure == nil
   end
 
+  test "a stopped creation writes stopped intent and its own fingerprint", context do
+    running = TestFixtures.create_command(name: "worker", node_id: context.node.id)
+
+    stopped =
+      TestFixtures.create_command(
+        name: "worker",
+        node_id: context.node.id,
+        initial_state: :stopped
+      )
+
+    assert {:ok, %Accepted{revision: 1}} = Biots.create(context.actor, context.biot_id, stopped)
+
+    biot = Repo.get!(BiotRow, context.biot_id)
+    assert biot.desired_state == :stopped
+    assert biot.desired_revision == 1
+    assert biot.creation_fingerprint == CreationFingerprint.compute(stopped)
+    refute biot.creation_fingerprint == CreationFingerprint.compute(running)
+
+    operation = Repo.get_by!(Operation, biot_id: context.biot_id)
+    assert operation.kind == :create
+    assert operation.outcome == :pending
+    assert operation.target_revision == 1
+  end
+
+  test "a stopped creation retried as a running creation conflicts", context do
+    stopped =
+      TestFixtures.create_command(
+        name: "worker",
+        node_id: context.node.id,
+        initial_state: :stopped
+      )
+
+    assert {:ok, %Accepted{}} = Biots.create(context.actor, context.biot_id, stopped)
+
+    running = TestFixtures.create_command(name: "worker", node_id: context.node.id)
+
+    assert Biots.create(context.actor, context.biot_id, running) ==
+             {:error, :creation_conflict}
+
+    assert Repo.get!(BiotRow, context.biot_id).desired_state == :stopped
+  end
+
+  test "a new biot cannot be exposed to a directly delivered secret", context do
+    command = TestFixtures.create_command(node_id: context.node.id)
+    assert {:ok, %Accepted{}} = Biots.create(context.actor, context.biot_id, command)
+
+    assert Repo.get!(BiotRow, context.biot_id).direct_secret_exposure_possible == false
+  end
+
   test "a retry returns the pending operation and then reports unchanged", context do
     command = TestFixtures.create_command(node_id: context.node.id)
 

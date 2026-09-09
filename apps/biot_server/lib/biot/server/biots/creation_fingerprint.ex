@@ -11,11 +11,12 @@ defmodule Biot.Server.Biots.CreationFingerprint do
 
   @spec compute(Create.t()) :: Digest.t()
   def compute(%Create{} = command) do
-    Digest.compute(:biot_creation_v1, [
+    Digest.compute(:biot_creation_v2, [
       encode_field(command.name),
       encode_field(RepositorySource.to_string(command.repository)),
       encode_environment(command.environment),
-      encode_node(command.node_id)
+      encode_node(command.node_id),
+      encode_initial_state(command.initial_state)
     ])
   end
 
@@ -35,6 +36,9 @@ defmodule Biot.Server.Biots.CreationFingerprint do
 
   defp encode_node(:default), do: <<0>>
   defp encode_node(node_id), do: [<<1>>, encode_field(NodeId.to_string(node_id))]
+
+  defp encode_initial_state(:running), do: <<0>>
+  defp encode_initial_state(:stopped), do: <<1>>
 
   defp encode_field(value), do: [<<byte_size(value)::unsigned-big-32>>, value]
 end

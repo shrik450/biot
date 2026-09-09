@@ -20,33 +20,34 @@ defmodule Biot.Server.Operations.Completion do
   def decide(
         kind,
         target_revision,
-        %Desired{revision: target_revision} = desired,
+        %Desired{revision: target_revision, state: :running} = desired,
         %ExecutionReport{} = report
       )
-      when kind in [:create, :start] do
+      when kind in [:create, :update_environment] do
     running_with_environment(desired, report)
   end
 
   def decide(
-        :update_environment,
-        target_revision,
-        %Desired{revision: target_revision, state: :running} = desired,
-        report
-      ) do
-    running_with_environment(desired, report)
-  end
-
-  def decide(
-        :update_environment,
+        kind,
         target_revision,
         %Desired{
           revision: target_revision,
           state: :stopped,
           environment_id: environment_id
         },
-        %ExecutionReport{installed_environment_id: environment_id}
-      ),
+        %ExecutionReport{installed_environment_id: environment_id, container: :absent}
+      )
+      when kind in [:create, :update_environment],
       do: :succeeded
+
+  def decide(
+        :start,
+        target_revision,
+        %Desired{revision: target_revision} = desired,
+        %ExecutionReport{} = report
+      ) do
+    running_with_environment(desired, report)
+  end
 
   def decide(
         :stop,

@@ -15,6 +15,8 @@ defmodule Biot.Server.Repo.Migrations.CreateBiotsAndEnvironments do
       desired_state TEXT NOT NULL CHECK (desired_state IN ('running', 'stopped', 'destroyed')),
       desired_environment_id TEXT NOT NULL,
       access_revision INTEGER NOT NULL CHECK (access_revision > 0),
+      direct_secret_exposure_possible INTEGER NOT NULL DEFAULT 0
+        CHECK (direct_secret_exposure_possible IN (0, 1)),
       inserted_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY (desired_environment_id, id)
