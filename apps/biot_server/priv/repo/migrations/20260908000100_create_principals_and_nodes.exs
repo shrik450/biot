@@ -22,7 +22,7 @@ defmodule Biot.Server.Repo.Migrations.CreatePrincipalsAndNodes do
         null: false,
         check: %{
           name: "nodes_status_valid",
-          expr: "status IN ('enabled', 'disabled', 'retired')"
+          expr: "status IN ('enabled', 'disabled', 'retired', 'abandoned')"
         }
       )
 

@@ -9,10 +9,11 @@ defmodule Biot.Protocol.Failure do
   @enforce_keys [:stage, :code, :retry, :message, :diagnostic_ref]
   defstruct [:stage, :code, :retry, :message, :diagnostic_ref]
 
-  @stages ~w(allocate initialize resolve prepare install start retire release_environment remove_data release_allocation inspect)a
+  @stages ~w(node allocate initialize resolve prepare install start retire release_environment remove_data release_allocation inspect)a
 
   @type stage ::
-          :allocate
+          :node
+          | :allocate
           | :initialize
           | :resolve
           | :prepare
@@ -24,10 +25,11 @@ defmodule Biot.Protocol.Failure do
           | :release_allocation
           | :inspect
 
-  @codes ~w(resource_unavailable invalid_source resolution_failed preparation_failed installation_failed invalid_configuration container_failed lost_data ownership_mismatch inspection_failed)a
+  @codes ~w(node_abandoned resource_unavailable invalid_source resolution_failed preparation_failed installation_failed invalid_configuration container_failed lost_data ownership_mismatch inspection_failed)a
 
   @type code ::
-          :resource_unavailable
+          :node_abandoned
+          | :resource_unavailable
           | :invalid_source
           | :resolution_failed
           | :preparation_failed

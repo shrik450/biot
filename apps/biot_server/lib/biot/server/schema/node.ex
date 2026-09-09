@@ -13,7 +13,7 @@ defmodule Biot.Server.Schema.Node do
     field(:id, ProtocolValue, module: NodeId, primary_key: true)
     field(:registration, ProtocolValue, module: RegistrationId)
     field(:peer_identity, :string)
-    field(:status, Ecto.Enum, values: [:enabled, :disabled, :retired])
+    field(:status, Ecto.Enum, values: [:enabled, :disabled, :retired, :abandoned])
     field(:platform, ProtocolValue, module: Platform)
     field(:max_biots, :integer)
 

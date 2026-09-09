@@ -22,8 +22,8 @@ defmodule Biot.Protocol.TestGenerators do
   alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.SourceSelector
 
-  @failure_stages ~w(allocate initialize resolve prepare install start retire release_environment remove_data release_allocation inspect)a
-  @failure_codes ~w(resource_unavailable invalid_source resolution_failed preparation_failed installation_failed invalid_configuration container_failed lost_data ownership_mismatch inspection_failed)a
+  @failure_stages ~w(node allocate initialize resolve prepare install start retire release_environment remove_data release_allocation inspect)a
+  @failure_codes ~w(node_abandoned resource_unavailable invalid_source resolution_failed preparation_failed installation_failed invalid_configuration container_failed lost_data ownership_mismatch inspection_failed)a
   @failure_retries ~w(automatic after_change operator)a
 
   def canonical_uuid do

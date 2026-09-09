@@ -22,9 +22,12 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
   alias Biot.Server.Control.Listener
   alias Biot.Server.Diagnostics, as: ServerDiagnostics
   alias Biot.Server.NodeConnections
+  alias Biot.Server.Nodes
+  alias Biot.Server.Nodes.Registration
   alias Biot.Server.Repo
   alias Biot.Server.Schema.Biot, as: BiotRow
   alias Biot.Server.Schema.Environment
+  alias Biot.Server.Schema.Node
   alias Biot.Server.Schema.NodeObservation
   alias Biot.Server.Schema.Observation
   alias Biot.Server.Schema.Operation
@@ -48,12 +51,14 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
   setup do
     previous_timeout = Application.get_env(:biot_server, :diagnostic_timeout_ms)
     previous_max_bytes = Application.get_env(:biot_server, :diagnostic_max_bytes)
+    previous_registrations = Application.get_env(:biot_server, :node_registrations)
     Application.put_env(:biot_server, :diagnostic_timeout_ms, 100)
     Application.put_env(:biot_server, :diagnostic_max_bytes, 8)
 
     on_exit(fn ->
       restore_env(:diagnostic_timeout_ms, previous_timeout)
       restore_env(:diagnostic_max_bytes, previous_max_bytes)
+      restore_env(:node_registrations, previous_registrations)
     end)
   end
 
@@ -192,6 +197,101 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     assert %{connection_id: connection_id} = NodeConnections.current(node.id)
     assert connection_id == second.connection_id
     :ssl.close(second_socket)
+  end
+
+  test "one reload replaces one peer identity and abandons another connected node", context do
+    listener = start_listener(context.certificates)
+    replaced = node_for_certificate(1, context.certificates, 0)
+    abandoned = node_for_certificate(2, context.certificates, 2)
+
+    {old_socket, _connected, _synchronize} =
+      ready_peer(listener.port, context.certificates, replaced, 0)
+
+    {abandoned_socket, _connected, _synchronize} =
+      ready_peer(listener.port, context.certificates, abandoned, 2)
+
+    replacement_identity = Enum.at(context.certificates.nodes, 1).fingerprint
+
+    registrations = [
+      registration_for(replaced, peer_identity: replacement_identity),
+      registration_for(abandoned, status: :abandoned)
+    ]
+
+    Application.put_env(:biot_server, :node_registrations, registrations)
+    assert {:ok, _nodes} = Nodes.reload()
+    assert_closed(old_socket)
+    assert_closed(abandoned_socket)
+
+    stored = Repo.get!(Node, replaced.id)
+    assert stored.id == replaced.id
+    assert stored.registration == replaced.registration
+    assert stored.peer_identity == replacement_identity
+    assert Repo.get!(Node, abandoned.id).status == :abandoned
+
+    old_identity = connect(listener.port, context.certificates, 0)
+    send_hello(old_identity, replaced.registration, [1])
+
+    assert %Message.Reject{reason: :registration_rejected} =
+             await_message(old_identity, :handshake, Message.Reject)
+
+    assert_closed(old_identity)
+
+    {new_identity, _connected, _synchronize} =
+      ready_peer(listener.port, context.certificates, stored, 1)
+
+    :ssl.close(new_identity)
+
+    abandoned_identity = connect(listener.port, context.certificates, 2)
+    send_hello(abandoned_identity, abandoned.registration, [1])
+
+    assert %Message.Reject{reason: :registration_abandoned} =
+             await_message(abandoned_identity, :handshake, Message.Reject)
+
+    assert_closed(abandoned_identity)
+  end
+
+  test "status reloads close only connections that lose access service", context do
+    listener = start_listener(context.certificates)
+    owner = TestFixtures.principal(1)
+    actor = TestFixtures.actor(owner)
+    node = node_for_certificate(1, context.certificates, 0)
+    biot_id = TestFixtures.id(BiotId, 8_040)
+
+    assert {:ok, %Accepted{}} =
+             Biots.create(
+               actor,
+               biot_id,
+               TestFixtures.create_command(name: "status-reload", node_id: node.id)
+             )
+
+    {enabled_socket, _connected, _synchronize} =
+      ready_peer(listener.port, context.certificates, node, 0)
+
+    disabled = registration_for(node, status: :disabled)
+    Application.put_env(:biot_server, :node_registrations, [disabled])
+    assert {:ok, _nodes} = Nodes.reload()
+    assert_closed(enabled_socket)
+    assert Repo.get!(BiotRow, biot_id).access_revision == 2
+
+    disabled_node = Repo.get!(Node, node.id)
+
+    {disabled_socket, connected, _synchronize} =
+      ready_peer(listener.port, context.certificates, disabled_node, 0)
+
+    Application.put_env(:biot_server, :node_registrations, [])
+    assert {:ok, _nodes} = Nodes.reload()
+    assert_connection_open(disabled_socket, node.id, connected.connection_id)
+    assert Repo.get!(BiotRow, biot_id).access_revision == 2
+
+    Application.put_env(:biot_server, :node_registrations, [registration_for(node, [])])
+    assert {:ok, _nodes} = Nodes.reload()
+    assert_connection_open(disabled_socket, node.id, connected.connection_id)
+    assert Repo.get!(BiotRow, biot_id).access_revision == 2
+
+    Application.put_env(:biot_server, :node_registrations, [])
+    assert {:ok, _nodes} = Nodes.reload()
+    assert_closed(disabled_socket)
+    assert Repo.get!(BiotRow, biot_id).access_revision == 3
   end
 
   test "synchronize includes only biots that may still have node resources", context do
@@ -903,6 +1003,16 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     |> Repo.update!()
   end
 
+  defp registration_for(node, options) do
+    %Registration{
+      node_id: node.id,
+      registration_id: node.registration,
+      peer_identity: Keyword.get(options, :peer_identity, node.peer_identity),
+      max_biots: Keyword.get(options, :max_biots, node.max_biots),
+      status: Keyword.get(options, :status, node.status)
+    }
+  end
+
   defp connect(port, certificates, certificate_index) do
     certificate = Enum.at(certificates.nodes, certificate_index)
 
@@ -1032,6 +1142,11 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
 
   defp assert_closed(socket) do
     assert {:error, :closed} = :ssl.recv(socket, 0, @receive_timeout)
+  end
+
+  defp assert_connection_open(socket, node_id, connection_id) do
+    assert {:error, :timeout} = :ssl.recv(socket, 0, 50)
+    assert NodeConnections.current(node_id) == %{connection_id: connection_id, state: :ready}
   end
 
   defp assert_desired_revision(socket, biot_id, revision) do

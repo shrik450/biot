@@ -3,7 +3,14 @@ defmodule Biot.Server.Nodes.RegistrationLoader do
 
   alias Biot.Server.Nodes.Registration
 
-  @spec load() :: {:ok, [Registration.t()]} | {:error, term()}
+  @type error ::
+          :registrations_must_be_a_list
+          | {:invalid_path, term()}
+          | {:file, String.t(), File.posix()}
+          | {:invalid_json, String.t()}
+          | {:registration, non_neg_integer(), term()}
+
+  @spec load() :: {:ok, [Registration.t()]} | {:error, error()}
   def load do
     case Application.fetch_env(:biot_server, :node_registrations) do
       {:ok, registrations} -> parse(registrations)
@@ -11,7 +18,7 @@ defmodule Biot.Server.Nodes.RegistrationLoader do
     end
   end
 
-  @spec message(term()) :: String.t()
+  @spec message(error()) :: String.t()
   def message(:registrations_must_be_a_list), do: "node registrations must be a list"
   def message({:invalid_path, path}), do: "node registration path is invalid: #{inspect(path)}"
 

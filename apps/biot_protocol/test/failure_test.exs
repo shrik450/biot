@@ -1,6 +1,7 @@
 defmodule Biot.Protocol.FailureTest do
   @moduledoc false
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   alias Biot.Protocol.Failure
   alias Biot.Protocol.TestGenerators, as: Generators
@@ -56,4 +57,40 @@ defmodule Biot.Protocol.FailureTest do
     assert Failure.parse(%{encoded | "code" => "gremlins"}) == {:error, :invalid_format}
     assert Failure.parse(%{encoded | "retry" => "sometimes"}) == {:error, :invalid_format}
   end
+
+  property "parse never raises for random terms" do
+    terms = StreamData.one_of([StreamData.binary(), Generators.non_binary_term()])
+
+    check all(value <- terms) do
+      assert_parse_result(Failure.parse(value))
+    end
+  end
+
+  property "parse never raises when a valid encoding loses or changes one field" do
+    failure = %Failure{
+      stage: :node,
+      code: :node_abandoned,
+      retry: :operator,
+      message: "the assigned node was abandoned",
+      diagnostic_ref: nil
+    }
+
+    encoded = Failure.encode(failure)
+    terms = StreamData.one_of([StreamData.binary(), Generators.non_binary_term()])
+
+    check all(
+            field <- StreamData.member_of(Map.keys(encoded)),
+            replacement <- terms,
+            remove? <- StreamData.boolean()
+          ) do
+      changed =
+        if remove?, do: Map.delete(encoded, field), else: Map.put(encoded, field, replacement)
+
+      assert_parse_result(Failure.parse(changed))
+    end
+  end
+
+  defp assert_parse_result({:ok, %Failure{}}), do: :ok
+  defp assert_parse_result({:error, reason}) when is_atom(reason), do: :ok
+  defp assert_parse_result(result), do: flunk("parse returned #{inspect(result)}")
 end

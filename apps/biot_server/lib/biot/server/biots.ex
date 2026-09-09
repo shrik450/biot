@@ -19,6 +19,8 @@ defmodule Biot.Server.Biots do
   alias Biot.Server.Biots.Unchanged
   alias Biot.Server.CommandError
   alias Biot.Server.NodeConnections
+  alias Biot.Server.Nodes
+  alias Biot.Server.Nodes.Status
   alias Biot.Server.NodeWake
   alias Biot.Server.Queries.BiotView
   alias Biot.Server.Queries.BiotView.Input
@@ -274,23 +276,31 @@ defmodule Biot.Server.Biots do
          selection
        ) do
     with {:ok, biot} <- load_controlled_biot(repo, actor, biot_id),
+         node = repo.get!(Node, biot.node_id),
+         :ok <- require_lifecycle_capable_node(node),
          :ok <- check_revision(biot, expected_revision) do
-      transition(biot, actor.principal_id, change, selection)
+      transition(biot, node, actor.principal_id, change, selection)
     end
   end
 
   defp plan_destroy(repo, actor, biot_id) do
     with {:ok, biot} <- load_controlled_biot(repo, actor, biot_id) do
-      transition(biot, actor.principal_id, :destroy, nil)
+      node = repo.get!(Node, biot.node_id)
+      transition(biot, node, actor.principal_id, :destroy, nil)
     end
   end
 
-  defp transition(biot, actor_id, change, selection) do
+  defp transition(biot, node, actor_id, change, selection) do
     case Desired.transition(BiotRow.desired(biot), change) do
       {:changed, desired} ->
         kind = operation_kind(change)
-        operation = operation(generate_id(OperationId), actor_id, biot.id, kind, desired.revision)
-        {:ok, {:change, biot, desired, selection, operation}}
+
+        operation =
+          generate_id(OperationId)
+          |> operation(actor_id, biot.id, kind, desired.revision)
+          |> fail_for_abandoned_node(node)
+
+        {:ok, {:change, biot, node, desired, selection, operation}}
 
       :unchanged ->
         {:ok, {:unchanged, %Unchanged{biot_id: biot.id, revision: biot.desired_revision}}}
@@ -306,7 +316,7 @@ defmodule Biot.Server.Biots do
     |> Ecto.Multi.put(:wake, nil)
   end
 
-  defp lifecycle_writes(%{plan: {:change, biot, desired, selection, operation}}) do
+  defp lifecycle_writes(%{plan: {:change, biot, node, desired, selection, operation}}) do
     Ecto.Multi.new()
     |> maybe_insert_environment(biot.id, desired.environment_id, selection)
     |> maybe_delete_access(biot.id, operation.kind)
@@ -322,7 +332,7 @@ defmodule Biot.Server.Biots do
       set: [outcome: :superseded]
     )
     |> Ecto.Multi.put(:result, accepted(operation))
-    |> Ecto.Multi.put(:wake, {biot.node_id, biot.id})
+    |> Ecto.Multi.put(:wake, lifecycle_wake(biot, node))
   end
 
   defp maybe_insert_environment(multi, _biot_id, _environment_id, nil), do: multi
@@ -382,6 +392,9 @@ defmodule Biot.Server.Biots do
       else: {:error, :forbidden}
   end
 
+  defp require_lifecycle_capable_node(%Node{} = node),
+    do: Status.accepts_lifecycle_change(node.status)
+
   defp check_revision(%BiotRow{desired_revision: revision}, revision), do: :ok
 
   defp check_revision(%BiotRow{desired_revision: current_revision}, _expected_revision),
@@ -399,8 +412,7 @@ defmodule Biot.Server.Biots do
   defp available_node(repo, node_id) do
     case repo.get(Node, node_id) do
       nil -> {:error, :not_found}
-      %Node{status: :enabled} = node -> {:ok, node}
-      %Node{} -> {:error, :node_disabled}
+      %Node{} = node -> with :ok <- Status.accepts_new_biots(node.status), do: {:ok, node}
     end
   end
 
@@ -459,6 +471,18 @@ defmodule Biot.Server.Biots do
       outcome: :pending,
       failure: nil
     }
+  end
+
+  defp fail_for_abandoned_node(%Operation{kind: :destroy} = operation, %Node{} = node) do
+    if Status.written_off?(node.status),
+      do: %{operation | outcome: :failed, failure: Nodes.abandonment_failure()},
+      else: operation
+  end
+
+  defp fail_for_abandoned_node(%Operation{} = operation, %Node{}), do: operation
+
+  defp lifecycle_wake(biot, %Node{} = node) do
+    if Status.written_off?(node.status), do: nil, else: {biot.node_id, biot.id}
   end
 
   defp accepted(operation) do

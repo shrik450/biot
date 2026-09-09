@@ -9,8 +9,9 @@ defmodule Biot.Server.Application do
       Biot.Server.Repo,
       {Phoenix.PubSub, name: Biot.Server.PubSub},
       Biot.Server.NodeConnections,
-      Biot.Server.Nodes.Startup,
+      # Startup needs the registry, while the listener must not accept a node before enrollment.
       {Registry, keys: :unique, name: Biot.Server.Control.Registry},
+      Biot.Server.Nodes.Startup,
       Biot.Server.Control.Listener
     ]
 

@@ -74,6 +74,46 @@ defmodule Biot.Protocol.ControlProtocolTest do
     end
   end
 
+  test "every reject reason round-trips through the wire codec" do
+    assert Message.Reject.reasons() == [
+             :unsupported_protocol_version,
+             :registration_rejected,
+             :registration_retired,
+             :registration_abandoned
+           ]
+
+    for reason <- Message.Reject.reasons() do
+      reject = %Message.Reject{reason: reason}
+      assert {:ok, encoded} = Wire.encode(reject, :handshake)
+      assert Wire.decode(encoded, :handshake) == {:ok, reject}
+    end
+  end
+
+  property "reject decoding never raises for random JSON terms" do
+    check all(value <- json_term()) do
+      assert_wire_result(value |> Jason.encode!() |> Wire.decode(:handshake))
+    end
+  end
+
+  property "reject decoding never raises when a valid encoding loses or changes one field" do
+    json_values = json_term()
+
+    check all(
+            reason <- StreamData.member_of(Message.Reject.reasons()),
+            field <- StreamData.member_of(["type", "reason"]),
+            replacement <- json_values,
+            remove? <- StreamData.boolean()
+          ) do
+      {:ok, encoded} = Wire.encode(%Message.Reject{reason: reason}, :handshake)
+      decoded = Jason.decode!(encoded)
+
+      changed =
+        if remove?, do: Map.delete(decoded, field), else: Map.put(decoded, field, replacement)
+
+      assert_wire_result(changed |> Jason.encode!() |> Wire.decode(:handshake))
+    end
+  end
+
   test "messages from the wrong phase are rejected" do
     observation = find_message(Message.Observation)
     hello = find_message(Message.Hello)
@@ -358,6 +398,22 @@ defmodule Biot.Protocol.ControlProtocolTest do
 
   defp context_for(value) when rem(byte_size(value), 2) == 0, do: :handshake
   defp context_for(_value), do: 1
+
+  defp json_term do
+    scalar =
+      StreamData.one_of([
+        StreamData.string(:printable, max_length: 40),
+        StreamData.integer(),
+        StreamData.boolean(),
+        StreamData.constant(nil)
+      ])
+
+    StreamData.one_of([
+      scalar,
+      StreamData.list_of(scalar, max_length: 5),
+      StreamData.map_of(StreamData.string(:alphanumeric, max_length: 12), scalar, max_length: 5)
+    ])
+  end
 
   defp id(module, number) do
     value = "00000000-0000-4000-8000-" <> String.pad_leading(Integer.to_string(number), 12, "0")

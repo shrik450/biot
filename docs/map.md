@@ -48,8 +48,8 @@ This app owns shared parsed values and wire codecs.
 - **Execution:** `ExecutionSpec` contains complete server-owned execution intent.
 - **Execution:** `ExecutionReport` contains node-supplied execution facts.
 - **Execution:** `Failure` represents a bounded description of a failed lifecycle action.
-  Its stages include `release_environment`; its codes include `invalid_configuration`
-  and `ownership_mismatch`.
+  Its stages include `node` and `release_environment`; its codes include `node_abandoned`,
+  `invalid_configuration`, and `ownership_mismatch`.
 - **Execution:** `ContainerState` represents the observed state of a container.
 - **Identifiers:** `ConnectionId` identifies an authenticated node connection.
 - **Identifiers:** `IncarnationId` identifies a container incarnation.
@@ -73,9 +73,25 @@ Tests for this app are pure unit tests with StreamData property tests.
 `ProtocolValue` stores any parsed protocol value as text.
 The other custom types wrap protocol `encode/1` and `parse/1` functions.
 `Principals` and `Nodes` own transactions.
+`Nodes.reload/0` is the one enrollment entry point.
+`Nodes.Startup` calls it at boot and fails boot with a readable message on rejection.
+Operators call it with `bin/server rpc "Biot.Server.Nodes.reload()"`.
+It loads the enrollment file, runs the enrollment transaction, and closes planned control connections after commit.
+An invalid reload changes nothing and logs a plain failure message.
+`Nodes.abandonment_failure/0` builds the only abandonment failure value.
+`Biots` writes it when destroy runs on an abandoned node.
 `Nodes.Plan` is the pure enrollment planner.
+It returns `%Plan{writes, close_connections}`.
+Its writes include `insert`, `update_status`, `update_max_biots`, `replace_peer_identity`, `increment_access_revisions`, and `fail_operations`.
+Its rejections include `duplicate_node`, `duplicate_registration`, `duplicate_peer_identity`, `rebinding`, `terminal_node_locked`, and `retirement_blocked`.
+`terminal_node_locked` replaces the two retired-node rejections.
+Peer identity changes are allowed.
+`rebinding` covers only a changed registration ID or reuse of another node's identity.
+`Nodes.Status` owns the meaning of node status.
+Its six functions are `terminal?/1`, `serves_access?/1`, `written_off?/1`, `accepts_connection/1`, `accepts_new_biots/1`, and `accepts_lifecycle_change/1`.
+Every status appears in every function.
+A new status cannot compile until all six functions answer it.
 `Nodes.RegistrationLoader` reads the JSON file named by `BIOT_NODE_REGISTRATIONS`.
-`Nodes.Startup` runs enrollment at boot and fails boot with a readable message on rejection.
 `Actor` is the authenticated caller.
 `CommandError` is the model's error union.
 `CommandError` includes `destroyed` for lifecycle changes against a destroyed Biot.
@@ -164,9 +180,26 @@ publication.
 - `Control.Listener` accepts mutually authenticated TLS node connections.
 - `Control.Connection` owns one process per node connection.
   It handles hello, synchronize, ready, wake, reports, heartbeats, and diagnostics.
+  It sends `registration_abandoned` when an abandoned node attempts a connection.
+- The server starts the Registry before `Nodes.Startup` and starts the listener after `Nodes.Startup`.
   The Registry enforces newest-wins connection replacement.
 - `Control.Synchronization` builds the complete intent set for a node.
 - `Diagnostics` authorizes and retrieves bounded node-held diagnostics.
+
+### Node status and lifecycle
+
+`Schema.Node` stores `abandoned` with the other node statuses.
+The node migration check constraint allows `enabled`, `disabled`, `retired`, and `abandoned`.
+`Nodes.Registration` accepts the same four status values.
+`CommandError` includes `node_abandoned`.
+`Message.Reject` includes `registration_abandoned`.
+`Failure` uses stage `node` and code `node_abandoned` for abandonment.
+
+`Biots` loads the assigned node during the lifecycle plan phase.
+`start`, `stop`, and `update_environment` return `node_abandoned` on an abandoned node.
+Those commands still work on a disabled node.
+`create` returns `node_abandoned` for an abandoned node and `node_disabled` for a disabled node.
+`destroy` on an abandoned node records a failed `Operation` and sends no wake.
 
 ### Migrations
 
@@ -199,6 +232,16 @@ Step 10 adds focused server evidence:
   view-grant cascades, hostname conflicts, and enforcement progress.
 - `authorization_test.exs` proves owner, policy-change, grant-read, and
   discovery predicates.
+
+Step 11 adds node enrollment and abandonment evidence:
+
+- `test/nodes/status_test.exs` is new. It covers the complete status table.
+- `nodes/registration_test.exs` covers all four registration status values.
+- `nodes_test.exs`, `nodes/plan_test.exs`, `nodes/startup_test.exs`, and
+  `control_protocol_integration_test.exs` cover reload, abandonment, peer replacement,
+  and the reject reasons.
+- `control_protocol_test.exs` and `failure_test.exs` cover the new `Reject` and
+  `Failure` values.
 
 ## `apps/biot_node`
 

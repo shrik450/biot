@@ -1,29 +1,73 @@
 defmodule Biot.Server.Nodes do
-  @moduledoc "Owns the transactional import of operator-controlled node registrations."
+  @moduledoc """
+  Owns node enrollment, reloads, connection closure, and the abandonment failure.
+
+  `reload/0` is the operator entry point for applying the enrollment file.
+  """
 
   import Ecto.Query
 
+  require Logger
+
+  alias Biot.Protocol.Failure
   alias Biot.Protocol.NodeId
+  alias Biot.Server.Control.Registry, as: ControlRegistry
   alias Biot.Server.Nodes.Plan
-  alias Biot.Server.Nodes.Registration
+  alias Biot.Server.Nodes.RegistrationLoader
   alias Biot.Server.Repo
-  alias Biot.Server.Schema.{Biot, Node, Observation}
+  alias Biot.Server.Schema.{Biot, Node, Observation, Operation}
 
-  @type rejection :: Plan.rejection() | {:persistence_failed, NodeId.t()}
+  @type rejection ::
+          Plan.rejection()
+          | {:enrollment_file, RegistrationLoader.error()}
+          | {:persistence_failed, NodeId.t()}
 
-  @spec enroll([Registration.t()]) :: {:ok, [Node.t()]} | {:error, rejection()}
-  def enroll(registrations) when is_list(registrations) do
+  @spec reload() :: {:ok, [Node.t()]} | {:error, rejection()}
+  def reload do
+    with {:ok, registrations} <- load_registrations(),
+         {:ok, _nodes} = success <- commit_enrollment(registrations) do
+      success
+    else
+      {:error, rejection} ->
+        Logger.warning("node enrollment reload failed: #{message(rejection)}")
+        {:error, rejection}
+    end
+  end
+
+  @spec abandonment_failure() :: Failure.t()
+  def abandonment_failure do
+    %Failure{
+      stage: :node,
+      code: :node_abandoned,
+      retry: :operator,
+      message: "the assigned node was abandoned",
+      diagnostic_ref: nil
+    }
+  end
+
+  defp load_registrations do
+    with {:error, error} <- RegistrationLoader.load(),
+         do: {:error, {:enrollment_file, error}}
+  end
+
+  defp commit_enrollment(registrations) when is_list(registrations) do
     multi =
       Ecto.Multi.new()
       |> Ecto.Multi.run(:plan, fn repo, _changes -> plan(repo, registrations) end)
-      |> Ecto.Multi.merge(fn %{plan: actions} -> apply_actions(actions) end)
+      |> Ecto.Multi.merge(fn %{plan: plan} -> apply_actions(plan.writes) end)
       |> Ecto.Multi.run(:nodes, fn repo, _changes -> {:ok, repo.all(Node)} end)
 
     # Immediate mode takes SQLite write ownership before enrollment state is read.
     case Repo.transaction(multi, mode: :immediate) do
-      {:ok, %{nodes: nodes}} -> {:ok, nodes}
-      {:error, :plan, rejection, _changes} -> {:error, rejection}
-      {:error, action, _value, _changes} -> {:error, persistence_rejection(action)}
+      {:ok, %{nodes: nodes, plan: plan}} ->
+        close_connections(plan.close_connections)
+        {:ok, nodes}
+
+      {:error, :plan, rejection, _changes} ->
+        {:error, rejection}
+
+      {:error, action, _value, _changes} ->
+        {:error, persistence_rejection(action)}
     end
   end
 
@@ -86,14 +130,14 @@ defmodule Biot.Server.Nodes do
     )
   end
 
-  defp apply_action(multi, {:disable_omitted, node_id}, now) do
+  defp apply_action(multi, {:replace_peer_identity, node_id, peer_identity}, now) do
     query = from(node in Node, where: node.id == ^node_id)
 
     Ecto.Multi.update_all(
       multi,
-      {:disable_omitted, node_id},
+      {:replace_peer_identity, node_id},
       query,
-      set: [status: :disabled, updated_at: now]
+      set: [peer_identity: peer_identity, updated_at: now]
     )
   end
 
@@ -108,12 +152,41 @@ defmodule Biot.Server.Nodes do
     )
   end
 
+  defp apply_action(multi, {:fail_operations, node_id}, now) do
+    assigned_biot_ids = from(biot in Biot, where: biot.node_id == ^node_id, select: biot.id)
+
+    query =
+      from(operation in Operation,
+        where:
+          operation.biot_id in subquery(assigned_biot_ids) and
+            operation.outcome in [:pending, :working]
+      )
+
+    Ecto.Multi.update_all(
+      multi,
+      {:fail_operations, node_id},
+      query,
+      set: [outcome: :failed, failure: abandonment_failure(), updated_at: now]
+    )
+  end
+
   @spec message(rejection()) :: String.t()
   def message({:persistence_failed, node_id}) do
     "node #{NodeId.to_string(node_id)} could not be saved"
   end
 
+  def message({:enrollment_file, error}), do: RegistrationLoader.message(error)
+
   def message(rejection), do: Plan.message(rejection)
+
+  defp close_connections(node_ids), do: Enum.each(node_ids, &close_connection/1)
+
+  defp close_connection(node_id) do
+    case Registry.lookup(ControlRegistry, node_id) do
+      [{pid, _connection_id}] -> send(pid, :registration_changed)
+      [] -> :ok
+    end
+  end
 
   defp persistence_rejection({_action, %NodeId{} = node_id}),
     do: {:persistence_failed, node_id}

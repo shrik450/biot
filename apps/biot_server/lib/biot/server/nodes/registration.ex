@@ -3,11 +3,12 @@ defmodule Biot.Server.Nodes.Registration do
 
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.RegistrationId
+  alias Biot.Server.Nodes.Status
 
   @enforce_keys [:node_id, :registration_id, :peer_identity, :max_biots, :status]
   defstruct [:node_id, :registration_id, :peer_identity, :max_biots, :status]
 
-  @type status :: :enabled | :disabled | :retired
+  @type status :: Status.t()
   @type t :: %__MODULE__{
           node_id: NodeId.t(),
           registration_id: RegistrationId.t(),
@@ -73,9 +74,12 @@ defmodule Biot.Server.Nodes.Registration do
   defp parse_max_biots(value) when is_integer(value) and value > 0, do: {:ok, value}
   defp parse_max_biots(_value), do: {:error, {:max_biots, :not_positive}}
 
-  defp parse_status(status) when status in [:enabled, :disabled, :retired], do: {:ok, status}
+  defp parse_status(status) when status in [:enabled, :disabled, :retired, :abandoned],
+    do: {:ok, status}
+
   defp parse_status("enabled"), do: {:ok, :enabled}
   defp parse_status("disabled"), do: {:ok, :disabled}
   defp parse_status("retired"), do: {:ok, :retired}
+  defp parse_status("abandoned"), do: {:ok, :abandoned}
   defp parse_status(_status), do: {:error, {:status, :invalid_value}}
 end

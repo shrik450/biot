@@ -13,6 +13,7 @@ defmodule Biot.Server.CommandError do
           | :name_conflict
           | :hostname_conflict
           | :node_disabled
+          | :node_abandoned
           | :capacity_exceeded
           | :temporarily_unavailable
 end

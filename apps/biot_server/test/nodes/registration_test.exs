@@ -1,5 +1,6 @@
 defmodule Biot.Server.Nodes.RegistrationTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   alias Biot.Server.Nodes.Registration
 
@@ -37,14 +38,16 @@ defmodule Biot.Server.Nodes.RegistrationTest do
     assert registration.status == :retired
   end
 
+  test "parse accepts every node status in JSON and parsed forms" do
+    for status <- [:enabled, :disabled, :retired, :abandoned],
+        value <- [status, Atom.to_string(status)] do
+      assert {:ok, registration} = Registration.parse(%{valid_registration() | "status" => value})
+      assert registration.status == status
+    end
+  end
+
   test "parse rejects invalid fields" do
-    valid = %{
-      "node_id" => @node_id,
-      "registration_id" => @registration_id,
-      "peer_identity" => @peer_identity,
-      "max_biots" => 4,
-      "status" => "enabled"
-    }
+    valid = valid_registration()
 
     cases = [
       {:bad_status, Map.put(valid, "status", "paused"), {:status, :invalid_value}},
@@ -60,5 +63,57 @@ defmodule Biot.Server.Nodes.RegistrationTest do
     for {label, value, reason} <- cases do
       assert Registration.parse(value) == {:error, reason}, "case #{label}"
     end
+  end
+
+  property "parse never raises for random terms" do
+    terms = random_term()
+
+    check all(value <- terms) do
+      assert_parse_result(Registration.parse(value))
+    end
+  end
+
+  property "parse never raises when a valid encoding loses or changes one field" do
+    fields = Map.keys(valid_registration())
+    terms = random_term()
+
+    check all(
+            field <- StreamData.member_of(fields),
+            replacement <- terms,
+            remove? <- StreamData.boolean()
+          ) do
+      changed =
+        if remove?,
+          do: Map.delete(valid_registration(), field),
+          else: Map.put(valid_registration(), field, replacement)
+
+      assert_parse_result(Registration.parse(changed))
+    end
+  end
+
+  defp valid_registration do
+    %{
+      "node_id" => @node_id,
+      "registration_id" => @registration_id,
+      "peer_identity" => @peer_identity,
+      "max_biots" => 4,
+      "status" => "enabled"
+    }
+  end
+
+  defp assert_parse_result({:ok, %Registration{}}), do: :ok
+  defp assert_parse_result({:error, {_field, _reason}}), do: :ok
+  defp assert_parse_result(result), do: flunk("parse returned #{inspect(result)}")
+
+  defp random_term do
+    StreamData.one_of([
+      StreamData.binary(),
+      StreamData.integer(),
+      StreamData.float(),
+      StreamData.list_of(StreamData.integer()),
+      StreamData.map_of(StreamData.integer(), StreamData.binary()),
+      StreamData.tuple({StreamData.integer(), StreamData.binary()}),
+      StreamData.member_of([nil, true, false, :value, [], {}, %{}])
+    ])
   end
 end

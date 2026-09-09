@@ -30,12 +30,14 @@ defmodule Biot.Protocol.Message.Reject do
   @reasons [
     :unsupported_protocol_version,
     :registration_rejected,
-    :registration_retired
+    :registration_retired,
+    :registration_abandoned
   ]
   @type reason ::
           :unsupported_protocol_version
           | :registration_rejected
           | :registration_retired
+          | :registration_abandoned
 
   @enforce_keys [:reason]
   defstruct [:reason]

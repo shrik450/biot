@@ -15,6 +15,7 @@ defmodule Biot.Server.Control.Connection do
   alias Biot.Server.Biots
   alias Biot.Server.Control.Synchronization
   alias Biot.Server.NodeConnections
+  alias Biot.Server.Nodes.Status
   alias Biot.Server.NodeWake
   alias Biot.Server.Repo
   alias Biot.Server.Reports
@@ -146,8 +147,9 @@ defmodule Biot.Server.Control.Connection do
     end
   end
 
-  def handle_info(:replaced, {socket, %State{} = state}) do
-    {:stop, {:shutdown, :replaced}, {socket, state}}
+  def handle_info(reason, {socket, %State{} = state})
+      when reason in [:replaced, :registration_changed] do
+    {:stop, {:shutdown, reason}, {socket, state}}
   end
 
   @impl GenServer
@@ -347,8 +349,9 @@ defmodule Biot.Server.Control.Connection do
     end
   end
 
-  defp authenticate_status(%Node{status: :retired}), do: {:error, :registration_retired}
-  defp authenticate_status(%Node{} = node), do: {:ok, node}
+  defp authenticate_status(%Node{} = node) do
+    with :ok <- Status.accepts_connection(node.status), do: {:ok, node}
+  end
 
   defp claim_node(node_id, connection_id) do
     # The Registry uses NodeId keys so the newest authenticated connection replaces the old one.
@@ -449,7 +452,11 @@ defmodule Biot.Server.Control.Connection do
        do: :registration_rejected
 
   defp rejection_reason(reason)
-       when reason in [:unsupported_protocol_version, :registration_retired],
+       when reason in [
+              :unsupported_protocol_version,
+              :registration_retired,
+              :registration_abandoned
+            ],
        do: reason
 
   defp rejection_reason(_reason), do: nil
