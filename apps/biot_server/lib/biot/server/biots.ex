@@ -22,6 +22,7 @@ defmodule Biot.Server.Biots do
   alias Biot.Server.NodeWake
   alias Biot.Server.Queries.BiotView
   alias Biot.Server.Queries.BiotView.Input
+  alias Biot.Server.Queries.PublicationView
   alias Biot.Server.Repo
   alias Biot.Server.Schema.Biot, as: BiotRow
 
@@ -108,9 +109,11 @@ defmodule Biot.Server.Biots do
   def get(nil, %BiotId{}), do: {:error, :unauthenticated}
 
   def get(%Actor{} = actor, %BiotId{} = biot_id) do
+    publication_domain = Application.fetch_env!(:biot_server, :publication_domain)
+
     with %BiotRow{} = biot <- Repo.get(BiotRow, biot_id),
          true <- Authorization.owner?(actor, biot) do
-      {:ok, load_view(biot)}
+      {:ok, load_view(biot, publication_domain)}
     else
       nil -> {:error, :not_found}
       false -> {:error, :forbidden}
@@ -123,6 +126,8 @@ defmodule Biot.Server.Biots do
 
   def list(%Actor{} = actor, %{after: after_id, limit: limit})
       when is_integer(limit) and limit > 0 do
+    publication_domain = Application.fetch_env!(:biot_server, :publication_domain)
+
     rows =
       BiotRow
       |> where([biot], biot.owner_id == ^actor.principal_id)
@@ -138,9 +143,19 @@ defmodule Biot.Server.Biots do
 
     operations = latest_operations(rows)
 
+    publications =
+      publications_for_biots(Enum.map(rows, fn {biot, _node, _observation} -> biot.id end))
+
     views =
       Enum.map(rows, fn {biot, node, observation} ->
-        project_view(biot, node, observation, Map.get(operations, biot.id))
+        project_view(
+          biot,
+          node,
+          observation,
+          Map.get(operations, biot.id),
+          Map.get(publications, biot.id, []),
+          publication_domain
+        )
       end)
 
     {:ok, views}
@@ -476,12 +491,13 @@ defmodule Biot.Server.Biots do
   defp after_id(query, nil), do: query
   defp after_id(query, %BiotId{} = biot_id), do: where(query, [biot], biot.id > ^biot_id)
 
-  defp load_view(biot) do
+  defp load_view(biot, publication_domain) do
     node = Repo.get!(Node, biot.node_id)
     observation = Repo.get(Observation, biot.id)
     operation = latest_operation(biot.id)
+    publications = Map.get(publications_for_biots([biot.id]), biot.id, [])
 
-    project_view(biot, node, observation, operation)
+    project_view(biot, node, observation, operation, publications, publication_domain)
   end
 
   defp latest_operation(biot_id) do
@@ -530,16 +546,23 @@ defmodule Biot.Server.Biots do
     |> Map.new(&{&1.biot_id, &1})
   end
 
-  defp project_view(biot, node, observation, operation) do
+  defp project_view(biot, node, observation, operation, publications, publication_domain) do
     BiotView.project(%Input{
       biot: biot,
       observation: observation,
       node: node,
       operation: operation,
       connection: NodeConnections.current(node.id),
-      publications: [],
+      publications: PublicationView.project(publications, publication_domain),
       direct_secrets_ever_delivered: false
     })
+  end
+
+  defp publications_for_biots(biot_ids) do
+    Publication
+    |> where([publication], publication.biot_id in ^biot_ids)
+    |> Repo.all()
+    |> Enum.group_by(& &1.biot_id)
   end
 
   defp operation_kind(:start), do: :start

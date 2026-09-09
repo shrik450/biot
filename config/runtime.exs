@@ -36,7 +36,15 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "node" do
     System.get_env(name) || raise "environment variable #{name} is missing"
   end
 
+  publication_hmac_key =
+    case Base.decode64(required_env.("BIOT_SERVER_PUBLICATION_HMAC_KEY")) do
+      {:ok, key} when byte_size(key) >= 16 -> key
+      _error -> raise "BIOT_SERVER_PUBLICATION_HMAC_KEY must be base64 for at least 16 bytes"
+    end
+
   config :biot_server,
+    publication_hmac_key: publication_hmac_key,
+    publication_domain: required_env.("BIOT_SERVER_PUBLICATION_DOMAIN"),
     control_port: integer_env.("BIOT_CONTROL_PORT", 4443),
     control_tls: [
       certfile: required_env.("BIOT_CONTROL_CERTFILE"),

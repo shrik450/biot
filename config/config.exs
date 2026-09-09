@@ -3,6 +3,8 @@ import Config
 config :biot_server,
   ecto_repos: [Biot.Server.Repo],
   default_node_id: nil,
+  publication_hmac_key: Base.decode64!("qI4aldkbY6UL+coFbAt0s/g6/Ea1E7bykhtLkPo7GAQ="),
+  publication_domain: "env.test",
   control_port: nil,
   control_tls: nil,
   handshake_timeout_ms: 10_000,

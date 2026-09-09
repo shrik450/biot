@@ -16,7 +16,9 @@ defmodule Biot.Server.Repo.Migrations.CreateAccessRecords do
     end
 
     create(unique_index(:publications, [:biot_id, :port], name: :publication_port))
-    create(unique_index(:publications, [:hostname], name: :publication_host))
+
+    # Shared with Publications.@hostname_index_name as "publications_hostname_index".
+    create(unique_index(:publications, [:hostname], name: :publications_hostname_index))
 
     create table(:shell_grants, primary_key: false) do
       add(

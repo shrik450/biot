@@ -34,4 +34,27 @@ defmodule Biot.Server.AuthorizationTest do
     refute Authorization.may_control_lifecycle?(context.stranger, context.biot)
     refute Authorization.may_control_lifecycle?(nil, context.biot)
   end
+
+  test "only the owner may change policy", context do
+    assert Authorization.may_change_policy?(context.owner, context.biot)
+    refute Authorization.may_change_policy?(context.stranger, context.biot)
+    refute Authorization.may_change_policy?(nil, context.biot)
+  end
+
+  test "only the owner may read grants", context do
+    assert Authorization.may_read_grants?(context.owner, context.biot)
+    refute Authorization.may_read_grants?(context.stranger, context.biot)
+    refute Authorization.may_read_grants?(nil, context.biot)
+  end
+
+  test "the owner and shell-grant holders may discover publications", context do
+    assert Authorization.may_discover?(context.owner, context.biot, [])
+
+    assert Authorization.may_discover?(context.stranger, context.biot, [
+             context.stranger.principal_id
+           ])
+
+    refute Authorization.may_discover?(context.stranger, context.biot, [])
+    refute Authorization.may_discover?(nil, context.biot, [context.stranger.principal_id])
+  end
 end

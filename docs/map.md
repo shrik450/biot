@@ -92,6 +92,73 @@ The other custom types wrap protocol `encode/1` and `parse/1` functions.
 - `NodeConnections` is an ETS registry of current node connections written by the control link.
 - `NodeWake` provides one PubSub topic per node, plus `spec_changed/2` and `subscribe/1`.
 
+#### `Biot.Server.Publications`
+
+`publish/3` adds one published port and its derived hostname. `unpublish/3`
+withdraws the publication and its view grants. `discover/2` returns the owner's
+or a shell-grant holder's published URLs. Each mutation returns a
+`Policy.Applied` result when it changes records, or a `Policy.Unchanged` result
+when the requested policy already exists. Both result structs carry the Biot ID,
+access revision, and `enforcement`.
+
+#### `Biot.Server.Access`
+
+`grant_shell/3` and `revoke_shell/3` manage Biot shell grants.
+`grant_view/4` and `revoke_view/4` manage a principal's access to one published
+port. `get_grants/2` returns the owner and explicit grants for the Biot. Mutation
+results use `Policy.Applied` or `Policy.Unchanged`, with the same `enforcement`
+field. Grants require known principals; view grants require a publication for the
+same Biot and port.
+
+#### `Biot.Server.Policy`
+
+`Policy.Applied` and `Policy.Unchanged` are the two successful policy results.
+`Policy.enforcement()` is `:applied` or `{:pending, node_id}`.
+`Policy.Transaction` owns the immediate transaction around each mutation. It
+loads the Biot, authorizes the actor, checks that the Biot is not destroyed,
+executes the callback's writes, bumps the access revision on withdrawal, wakes
+the node after a withdrawal, reads enforcement from committed observation and
+connection state, and builds the result.
+
+Policy callbacks receive the transaction's repository and Biot. They return
+`:unchanged`, `{:added, multi}`, or `{:withdrawn, multi}`. Additions keep the
+current revision and do not wake the node. Withdrawals add one revision and wake
+the assigned node.
+
+`Policy.Enforcement.freshness/2` compares an observation's connection with the
+node's current connection. `access/3` reports `:applied` only for a current
+observation that has caught up to the Biot's access revision. Otherwise it
+reports `{:pending, node_id}`. `Policy.Enforcement` supplies this same result to
+policy commands and `Queries.BiotView`.
+
+#### Hostnames and projections
+
+`Publications.HostnameDerivation` builds each hostname from a version byte, the
+16 UUID bytes, and the port as a big-endian unsigned 16-bit integer. It signs
+that input with HMAC-SHA-256, keeps the first 128 bits, and encodes them as
+lowercase, unpadded base32. The server stores the derived label on the active
+publication row. The URL format is `https://<hostname>.<domain>`.
+
+`publication_hmac_key` reads `BIOT_SERVER_PUBLICATION_HMAC_KEY` in production.
+`publication_domain` reads `BIOT_SERVER_PUBLICATION_DOMAIN`. The key and domain
+are server configuration; the key and derivation version must remain durable
+for URL stability.
+
+`Queries.PublicationView` sorts publications by port and projects each row into
+its port and HTTPS URL. `Queries.AccessView` projects loaded shell and view rows
+into the owner ID, sorted shell principal IDs, and sorted `{port, principal_id}`
+view grants. `Queries.BiotView` uses `Policy.Enforcement` for the access status
+shown with the rest of the Biot view.
+
+`Authorization.may_change_policy?/2` permits policy mutations for the owner.
+`Authorization.may_discover?/3` permits discovery for the owner or a principal
+in the loaded shell-grant IDs. `may_read_grants?/2` remains owner-only.
+
+These modules follow the model contract. Additions never move the access
+revision. Unpublish relies on the view-grant foreign-key cascade. A
+`hostname_conflict` returns an error and never routes to the existing
+publication.
+
 ### Control protocol
 
 - `Control.Listener` accepts mutually authenticated TLS node connections.
@@ -112,6 +179,26 @@ SQLite needs their composite foreign keys inline.
 `test/support/data_case.ex` gives tests a sandboxed Repo.
 `test/support/fixtures.ex` builds rows.
 Integration tests hit the real SQLite test database.
+
+Step 10 adds focused server evidence:
+
+- `policy/enforcement_test.exs` proves current-connection freshness and access
+  enforcement for missing, stale, and caught-up observations.
+- `publications/hostname_derivation_test.exs` proves fixed derivation vectors,
+  valid stable labels, and sensitivity to the key, Biot ID, port, and version.
+- `queries/publication_view_test.exs` proves HTTPS URL projection, port sorting,
+  and empty-list handling.
+- `queries/access_view_test.exs` proves owner projection and deterministic shell
+  and view grant ordering, including empty lists.
+- `queries/biot_view_test.exs` proves the product view uses current connection
+  state for node and access status.
+- `queries/operation_view_test.exs` proves operation kinds and outcomes remain
+  unchanged in the projection, including failures.
+- `policy_records_test.exs` uses real SQLite transactions to prove policy
+  idempotence, authorization, revision and wake behavior, destroyed checks,
+  view-grant cascades, hostname conflicts, and enforcement progress.
+- `authorization_test.exs` proves owner, policy-change, grant-read, and
+  discovery predicates.
 
 ## `apps/biot_node`
 

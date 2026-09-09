@@ -2,11 +2,12 @@ defmodule Biot.Server.Queries.BiotView do
   @moduledoc "Projects durable biot records and live connection state into product-facing data."
 
   alias Biot.Protocol.BiotId
-  alias Biot.Protocol.ConnectionId
   alias Biot.Protocol.Desired
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.Port
   alias Biot.Protocol.PrincipalId
+  alias Biot.Server.Policy
+  alias Biot.Server.Policy.Enforcement
   alias Biot.Server.Queries.OperationView
   alias Biot.Server.Schema.{Biot, Node, Observation, Operation}
 
@@ -82,8 +83,8 @@ defmodule Biot.Server.Queries.BiotView do
           actual: :never_reported | map(),
           node: :connecting | :ready | :unavailable | :disabled | :retired,
           operation: OperationView.t() | nil,
-          access: %{revision: pos_integer(), enforcement: :applied | {:pending, NodeId.t()}},
-          publications: [{Port.t(), term()}],
+          access: %{revision: pos_integer(), enforcement: Policy.enforcement()},
+          publications: [%{port: Port.t(), url: String.t()}],
           direct_secrets_ever_delivered: boolean()
         }
 
@@ -97,7 +98,7 @@ defmodule Biot.Server.Queries.BiotView do
         publications: publications,
         direct_secrets_ever_delivered: direct_secrets_ever_delivered
       }) do
-    freshness = freshness(observation, connection)
+    freshness = Enforcement.freshness(observation, connection)
 
     %__MODULE__{
       id: biot.id,
@@ -108,19 +109,14 @@ defmodule Biot.Server.Queries.BiotView do
       actual: actual(observation, freshness),
       node: node_status(node.status, connection_state(connection)),
       operation: operation(operation),
-      access: access(biot, observation, freshness),
+      access: %{
+        revision: biot.access_revision,
+        enforcement: Enforcement.access(biot, observation, freshness)
+      },
       publications: publications,
       direct_secrets_ever_delivered: direct_secrets_ever_delivered
     }
   end
-
-  defp freshness(
-         %Observation{connection_id: %ConnectionId{} = connection_id},
-         %{connection_id: %ConnectionId{} = connection_id}
-       ),
-       do: :current
-
-  defp freshness(_observation, _connection), do: :stale
 
   defp actual(nil, _freshness), do: :never_reported
 
@@ -146,13 +142,4 @@ defmodule Biot.Server.Queries.BiotView do
 
   defp connection_state(nil), do: nil
   defp connection_state(%{state: state}), do: state
-
-  defp access(%Biot{} = biot, %Observation{} = observation, :current)
-       when observation.applied_access_revision >= biot.access_revision do
-    %{revision: biot.access_revision, enforcement: :applied}
-  end
-
-  defp access(%Biot{} = biot, _observation, _freshness) do
-    %{revision: biot.access_revision, enforcement: {:pending, biot.node_id}}
-  end
 end
