@@ -2,12 +2,13 @@
 
 Biot gives you ephemeral-but-stable secure development environments built on Nix
 and podman. Biots are isolated containers with your own tools already inside,
-and ports listening in there can get durable, authenticated HTTPS hostnames. You
-can use an existing OIDC provider to control access to biots and hosts
-independently, so you, your friends and teams can use the same infrastructure
-without stepping on each other's toes.
+and ports listening in there can get durable, authenticated HTTPS hostnames.
+An existing OIDC provider identifies users. Biot controls which environments
+and published ports each person can access.
 
-*Status: design. No code exists yet. This document describes intended behavior.*
+*Status: in progress. The lifecycle and policy core exists; access, previews,
+shells, and the clients are being built. [docs/model.md](docs/model.md) is the
+implementation contract and describes intended behavior in detail.*
 
 > [!NOTE]
 > This tool is almost entirely vibe coded. Outside of this README, there is no
@@ -70,8 +71,9 @@ self-hostable solution.
 
 2. **Not a TLS terminator.** Biot doesn't terminate TLS at the edge or manage
    public certificates. You put a reverse proxy in front of it, holding a
-   wildcard certificate for your preview hostnames. It needs one static route
-   that never changes, so any reverse proxy will do.
+   wildcard certificate for your preview hostnames. It needs two routes that
+   never change: the control hostname and the preview wildcard, both to one
+   Biot port. Any reverse proxy will do.
 
 3. **Not a sandbox against a determined attacker.** Containers stop accidents,
    mistakes, and careless dependencies, but Biot's threat model doesn't account
@@ -99,8 +101,8 @@ self-hostable solution.
    passwords, user records, or a registration flow.
 
 9. **Not an editor.** Biot's web UI gives you a Ghostty Web-backed shell into a
-   biot that already contains your tools, and you can SSH into them. What you do
-   beyond that is up to you!
+   biot that already contains your tools, and you can SSH into them through the
+   Biot server. What you do beyond that is up to you!
 
 ## How it works
 
@@ -112,8 +114,8 @@ https://patient-owl-k7m2.env.test
 $ biot share checkout-flow --port 3000 --to alice@company.test
 ```
 
-You can also do these via the web UI. The CLI and web UI have all the same
-features and drive the same API.
+You can also do these through the web UI. Both clients use the same lifecycle
+and access rules.
 
 Each flow below walks left to right, and every column is one component. Read a
 row to see which component does what.
@@ -123,13 +125,17 @@ inbound         you             edge   server          node            biot
 ────────────────────────────────────────────────────────────────────────────
 create a biot   biot create ─────────▶ pick a node ──▶ build, clone ─▶ start
 publish a port  biot publish ────────▶ name a host
-open a preview  browser ──────▶ TLS ─▶ session, ACL ─▶ find address ─▶ serve
-get a shell     ssh ─────────────────────────────────▶ publish sshd ─▶ sshd
+open a preview  browser ──────▶ TLS ─▶ session, ACL ─▶ open stream ──▶ serve
+get a shell     ssh ─────────────────▶ key, ACL ─────▶ open stream ──▶ shell
 destroy a biot  biot destroy ────────▶ release name ─▶ remove ───────▶ gone
 ```
 
-Biot can mediate credential use on the node. With an integration enabled, the
-node holds the real credentials:
+Every biot runs a small Biot agent. The node reaches it through a private
+socket, and the agent connects to the port you published or starts your shell.
+Nothing inside a biot listens on the host, and no biot can reach another.
+
+Biot will mediate credential use on the node. With an integration enabled, the
+node holds the real credentials. These integrations are planned and not built yet:
 
 ```text
 outbound             biot            node                       out
@@ -140,10 +146,11 @@ call a model API     API client ───▶ authorize with real key ─▶ Anth
 sign a commit        git commit ───▶ sign with a dedicated key
 ```
 
-Each integration mediates only the access you granted. Credential mediation is
-optional: you can supply a real key with `--secret`, and `biot list` marks biots
-given secrets this way. Ordinary outbound connections, such as package downloads,
-do not require a credential integration.
+Each integration will mediate only the access you grant. The first release
+accepts scoped credentials for private source fetching. You can also supply a
+real key with `--secret`; `biot list` marks biots given secrets this way.
+Ordinary outbound connections, such as package downloads, need no credential
+integration.
 
 ## Decisions
 
@@ -158,11 +165,11 @@ and builds.
 | Software    | any number of Nix layers compose, or report conflicts            |
 | Access      | separate shell and per-port view grants, tied to OIDC identities |
 | Publishing  | explicit ports get stable hostnames through the server          |
-| Credentials | optional node-side mediation or explicitly supplied secrets     |
+| Credentials | runtime secrets and private source credentials; runtime mediation planned |
 | Git         | independent clones using ordinary upstream URLs                 |
 | Network     | allow outbound connections; control entry through Biot          |
 | Node trust  | encrypted, mutually authenticated server–node communication      |
 
-The [design document](docs/design.md) defines these boundaries and their behavior
-during changes and failures. Connectivity and edge TLS remain the operator's
+The [implementation model](docs/model.md) defines these boundaries and their
+behavior during changes and failures. Connectivity and edge TLS remain the operator's
 responsibility.
