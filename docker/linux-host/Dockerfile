@@ -6,8 +6,7 @@ RUN apt-get update \
     && apt-get install --no-install-recommends --yes ca-certificates curl fuse-overlayfs git podman slirp4netns uidmap xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /bin/bash biot \
-    && printf 'biot:100000:65536\n' >> /etc/subuid \
-    && printf 'biot:100000:65536\n' >> /etc/subgid \
+    && usermod --add-subuids 100000-165535 --add-subgids 100000-165535 biot \
     && mkdir --mode=0755 /nix \
     && chown biot:biot /nix
 

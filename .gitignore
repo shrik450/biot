@@ -23,3 +23,7 @@ cli/biot
 .mise/
 .mise.local.toml
 .mise.local.*
+
+# Nix build outputs
+/result
+/result-*

@@ -6,6 +6,7 @@
 - `apps/biot_server` owns server modules, queries, policy, and the server database.
 - `apps/biot_web` owns the Phoenix HTTP API and LiveView UI.
 - `apps/biot_node` owns reconciliation, host effects, environment handling, and container sessions.
+- `nix/` owns the module schema, the `build.nix` entry point, and example layers. `nix/README.md` holds the build contract for the node host layer.
 - `cli` contains the Go command-line client.
 - `config` contains shared Mix and runtime configuration.
 - `docker/linux-host` contains the Linux host image for node host tests.
@@ -149,6 +150,48 @@ The node owns host reconciliation and reports inspected state to the server.
   `LocalIntent` stores the last accepted `BiotSpec` for one Biot.
 - `NodePrivatePath`, `MarkerId`, `NetworkId`, and `ArtifactId` are node-owned
   parsed values for private paths, initialization markers, networks, and artifacts.
+- `Biot.Node.StorePath` parses one canonical path at or inside a Nix store object.
+- `Biot.Node.EnvironmentBundle` parses the format 1 gate and its four store
+  paths. It returns `:invalid_format` for a malformed shape or path and
+  `:unsupported_format` for another numeric format.
+
+### Environment artifact
+
+The Nix environment artifact turns one resolved manifest into an immutable
+launch bundle. The schema accepts `biot.packages`, `biot.environment`,
+`biot.files`, and `biot.services.<name>`. A service declares `command`,
+`directory`, `environment`, and `restart`.
+
+The types and defaults live in `nix/module.nix`. Its `assertions` option keeps
+cross-field rules such as reserved environment names and safe relative paths
+with the schema. Compatible module definitions merge; conflicting definitions
+fail with their source locations.
+
+`nix/build.nix` reads manifest JSON and writes bundle JSON. The manifest has the
+exact `base_nixpkgs`, `digest`, `layers`, and `project_snapshot` fields. The
+bundle reports `format`, `closure_root`, `entrypoint`, `environment_file`, and
+`config_root`. The node retains the output link as the garbage collection root.
+
+The entry point loads the generated environment and starts `supervisord`. The
+runner fits several services and the `always`, `on-failure`, and `never` restart
+rules without root or an init system. The bundle does not create a control
+socket.
+
+The container uses an empty, read-only root filesystem with read-only
+`/nix/store`. It mounts writable `/biot/checkout`, `/biot/home`, and
+`/biot/service-data`. The no-base-image invariant keeps all executables in the
+Nix store and makes missing private mounts fail instead of creating temporary
+state.
+
+The `stateful-counter` example composes base and service layers. Its service
+keeps a counter below the service data mount and serves the declared message
+file. `nix/examples/conflicting-layer` changes the same environment value and
+shows the module conflict error when added as a third layer.
+
+Nix integration tests use the `:nix` tag. Mix excludes them when `nix` is not
+on `PATH`; `docker/linux-host/run-tests.sh` runs them in the Linux image. The
+suite checks manifest errors, store paths, bundle paths, module conflicts,
+reserved variables, NAR hashes, mounts, and state across a container restart.
 
 ### In-memory services and control
 
@@ -178,6 +221,9 @@ The `node` release includes `biot_protocol` and `biot_node`.
 Build them with `MIX_ENV=prod mix release server` and `MIX_ENV=prod mix release node`.
 
 ## Tooling
+
+The Linux host Dockerfile uses `usermod` to assign subordinate user and group
+IDs. `/result` and `/result-*` are ignored.
 
 `.mise.toml` pins Erlang 28.5 and Elixir 1.20.4 with OTP 28.
 Run Elixir commands through mise:
