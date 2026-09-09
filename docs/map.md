@@ -141,6 +141,69 @@ The node owns host reconciliation and reports inspected state to the server.
   retry policies; `Retry.failure/2` builds failures found without an action.
 - `InspectionFailure` keeps an unreadable resource distinct from an absent one.
 
+#### BiotController
+
+`Biot.Node.BiotController` owns one Biot. It loads the current `LocalIntent` from
+`Biot.Node.Journal`, inspects the host, reports the inspection, asks
+`Reconcile.next/4` for one action, and runs that action in one linked effect task.
+After the task returns, it records the outcome and inspects again before making
+another decision. It reports every inspection, including a settled one, so the
+server can learn about a container that exits on its own.
+
+The controller's `phase` makes its waiting state explicit:
+
+```text
+:idle
+{:running, effect}
+{:cancelling, effect, wake}
+{:backing_off, wake}
+{:waiting, reason, wake}
+{:settled, wake}
+```
+
+`:idle` waits for intent or synchronization. `:running` has one host effect in
+flight. `:cancelling` waits for the cancellation grace period before killing an
+effect that did not stop. `:backing_off` waits for an automatic retry.
+`:waiting` retries an inspection block. `:settled` re-inspects on the observation
+interval.
+
+A new desired revision clears the recorded failure, attempt counts, pending
+container exit, and stale backoff, inspection, or settled wake. It never clears
+a running effect or its cancellation wake. A changed intent therefore cancels
+obsolete work, then lets inspection determine what that work left behind.
+
+The controller and its effect task share a failure group. A task crash takes down
+the controller, and the supervisor restarts it. Restart loads durable intent and
+inspects owned resources before it asks reconciliation to issue any action.
+
+#### Controllers
+
+`Biot.Node.Controllers` supervises the controller set. Its `Registry` uses the
+opaque `BiotId` as each controller's key, and its `DynamicSupervisor` runs one
+`BiotController` per Biot. `Controllers.Starter` is a long-lived bootstrap
+process. It starts a controller for every durable journal intent at boot and
+retries a failed start with one bounded timer per Biot.
+
+The public API is `intent_changed/1` and `synchronized/1`. The first starts or
+pokes one controller and schedules a starter retry when it cannot start. The
+second receives the complete synchronized Biot ID set, starts or pokes every
+announced controller, and pokes controllers absent from that set so they stop.
+The controller tree uses `:rest_for_one`: the Registry starts first, the
+DynamicSupervisor second, and the Starter last.
+
+#### Pure controller support
+
+`Biot.Node.Observation.node_state/4` combines host inspection with the
+controller's pending container exit and recorded failure. `Observation.report/2`
+projects the inspected state into the server's `ExecutionReport`.
+
+`Biot.Node.Backoff.delay/3` doubles the minimum delay per attempt and caps it at
+the configured maximum. `Biot.Node.Orphans.detect/2` compares journal
+allocations with local intents and returns allocations absent from server intent.
+It does not adopt or delete them. `Biot.Node.Retry.with_budget/3` changes an
+automatic failure to an operator failure at the retry budget; other retry
+policies stay unchanged.
+
 ### Node records and values
 
 - `Allocation` records a Biot's UID/GID range, private data root, network, and
@@ -189,8 +252,10 @@ Pure derivations keep host facts separate from effects:
 Support modules provide the smaller boundaries:
 
 - `Host.Command` runs one executable through `setsid` with a timeout and bounded
-  stdout and stderr. `Host.Podman` adds the configured Podman module and recognizes
-  absent resources.
+  stdout and stderr. Its handshake announces the process group, registers that
+  group with `Host.Command.Reaper`, sends the go line, and then lets the shell
+  `exec` the command. No command runs before the reaper owns its group.
+  `Host.Podman` adds the configured Podman module and recognizes absent resources.
 - `Host.Paths` owns every node-private path. Its moduledoc is the authority for
   the data-root layout. In one line: the root holds node-wide coordination and
   configuration plus per-Biot writable data and per-environment build state.
@@ -199,6 +264,13 @@ Support modules provide the smaller boundaries:
 - `Host.Config` parses and validates operator settings. `Host.Context` binds that
   configuration to one Biot ID, and `Host.Setup` creates the node-wide directories
   and Podman configuration.
+
+`Host.Command.Reaper` monitors the command caller. It ends the whole process
+group and removes the stderr file when the caller dies. Normal completion calls
+`release/1`; cancellation calls `cancel/1` and ends the group immediately. The
+handshake keeps the group unstarted until the reaper has registered it, so a
+caller killed between the announcement and the go line cannot leave a command
+running without an owner.
 
 ### Node journal
 
@@ -215,15 +287,21 @@ transactions use SQLite immediate mode. SQLite foreign keys restrict allocation
 deletion while an installation or resolution remains, and the journal also checks
 that no such records remain before release. `next_uid_start/3` finds the first
 unused configured range, while the unique `allocation_uid_start` index closes the
-concurrent-insert race. The
-`local_intents` table and schema are ready, but `Intents` still uses ETS; durable
-local-intent use waits for step 9.
+concurrent-insert race.
+
+`Journal.put_intent/1` upserts one durable `LocalIntent` for a Biot. The control
+connection uses it for an individual desired message. `Journal.replace_intents/1`
+upserts the complete synchronized set in one transaction and deletes local intents
+that the server no longer sends. That deletion stops the controller, leaving any
+allocation for orphan reporting.
 
 `Biot.Node.DataRootLock` owns a long-lived `flock` port on the data-root lock file.
-When host configuration exists, `application.ex` starts the node in order:
-`DataRootLock`, `Host.Setup`, `Repo`, journal migration, then the configured
-control connection. The lock therefore exists before setup or journal access, and
-the connection starts after the journal is ready.
+`application.ex` always starts `Diagnostics` and `Host.Command.Reaper` first.
+When host configuration exists, it then starts `DataRootLock`, `Host.Setup`,
+`Repo`, journal migration, `Controllers`, and finally the configured control
+connection. The lock exists before setup or journal access, and the connection
+starts after the journal and controller tree are ready. Without host
+configuration, the node starts neither controllers nor a control connection.
 
 ### Environment artifact
 
@@ -268,40 +346,73 @@ variables, NAR hashes, mounts, and state across a container restart.
 
 ### Node configuration
 
-`config/config.exs` supplies node defaults. In the production node release,
-`config/runtime.exs` reads `BIOT_NODE_DATA_ROOT` into `data_root`, and reads
-`BIOT_NODE_UID_RANGE_BASE`, `BIOT_NODE_UID_RANGE_COUNT`, and
-`BIOT_NODE_UID_RANGE_LIMIT` into the UID/GID range settings. It reads executable
-settings from `BIOT_NODE_GIT`, `BIOT_NODE_NIX`, `BIOT_NODE_NIX_INSTANTIATE`,
-`BIOT_NODE_PODMAN`, `BIOT_NODE_FLOCK`, and `BIOT_NODE_SETSID`; `setsid` is
-required by host commands. The same branch supplies the Podman network command,
-Nix build and pin paths, Nixpkgs selector, and host command limits. `Host.Config`
-validates the resulting values before host setup or effects use them.
+`config/config.exs` supplies node defaults. The controller and diagnostic
+settings are:
 
-### In-memory services and control
+| Key | Default | Production override |
+| --- | ---: | --- |
+| `retry_budget` | `5` | `BIOT_NODE_RETRY_BUDGET` |
+| `retry_backoff_min_ms` | `2_000` | `BIOT_NODE_RETRY_BACKOFF_MIN_MS` |
+| `retry_backoff_max_ms` | `300_000` | `BIOT_NODE_RETRY_BACKOFF_MAX_MS` |
+| `observation_interval_ms` | `30_000` | `BIOT_NODE_OBSERVATION_INTERVAL_MS` |
+| `inspection_retry_ms` | `15_000` | `BIOT_NODE_INSPECTION_RETRY_MS` |
+| `cancel_grace_ms` | `10_000` | `BIOT_NODE_CANCEL_GRACE_MS` |
+| `controller_start_retry_ms` | `5_000` | `BIOT_NODE_CONTROLLER_START_RETRY_MS` |
+| `diagnostic_max_entries_per_biot` | `5` | `BIOT_NODE_DIAGNOSTIC_MAX_ENTRIES_PER_BIOT` |
+| `diagnostic_max_entry_bytes` | `65_536` | `BIOT_NODE_DIAGNOSTIC_MAX_ENTRY_BYTES` |
 
-- `Intents` stores synchronized specs in ETS and supports per-Biot and all-Biots
-  subscriptions. It is an in-memory placeholder that step 9 replaces with
-  durable `LocalIntent` storage.
-- `Diagnostics` stores bounded diagnostic content in memory for on-demand
-  requests. Step 9 replaces it with durable, bounded diagnostic storage.
-- `Control` sends observations, resolutions, and orphaned allocation reports.
-  `Control.Connection` owns the reconnecting mutually authenticated TLS client,
-  synchronization, heartbeats, and report delivery. Configuration gates startup,
-  and Linux hosts are required.
+`config/runtime.exs` also reads the data root, UID/GID range, executable,
+connection, heartbeat, reconnect, Nix, Podman, and TLS settings. The listed
+`BIOT_NODE_*` overrides must be positive integers. `Host.Config` validates the
+resulting settings before host setup or effects use them.
+
+### Diagnostics and control
+
+`Biot.Node.Diagnostics` keeps a bounded in-memory log for failed revisions. One
+writer process owns the per-Biot revision index and writes diagnostic entries to
+protected ETS. It keeps the latest failed attempt for a revision, limits each
+entry by `diagnostic_max_entry_bytes`, and evicts old revisions after
+`diagnostic_max_entries_per_biot`. `fetch/2` reads ETS directly, applies the
+caller's byte limit, and returns whether content was truncated. `forget/1`
+drops every entry for a Biot that loses local intent.
+
+`Biot.Node.Control.Outbox` coalesces reports in ETS. It keys observations by
+Biot, resolutions by environment, and the node observation as one node-wide
+entry. A single wakeup marker prevents duplicate connection wakeups. The
+connection drains the outbox after it acknowledges `synchronized` and whenever
+a report wakes it. `Control` sends observations, resolutions, and orphaned
+allocation reports to the outbox; `Control.status/0` returns `:ready` or
+`:offline` from the connection's published status.
+
+`Control.Connection` owns the reconnecting mutually authenticated TLS client,
+synchronization, heartbeats, and report delivery. An individual desired message
+uses `Journal.put_intent/1`; a complete synchronization uses
+`Journal.replace_intents/1` before the node acknowledges synchronization. After
+that acknowledgement, the connection starts or pokes controllers, compares
+journal allocations with the synchronized intents, and puts orphan reports in
+the outbox. The application starts this connection only after host configuration,
+the journal, and the controller tree are ready. Linux is required for the node
+control path.
 
 ### Tests
 
 `test/test_helper.exs` excludes `:linux` tests outside Linux and `:nix` tests when
-`nix` is unavailable. The three host test files prove different boundaries:
+`nix` is unavailable. The existing host tests cover host derivations, journal
+ownership, and real Linux effects. Step 9 adds focused evidence for the node
+imperative shell:
 
-- `host_pure_test.exs` covers data and environment derivations, Podman parsing,
-  outcomes, paths, names, and command values with pure tests.
-- `host_journal_integration_test.exs` uses the real SQLite journal to prove UID
-  range gap reuse, restricted allocation deletion, and cross-Biot ownership.
-- `host_linux_integration_test.exs` uses real `flock`, filesystems, Git, Nix, and
-  Podman to prove idempotent effects, persistent data, container replacement,
-  ownership checks, lost versus unknown inspection, and destruction.
+- `controller_pure_test.exs` proves the `Observation`, `Backoff`, `Orphans`, and
+  `Retry.with_budget/3` projections and retry rules.
+- `diagnostics_integration_test.exs` uses the real diagnostics process and ETS to
+  prove byte bounds, same-revision replacement, per-Biot eviction, and
+  `forget/1`.
+- `host_command_ownership_test.exs` uses real Linux processes to prove that a
+  caller killed during the handshake starts no command, and that cancellation
+  removes the whole process group promptly.
+- `biot_controller_linux_integration_test.exs` runs a real server and node. Its
+  `step9_controller_runner.exs` support runner proves lost-response recovery,
+  controller startup and retry, cancellation, reconnect behavior, and orphan
+  reporting against real resources.
 
 `docker/linux-host/run-tests.sh` builds or reuses the privileged Linux test image
 and runs the full Mix test suite inside it.

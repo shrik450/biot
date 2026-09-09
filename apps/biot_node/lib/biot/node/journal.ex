@@ -215,29 +215,61 @@ defmodule Biot.Node.Journal do
 
   @spec put_intent(BiotSpec.t()) :: {:ok, LocalIntent.t()} | {:error, :invalid_intent}
   def put_intent(%BiotSpec{} = spec) do
-    biot_id = spec.execution.biot_id
-    now = DateTime.utc_now()
-
-    %LocalIntentRow{}
-    |> Ecto.Changeset.change(biot_id: biot_id, biot_spec: spec)
-    |> Repo.insert(
-      on_conflict: [set: [biot_spec: spec, updated_at: now]],
-      conflict_target: :biot_id,
-      returning: true
-    )
-    |> case do
-      {:ok, row} -> {:ok, %LocalIntent{biot_id: row.biot_id, biot_spec: row.biot_spec}}
+    case upsert_intent(spec) do
+      {:ok, row} -> {:ok, intent_value(row)}
       {:error, _changeset} -> {:error, :invalid_intent}
     end
+  end
+
+  @doc """
+  Replaces every local intent with the synchronized set. A biot the server no longer sends intent
+  for loses its row, which stops its controller and leaves its allocation to be reported as an
+  orphan.
+  """
+  @spec replace_intents([BiotSpec.t()]) :: :ok | {:error, term()}
+  def replace_intents(specs) when is_list(specs) do
+    Repo.transaction(
+      fn ->
+        Enum.each(specs, fn spec -> {:ok, _row} = upsert_intent(spec) end)
+        synchronized = Enum.map(specs, & &1.execution.biot_id)
+
+        LocalIntentRow
+        |> where([row], row.biot_id not in ^synchronized)
+        |> Repo.delete_all()
+
+        :ok
+      end,
+      mode: :immediate
+    )
+    |> transaction_value()
   end
 
   @spec intent(BiotId.t()) :: LocalIntent.t() | nil
   def intent(%BiotId{} = biot_id) do
     case Repo.get(LocalIntentRow, biot_id) do
       nil -> nil
-      row -> %LocalIntent{biot_id: row.biot_id, biot_spec: row.biot_spec}
+      row -> intent_value(row)
     end
   end
+
+  @spec intents() :: [LocalIntent.t()]
+  def intents do
+    LocalIntentRow |> Repo.all() |> Enum.map(&intent_value/1)
+  end
+
+  defp upsert_intent(%BiotSpec{} = spec) do
+    now = DateTime.utc_now()
+
+    %LocalIntentRow{}
+    |> Ecto.Changeset.change(biot_id: spec.execution.biot_id, biot_spec: spec)
+    |> Repo.insert(
+      on_conflict: [set: [biot_spec: spec, updated_at: now]],
+      conflict_target: :biot_id,
+      returning: true
+    )
+  end
+
+  defp intent_value(row), do: %LocalIntent{biot_id: row.biot_id, biot_spec: row.biot_spec}
 
   defp allocation_row(allocation) do
     %AllocationRow{

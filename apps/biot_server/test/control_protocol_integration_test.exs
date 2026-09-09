@@ -6,7 +6,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
   alias Biot.Node.Control, as: NodeControl
   alias Biot.Node.Control.Connection, as: NodeConnection
   alias Biot.Node.Diagnostics, as: NodeDiagnostics
-  alias Biot.Node.Intents
+  alias Biot.Node.Journal, as: NodeJournal
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.Certificates
   alias Biot.Protocol.Frame
@@ -46,14 +46,12 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
   end
 
   setup do
-    :ok = Intents.replace([])
     previous_timeout = Application.get_env(:biot_server, :diagnostic_timeout_ms)
     previous_max_bytes = Application.get_env(:biot_server, :diagnostic_max_bytes)
     Application.put_env(:biot_server, :diagnostic_timeout_ms, 100)
     Application.put_env(:biot_server, :diagnostic_max_bytes, 8)
 
     on_exit(fn ->
-      Intents.replace([])
       restore_env(:diagnostic_timeout_ms, previous_timeout)
       restore_env(:diagnostic_max_bytes, previous_max_bytes)
     end)
@@ -673,7 +671,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
                    TestFixtures.create_command(name: "real-node", node_id: node.id)
                  )
 
-        {:ok, _pid} = Intents.subscribe(biot_id)
+        start_node_journal()
         node_pid = start_node(listener.port, context.certificates, node)
 
         first_connection =
@@ -694,8 +692,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         assert %{connection_id: ^first_connection_id, state: :ready} =
                  NodeConnections.current(node.id)
 
-        spec = eventually_value(fn -> Intents.get(biot_id) end)
-        assert_receive {:intent_changed, ^biot_id, ^spec}
+        spec = eventually_value(fn -> local_intent(biot_id) end)
 
         report =
           TestFixtures.execution_report(
@@ -709,8 +706,8 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         assert :ok = NodeControl.report_observation(biot_id, report)
         eventually(fn -> Repo.get!(Operation, accepted.operation_id).outcome == :succeeded end)
 
-        diagnostic_ref = failed_operation(actor, node, 8_012, "real-node-diagnostic")
-        assert :ok = NodeDiagnostics.put(diagnostic_ref, "0123456789")
+        diagnostic_ref = NodeDiagnostics.put(TestFixtures.id(BiotId, 8_012), 1, "0123456789")
+        _operation = failed_operation(actor, node, 8_012, "real-node-diagnostic", diagnostic_ref)
         assert ServerDiagnostics.get(actor, diagnostic_ref) == {:ok, {"01234567", true}}
 
         reference = Process.monitor(node_pid)
@@ -728,7 +725,99 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
           end)
 
         refute second_connection.connection_id == first_connection.connection_id
-        eventually(fn -> Intents.get(biot_id).execution.desired.revision == 2 end)
+        eventually(fn -> local_intent(biot_id).execution.desired.revision == 2 end)
+
+      {:error, :unsupported_platform} ->
+        assert Platform.current() == {:error, :unsupported_platform}
+    end
+  end
+
+  test "a disconnected real node coalesces reports and delivers the latest after reconnect",
+       context do
+    case Platform.current() do
+      {:ok, _platform} ->
+        listener = start_listener(context.certificates)
+        owner = TestFixtures.principal(31)
+        actor = TestFixtures.actor(owner)
+        node = node_for_certificate(1, context.certificates, 0)
+        biot_id = TestFixtures.id(BiotId, 8_031)
+
+        assert {:ok, _accepted} =
+                 Biots.create(
+                   actor,
+                   biot_id,
+                   TestFixtures.create_command(name: "outbox-reconnect", node_id: node.id)
+                 )
+
+        start_node_journal()
+
+        connection =
+          start_node(listener.port, context.certificates, node,
+            reconnect_backoff_min_ms: 1_000,
+            reconnect_backoff_max_ms: 1_000
+          )
+
+        eventually(fn -> match?(%{state: :ready}, NodeConnections.current(node.id)) end)
+        spec = eventually_value(fn -> local_intent(biot_id) end)
+        environment_id = spec.execution.environment.id
+
+        [{handler, _connection_id}] = Registry.lookup(Biot.Server.Control.Registry, node.id)
+        Process.exit(handler, :kill)
+        eventually(fn -> NodeControl.status() == :offline end)
+        :sys.suspend(connection)
+
+        first =
+          TestFixtures.execution_report(
+            accepted_revision: 1,
+            container: :absent,
+            data: :uninitialized,
+            applied_access_revision: spec.access_revision
+          )
+
+        latest =
+          TestFixtures.execution_report(
+            accepted_revision: 1,
+            installed_environment_id: environment_id,
+            container: TestFixtures.running_container(31),
+            data: :present,
+            applied_access_revision: spec.access_revision
+          )
+
+        first_manifest = TestFixtures.manifest(revision_digit: "a")
+        latest_manifest = TestFixtures.manifest(revision_digit: "b")
+
+        assert :ok = NodeControl.report_observation(biot_id, first)
+        assert :ok = NodeControl.report_observation(biot_id, latest)
+        assert :ok = NodeControl.report_resolution(environment_id, first_manifest)
+        assert :ok = NodeControl.report_resolution(environment_id, latest_manifest)
+
+        entries = :ets.tab2list(Biot.Node.Control.Outbox)
+        assert Enum.count(entries, &match?({{:observation, ^biot_id}, _report}, &1)) == 1
+        assert Enum.count(entries, &match?({{:resolution, ^environment_id}, _report}, &1)) == 1
+
+        {:messages, messages} = Process.info(connection, :messages)
+        assert Enum.count(messages, &match?({:"$gen_cast", :drain}, &1)) == 1
+
+        :sys.resume(connection)
+
+        eventually(fn -> match?(%{state: :ready}, NodeConnections.current(node.id)) end)
+
+        eventually(fn ->
+          case Repo.get(Observation, biot_id) do
+            %Observation{container: container, data: :present} ->
+              container == latest.container
+
+            _observation ->
+              false
+          end
+        end)
+
+        eventually(fn ->
+          case Repo.get!(Environment, environment_id).resolution do
+            {:resolved, manifest} -> manifest == latest_manifest
+            :unresolved -> false
+          end
+        end)
 
       {:error, :unsupported_platform} ->
         assert Platform.current() == {:error, :unsupported_platform}
@@ -746,6 +835,10 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
           Task.async(fn ->
             socket = accept_raw_server(listener)
             complete_server_handshake(socket)
+
+            assert %Message.NodeObservation{orphaned_allocations: []} =
+                     await_message(socket, 1, Message.NodeObservation)
+
             assert %Message.Heartbeat{} = await_message(socket, 1, Message.Heartbeat)
             assert_closed(socket)
             send(parent, :first_node_connection_timed_out)
@@ -755,6 +848,8 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
             :ssl.close(replacement)
             send(parent, :node_reconnected)
           end)
+
+        start_node_journal()
 
         _node_pid =
           start_node(port, context.certificates, node,
@@ -945,7 +1040,13 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     assert spec.execution.desired.revision == revision
   end
 
-  defp failed_operation(actor, node, number, name) do
+  defp failed_operation(
+         actor,
+         node,
+         number,
+         name,
+         diagnostic_ref \\ nil
+       ) do
     biot_id = TestFixtures.id(BiotId, number)
 
     assert {:ok, accepted} =
@@ -955,7 +1056,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
                TestFixtures.create_command(name: name, node_id: node.id)
              )
 
-    diagnostic_ref = TestFixtures.id(PrivateDiagnosticId, number)
+    diagnostic_ref = diagnostic_ref || TestFixtures.id(PrivateDiagnosticId, number)
 
     failure = %Biot.Protocol.Failure{
       stage: :start,
@@ -972,6 +1073,37 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
 
     diagnostic_ref
   end
+
+  # The node writes synchronized intent to its journal, so a real node connection needs one. The
+  # data root is the only host setting configured, which keeps every controller from starting.
+  defp start_node_journal do
+    data_root =
+      Path.join(System.tmp_dir!(), "biot-node-journal-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(data_root)
+    previous = Application.get_env(:biot_node, :data_root)
+    Application.put_env(:biot_node, :data_root, data_root)
+
+    on_exit(fn ->
+      restore_node_env(:data_root, previous)
+      File.rm_rf!(data_root)
+    end)
+
+    start_supervised!(Biot.Node.Repo)
+    start_supervised!(Biot.Node.Journal.Migrator)
+    start_supervised!(Biot.Node.Controllers)
+    :ok
+  end
+
+  defp local_intent(biot_id) do
+    case NodeJournal.intent(biot_id) do
+      nil -> nil
+      intent -> intent.biot_spec
+    end
+  end
+
+  defp restore_node_env(key, nil), do: Application.delete_env(:biot_node, key)
+  defp restore_node_env(key, value), do: Application.put_env(:biot_node, key, value)
 
   defp start_node(port, certificates, node, options \\ []) do
     certificate = hd(certificates.nodes)

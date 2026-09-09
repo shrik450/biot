@@ -1,25 +1,37 @@
 defmodule Biot.Node.Control do
-  @moduledoc "Sends node reports through the current control connection."
+  @moduledoc """
+  Sends node reports through the current control connection, and answers whether the node holds
+  one.
+
+  A report never waits for the link. It goes into `Biot.Node.Control.Outbox`, which keeps only the
+  latest report of its kind and which the connection drains when it is ready. A node without a
+  link, or without a configured connection at all, drops the report: the next synchronization pokes
+  every controller, and each one reports what it inspected then.
+  """
 
   alias Biot.Node.Control.Connection
+  alias Biot.Node.Control.Outbox
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.OrphanedAllocation
 
-  @spec report_observation(BiotId.t(), ExecutionReport.t()) :: :ok | {:error, :disconnected}
+  @spec status() :: :ready | :offline
+  defdelegate status, to: Connection
+
+  @spec report_observation(BiotId.t(), ExecutionReport.t()) :: :ok
   def report_observation(%BiotId{} = biot_id, %ExecutionReport{} = report) do
-    Connection.send_report({:observation, biot_id, report})
+    Outbox.put({:observation, biot_id, report})
   end
 
-  @spec report_resolution(EnvironmentId.t(), Manifest.t()) :: :ok | {:error, :disconnected}
+  @spec report_resolution(EnvironmentId.t(), Manifest.t()) :: :ok
   def report_resolution(%EnvironmentId{} = environment_id, %Manifest{} = manifest) do
-    Connection.send_report({:resolution, environment_id, manifest})
+    Outbox.put({:resolution, environment_id, manifest})
   end
 
-  @spec report_node_observation([OrphanedAllocation.t()]) :: :ok | {:error, :disconnected}
+  @spec report_node_observation([OrphanedAllocation.t()]) :: :ok
   def report_node_observation(orphaned_allocations) when is_list(orphaned_allocations) do
-    Connection.send_report({:node_observation, orphaned_allocations})
+    Outbox.put({:node_observation, orphaned_allocations})
   end
 end

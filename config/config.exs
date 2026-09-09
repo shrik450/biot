@@ -40,8 +40,15 @@ config :biot_node,
   reconnect_backoff_min_ms: 250,
   reconnect_backoff_max_ms: 30_000,
   max_frame_bytes: 1_000_000,
-  diagnostic_max_entries: 100,
-  diagnostic_max_entry_bytes: 1_000_000
+  retry_budget: 5,
+  retry_backoff_min_ms: 2_000,
+  retry_backoff_max_ms: 300_000,
+  observation_interval_ms: 30_000,
+  inspection_retry_ms: 15_000,
+  cancel_grace_ms: 10_000,
+  controller_start_retry_ms: 5_000,
+  diagnostic_max_entries_per_biot: 5,
+  diagnostic_max_entry_bytes: 65_536
 
 config :biot_node, Biot.Node.Repo,
   foreign_keys: :on,

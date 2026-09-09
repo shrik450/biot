@@ -35,7 +35,16 @@ defmodule Biot.Node.Retry do
     reason = reason(outcome)
     recorded = failure(reason, Action.stage(action))
 
-    %{recorded | message: message(outcome), retry: budgeted(recorded.retry, attempt, budget)}
+    with_budget(%{recorded | message: message(outcome)}, attempt, budget)
+  end
+
+  @doc """
+  The same failure with the attempt budget applied, for a failure found without an action. An
+  automatic retry becomes the operator's problem once the budget is spent.
+  """
+  @spec with_budget(Failure.t(), pos_integer(), pos_integer()) :: Failure.t()
+  def with_budget(%Failure{} = failure, attempt, budget) do
+    %{failure | retry: budgeted(failure.retry, attempt, budget)}
   end
 
   @doc """

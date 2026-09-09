@@ -1,12 +1,22 @@
 defmodule Biot.Node.Control.Connection do
-  @moduledoc "Owns the node TLS control connection, synchronization, heartbeats, and reconnects."
+  @moduledoc """
+  Owns the node TLS control connection, synchronization, heartbeats, and reconnects.
+
+  It also owns `Biot.Node.Control.Outbox` and drains it while the link is ready, so a controller's
+  report never waits for the socket.
+  """
 
   use GenServer
 
   require Logger
 
+  alias Biot.Node.Control
+  alias Biot.Node.Control.Outbox
+  alias Biot.Node.Controllers
   alias Biot.Node.Diagnostics
-  alias Biot.Node.Intents
+  alias Biot.Node.Journal
+  alias Biot.Node.Orphans
+  alias Biot.Protocol.BiotId
   alias Biot.Protocol.Frame
   alias Biot.Protocol.Liveness
   alias Biot.Protocol.Message
@@ -39,22 +49,29 @@ defmodule Biot.Node.Control.Connection do
               backoff_max_ms: 30_000
   end
 
-  @type report ::
-          {:observation, Biot.Protocol.BiotId.t(), Biot.Protocol.ExecutionReport.t()}
-          | {:resolution, Biot.Protocol.EnvironmentId.t(), Biot.Protocol.Manifest.t()}
-          | {:node_observation, [Biot.Protocol.OrphanedAllocation.t()]}
-
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(options \\ []) do
     GenServer.start_link(__MODULE__, options, name: __MODULE__)
   end
 
-  @spec send_report(report()) :: :ok | {:error, :disconnected}
-  def send_report(report), do: GenServer.call(__MODULE__, {:report, report})
+  @doc "Tells the connection that the outbox holds a report it has not seen."
+  @spec wake() :: :ok
+  def wake, do: GenServer.cast(__MODULE__, :drain)
+
+  @doc "Whether the node holds a synchronized control link right now."
+  @spec status() :: :ready | :offline
+  def status do
+    case :ets.whereis(__MODULE__) do
+      :undefined -> :offline
+      table -> published_status(table)
+    end
+  end
 
   @impl true
   def init(options) do
-    state = build_state(options)
+    __MODULE__ = :ets.new(__MODULE__, [:named_table, :set, :protected, read_concurrency: true])
+    :ok = Outbox.open()
+    state = publish(build_state(options))
 
     case Platform.current() do
       {:ok, platform} ->
@@ -74,16 +91,11 @@ defmodule Biot.Node.Control.Connection do
   end
 
   @impl true
-  def handle_call({:report, report}, _from, %State{status: :ready} = state) do
-    case send_message(state.socket, report_message(report), state.version) do
-      :ok -> {:reply, :ok, state}
-      {:error, reason} -> {:reply, {:error, :disconnected}, disconnect(state, reason)}
-    end
-  end
+  def handle_cast(:drain, %State{status: :ready} = state), do: {:noreply, drain(state)}
 
-  def handle_call({:report, _report}, _from, state) do
-    {:reply, {:error, :disconnected}, state}
-  end
+  # The outbox keeps its reports and its wakeup marker until a ready link drains them, so the
+  # drain after the next synchronization sends what waited here.
+  def handle_cast(:drain, state), do: {:noreply, state}
 
   @impl true
   def handle_info({:ssl, socket, data}, %State{socket: socket} = state) do
@@ -107,6 +119,20 @@ defmodule Biot.Node.Control.Connection do
   def handle_info({:reconnect, token}, %State{reconnect_token: token} = state), do: connect(state)
 
   def handle_info({:reconnect, _token}, state), do: {:noreply, state}
+
+  # Announcing runs after the link is ready so that every controller's first report has somewhere
+  # to go, and the drain then sends what the controllers and the orphan report just wrote, plus
+  # anything the outbox held while the link was down.
+  def handle_info({:announce, biot_ids}, %State{status: :ready} = state) do
+    warn_missing_controller(Controllers.synchronized(biot_ids))
+
+    :ok =
+      Control.report_node_observation(Orphans.detect(Journal.allocations(), Journal.intents()))
+
+    {:noreply, drain(state)}
+  end
+
+  def handle_info({:announce, _biot_ids}, state), do: {:noreply, state}
 
   def handle_info(
         {:send_heartbeat, socket},
@@ -237,20 +263,25 @@ defmodule Biot.Node.Control.Connection do
          %Message.Synchronize{connection_id: connection_id, biot_specs: specs},
          %State{status: :synchronizing, connection_id: connection_id} = state
        ) do
-    :ok = Intents.replace(specs)
+    :ok = Journal.replace_intents(specs)
 
     case send_message(
            state.socket,
            %Message.Synchronized{connection_id: connection_id},
            state.version
          ) do
-      :ok -> %{state | status: :ready, backoff_ms: state.backoff_min_ms}
-      {:error, reason} -> disconnect(state, reason)
+      :ok ->
+        send(self(), {:announce, Enum.map(specs, & &1.execution.biot_id)})
+        publish(%{state | status: :ready, backoff_ms: state.backoff_min_ms})
+
+      {:error, reason} ->
+        disconnect(state, reason)
     end
   end
 
   defp handle_message(%Message.Desired{biot_spec: spec}, %State{status: :ready} = state) do
-    :ok = Intents.put(spec)
+    {:ok, _intent} = Journal.put_intent(spec)
+    warn_missing_controller(Controllers.intent_changed(spec.execution.biot_id))
     state
   end
 
@@ -291,6 +322,27 @@ defmodule Biot.Node.Control.Connection do
   defp activate(%State{socket: nil}), do: :ok
   defp activate(%State{socket: socket}), do: :ssl.setopts(socket, active: :once)
 
+  # A failed send loses the reports this drain took. That costs nothing: the reconnect
+  # synchronizes, which pokes every controller into reporting what it inspects then.
+  defp drain(%State{} = state) do
+    Enum.reduce_while(Outbox.drain(), state, fn report, state ->
+      case send_message(state.socket, report_message(report), state.version) do
+        :ok -> {:cont, state}
+        {:error, reason} -> {:halt, disconnect(state, reason)}
+      end
+    end)
+  end
+
+  # Durable intent without a live controller is a node fault, not a link fault. The controller's
+  # owner keeps trying to start it, and the link stays up for the biots that do have one.
+  defp warn_missing_controller(:ok), do: :ok
+
+  defp warn_missing_controller({:error, {biot_id, reason}}) do
+    Logger.error(
+      "no controller for biot #{BiotId.to_string(biot_id)}: #{inspect(reason)}; the node keeps trying"
+    )
+  end
+
   defp disconnect(%State{socket: socket} = state, reason) when not is_nil(socket) do
     :ssl.close(socket)
     disconnect(%{state | socket: nil}, reason)
@@ -301,7 +353,7 @@ defmodule Biot.Node.Control.Connection do
     token = make_ref()
     Process.send_after(self(), {:reconnect, token}, state.backoff_ms)
 
-    %{
+    publish(%{
       state
       | status: :disconnected,
         socket: nil,
@@ -311,7 +363,26 @@ defmodule Biot.Node.Control.Connection do
         heartbeat_challenge: nil,
         reconnect_token: token,
         backoff_ms: min(state.backoff_ms * 2, state.backoff_max_ms)
-    }
+    })
+  end
+
+  # The link's own status is the one fact reconciliation needs about control, so the connection
+  # publishes it where any controller can read it without waiting for this process.
+  defp publish(%State{status: :ready} = state) do
+    true = :ets.insert(__MODULE__, {:status, :ready})
+    state
+  end
+
+  defp publish(%State{} = state) do
+    true = :ets.insert(__MODULE__, {:status, :offline})
+    state
+  end
+
+  defp published_status(table) do
+    case :ets.lookup(table, :status) do
+      [{:status, status}] -> status
+      [] -> :offline
+    end
   end
 
   defp build_state(options) do
