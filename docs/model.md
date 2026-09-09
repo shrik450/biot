@@ -615,29 +615,30 @@ DataState =
   | present(Allocation, MarkerId)
   | lost(Allocation)
 InstallationState =
-  none
+  nil
   | unknown(Installation, InspectionFailure)
   | present(Installation)
   | lost(Installation)
 ResolutionState =
-  none
-  | unknown(Resolution, InspectionFailure)
+  unknown(Resolution, InspectionFailure)
   | present(Resolution)
   | lost(Resolution)
 
 NodeState
   data: DataState
-  resolution: ResolutionState
+  resolutions: map(EnvironmentId, ResolutionState)
   installation: InstallationState
-  container: Resource({incarnation_id, allocation_id, environment_id, state})
+  container: Resource({incarnation_id, biot_id, environment_id, state})
   prepared: Resource(map(EnvironmentId, ArtifactId))
-  failure: none | {target_revision, Failure}
+  pending_exit: nil | {incarnation_id, exit_status}
+  failure: nil | {target_revision, Failure}
 
 CurrentAction = none | Action
 ```
 
-Every `NodeState` belongs to one Biot. Its `prepared` map contains only that
-Biot's Environments; reclamation never scans a sibling's artifacts. The host
+Every `NodeState` belongs to one Biot. Its `resolutions` and `prepared` maps
+contain only that Biot's Environments, and an Environment with no `resolutions`
+entry is unresolved; reclamation never scans a sibling's artifacts. The host
 checks that a release target belongs to the controller's Biot before removing
 its owned root.
 
@@ -663,10 +664,13 @@ there is no second journal copy of their semantic state. Installation is an
 atomic selection owned by the allocation. Removing an installation releases its
 root only after no current container or in-flight action needs it.
 
-`environment_action` also owns eventual reclamation. A resolution snapshot and
+`environment_release` owns eventual reclamation. A resolution snapshot and
 prepared artifact remain retained while their Environment is desired, installed,
-or used by the current action; resources outside those sets are releasable. A
-missing installed artifact makes the Installation lost. A missing resolution
+or used by a live container; resources outside those sets are releasable.
+Convergence never runs while an action is in flight, so no retention rule is
+needed for it. Once desired is `destroyed`, only the live container's
+environment is retained; the installed environment is released. A missing
+installed artifact makes the Installation lost. A missing resolution
 snapshot prevents preparing that Environment but does not invalidate an intact
 installed artifact. The concrete rooting and collection schedule belongs to the
 environment implementation.
@@ -716,17 +720,22 @@ ExecutionSpec + NodeState
  environment_action ─────────▶ one action/block/failure
           │ ready
           ▼
-   execution_action ─────────▶ one action/block/failure/settled
+   execution_action ─────────▶ one action/block/failure
+          │ ready
+          ▼
+   environment_release ───────▶ one action/block/failure/settled
 ```
 
-`next` composes three small pure decisions:
+`next` composes four small pure decisions:
 
 1. `data_action` establishes or removes owned allocation and initialized data.
-2. `environment_action` resolves, prepares, installs, and releases environment
-   resources.
+2. `environment_action` resolves, prepares, and installs environment resources.
 3. `execution_action` retires or starts a container from the installed environment.
+4. `environment_release` (`Environment.release/2`) releases resources outside
+   the retained environments.
 
 Destruction has priority and walks those resources in reverse ownership order.
+`environment_release` runs second during destruction, after execution is ready.
 For ordinary intent, data readiness precedes environment readiness, which
 precedes execution. Each helper returns ready, an action, a block, or a failure;
 the top-level function selects only one action.
@@ -742,7 +751,7 @@ Important cases are:
 | Desired environment differs from installation | Prepare, retire, inspect absence, install |
 | Desired stopped | Retire execution; preparation may finish without starting |
 | Desired destroyed | Cancel current task, retire, remove data, release allocation |
-| Control offline | Finish an already accepted stop/destruction and inspection; do not install or start |
+| Control offline | Allocate and initialize data; finish an already accepted stop or destruction and inspection; `resolve`, `prepare`, `install`, and `start` wait for control |
 | Desired running; container exited | Retire it; after absence is observed, return an automatic-retry failure to the controller |
 | Current revision has a recorded after-change/operator failure | Remain blocked; do not emit the same failure again |
 

@@ -47,6 +47,8 @@ This app owns shared parsed values and wire codecs.
 - **Execution:** `ExecutionSpec` contains complete server-owned execution intent.
 - **Execution:** `ExecutionReport` contains node-supplied execution facts.
 - **Execution:** `Failure` represents a bounded description of a failed lifecycle action.
+  Its stages include `release_environment`; its codes include `invalid_configuration`
+  and `ownership_mismatch`.
 - **Execution:** `ContainerState` represents the observed state of a container.
 - **Identifiers:** `ConnectionId` identifies an authenticated node connection.
 - **Identifiers:** `IncarnationId` identifies a container incarnation.
@@ -114,14 +116,58 @@ Integration tests hit the real SQLite test database.
 
 The node owns host reconciliation and reports inspected state to the server.
 
-### Control protocol
+### Node state and reconciliation
 
+- `Biot.Node.NodeState` is the derived view for one Biot. It holds `data`, a `resolutions`
+  map keyed by environment ID, `installation`, and a `container` with its
+  `biot_id`.
+- `Biot.Node.NodeState` also holds the prepared artifact set, `pending_exit`, and the
+  recorded `failure`. The host layer joins ownership metadata with inspection to
+  build this view in step 8.
+- `Biot.Node.Reconcile.next/4` returns `:settled`, `{:run, action}`, `:cancel_current`,
+  `{:blocked, reason}`, or `{:failed, failure}`.
+- Its gates run in order: current action, recorded failure, convergence, and the
+  offline control gate. `Reconcile.Data`, `Reconcile.Environment`, and
+  `Reconcile.Execution` compose the decisions.
+- `Reconcile.Environment.release/2` releases unretained environment resources.
+  Ordinary convergence runs data, environment, execution, then release.
+  Destruction runs execution, release, then data.
+- `Biot.Node.Action.metadata/1` centralizes each action's stage, cancellation rule, control
+  requirement, and environment use. `requires_control?/1` identifies the four
+  actions that need a live control link.
+- `BlockReason` describes inspection, an in-flight action, a recorded failure, or
+  offline control. `Retry.classify/4` maps host outcomes to bounded failures and
+  retry policies; `Retry.failure/2` builds failures found without an action.
+- `InspectionFailure` keeps an unreadable resource distinct from an absent one.
+
+### Node records and values
+
+- `Allocation` records a Biot's UID/GID range, private data root, network, and
+  initialization marker.
+- `Installation` selects the prepared artifact used by an allocation.
+  `Resolution` records one environment's manifest and snapshot path.
+  `LocalIntent` stores the last accepted `BiotSpec` for one Biot.
+- `NodePrivatePath`, `MarkerId`, `NetworkId`, and `ArtifactId` are node-owned
+  parsed values for private paths, initialization markers, networks, and artifacts.
+
+### In-memory services and control
+
+- `Intents` stores synchronized specs in ETS and supports per-Biot and all-Biots
+  subscriptions. It is an in-memory placeholder that step 9 replaces with
+  durable `LocalIntent` storage.
+- `Diagnostics` stores bounded diagnostic content in memory for on-demand
+  requests. Step 9 replaces it with durable, bounded diagnostic storage.
 - `Control` sends observations, resolutions, and orphaned allocation reports.
-- `Control.Connection` is a reconnecting TLS client.
-  Configuration gates startup, and Linux hosts are required.
-- `Intents` stores specs in ETS and supports per-Biot and all-Biots subscriptions.
-  Step 9 replaces this state with durable `LocalIntent` persistence.
-- `Diagnostics` stores bounded node diagnostics for on-demand requests.
+  `Control.Connection` owns the reconnecting mutually authenticated TLS client,
+  synchronization, heartbeats, and report delivery. Configuration gates startup,
+  and Linux hosts are required.
+
+### Tests
+
+`test/support/reconcile_fixtures.ex` builds named reconciliation values, and
+`reconcile_generators.ex` covers the state and result variants. The test files
+separate actions, node values, retry policy, reconciliation cases and
+invariants, release ordering, sequences, intents, and diagnostics.
 
 ## Releases
 

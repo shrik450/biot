@@ -22,8 +22,8 @@ defmodule Biot.Protocol.TestGenerators do
   alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.SourceSelector
 
-  @failure_stages ~w(allocate initialize resolve prepare install start retire remove_data release_allocation inspect)a
-  @failure_codes ~w(resource_unavailable invalid_source resolution_failed preparation_failed installation_failed container_failed lost_data inspection_failed)a
+  @failure_stages ~w(allocate initialize resolve prepare install start retire release_environment remove_data release_allocation inspect)a
+  @failure_codes ~w(resource_unavailable invalid_source resolution_failed preparation_failed installation_failed invalid_configuration container_failed lost_data ownership_mismatch inspection_failed)a
   @failure_retries ~w(automatic after_change operator)a
 
   def canonical_uuid do
@@ -128,6 +128,12 @@ defmodule Biot.Protocol.TestGenerators do
   def container_state do
     one_of([constant(:running), map(non_negative_integer(), &{:exited, &1})])
   end
+
+  @spec failure_stages() :: [atom()]
+  def failure_stages, do: @failure_stages
+
+  @spec failure_codes() :: [atom()]
+  def failure_codes, do: @failure_codes
 
   def failure do
     gen all(

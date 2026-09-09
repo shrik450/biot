@@ -9,13 +9,38 @@ defmodule Biot.Protocol.Failure do
   @enforce_keys [:stage, :code, :retry, :message, :diagnostic_ref]
   defstruct [:stage, :code, :retry, :message, :diagnostic_ref]
 
-  @stages ~w(allocate initialize resolve prepare install start retire remove_data release_allocation inspect)a
-  @codes ~w(resource_unavailable invalid_source resolution_failed preparation_failed installation_failed container_failed lost_data inspection_failed)a
+  @stages ~w(allocate initialize resolve prepare install start retire release_environment remove_data release_allocation inspect)a
+
+  @type stage ::
+          :allocate
+          | :initialize
+          | :resolve
+          | :prepare
+          | :install
+          | :start
+          | :retire
+          | :release_environment
+          | :remove_data
+          | :release_allocation
+          | :inspect
+
+  @codes ~w(resource_unavailable invalid_source resolution_failed preparation_failed installation_failed invalid_configuration container_failed lost_data ownership_mismatch inspection_failed)a
+
+  @type code ::
+          :resource_unavailable
+          | :invalid_source
+          | :resolution_failed
+          | :preparation_failed
+          | :installation_failed
+          | :invalid_configuration
+          | :container_failed
+          | :lost_data
+          | :ownership_mismatch
+          | :inspection_failed
+
   @retries ~w(automatic after_change operator)a
 
-  @type stage :: unquote(Enum.reduce(@stages, &{:|, [], [&1, &2]}))
-  @type code :: unquote(Enum.reduce(@codes, &{:|, [], [&1, &2]}))
-  @type retry_policy :: unquote(Enum.reduce(@retries, &{:|, [], [&1, &2]}))
+  @type retry_policy :: :automatic | :after_change | :operator
   @type t :: %__MODULE__{
           stage: stage(),
           code: code(),

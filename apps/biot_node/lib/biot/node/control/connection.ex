@@ -42,11 +42,11 @@ defmodule Biot.Node.Control.Connection do
   @type report ::
           {:observation, Biot.Protocol.BiotId.t(), Biot.Protocol.ExecutionReport.t()}
           | {:resolution, Biot.Protocol.EnvironmentId.t(), Biot.Protocol.Manifest.t()}
-          | {:node_observation, [Biot.Protocol.BiotId.t()]}
+          | {:node_observation, [Biot.Protocol.OrphanedAllocation.t()]}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(options \\ []) do
-    GenServer.start_link(__MODULE__, Keyword.delete(options, :name), name: __MODULE__)
+    GenServer.start_link(__MODULE__, options, name: __MODULE__)
   end
 
   @spec send_report(report()) :: :ok | {:error, :disconnected}
