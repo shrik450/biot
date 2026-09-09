@@ -13,6 +13,23 @@ config :biot_server,
   max_frame_bytes: 1_000_000
 
 config :biot_node,
+  data_root: nil,
+  uid_range_base: nil,
+  uid_range_count: nil,
+  uid_range_limit: nil,
+  git_executable: "git",
+  nix_executable: "nix",
+  nix_instantiate_executable: "nix-instantiate",
+  podman_executable: "podman",
+  podman_network_command: "slirp4netns",
+  flock_executable: "flock",
+  setsid_executable: "setsid",
+  nix_build_file: Path.expand("../nix/build.nix", __DIR__),
+  nix_pin_file: Path.expand("../nix/pin.nix", __DIR__),
+  nixpkgs_repository: "https://github.com/NixOS/nixpkgs",
+  nixpkgs_ref: "nixos-unstable",
+  host_command_timeout_ms: 600_000,
+  host_command_max_output_bytes: 256_000,
   server_host: nil,
   server_port: nil,
   server_fingerprint: nil,
@@ -25,6 +42,12 @@ config :biot_node,
   max_frame_bytes: 1_000_000,
   diagnostic_max_entries: 100,
   diagnostic_max_entry_bytes: 1_000_000
+
+config :biot_node, Biot.Node.Repo,
+  foreign_keys: :on,
+  busy_timeout: 5_000,
+  journal_mode: :wal,
+  pool_size: 5
 
 config :biot_server, Biot.Server.Repo, foreign_keys: :on
 

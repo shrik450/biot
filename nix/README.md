@@ -1,5 +1,24 @@
 # Environment bundles
 
+## Pin a source
+
+`pin.nix` asks Nix to resolve one Git reference and compute its NAR hash. Pass the URL and
+reference as arguments so author input never becomes Nix source:
+
+```sh
+nix-instantiate \
+  --eval \
+  --strict \
+  --json \
+  nix/pin.nix \
+  --argstr url <repository URL> \
+  --argstr ref <Git reference>
+```
+
+The result contains `revision` and `nar_hash`.
+
+## Build a bundle
+
 `build.nix` reads one encoded `Biot.Protocol.Manifest` and builds a launch
 bundle for one platform. Pass only the manifest JSON path and the system:
 

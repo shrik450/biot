@@ -73,10 +73,14 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "node" do
 end
 
 if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
-  node_integer_env = fn name, default ->
+  node_integer_env = fn name, default, minimum ->
     case Integer.parse(System.get_env(name, Integer.to_string(default))) do
-      {value, ""} when value > 0 -> value
-      _error -> raise "#{name} must be a positive integer"
+      {value, ""} when value >= minimum ->
+        value
+
+      _error ->
+        kind = if minimum == 0, do: "a non-negative integer", else: "a positive integer"
+        raise "#{name} must be #{kind}"
     end
   end
 
@@ -92,11 +96,41 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
 
   registration_id = node_required_env.("BIOT_NODE_REGISTRATION_ID")
 
+  data_root = node_required_env.("BIOT_NODE_DATA_ROOT")
+
+  unless Path.type(data_root) == :absolute and Path.expand(data_root) == data_root do
+    raise "BIOT_NODE_DATA_ROOT must be an absolute canonical path"
+  end
+
+  uid_range_base = node_integer_env.("BIOT_NODE_UID_RANGE_BASE", 100_000, 0)
+
   case Biot.Protocol.RegistrationId.parse(registration_id) do
     {:ok, registration_id} ->
       config :biot_node,
+        data_root: data_root,
+        uid_range_base: uid_range_base,
+        uid_range_count: node_integer_env.("BIOT_NODE_UID_RANGE_COUNT", 1_024, 1),
+        uid_range_limit:
+          node_integer_env.("BIOT_NODE_UID_RANGE_LIMIT", uid_range_base + 65_536, 1),
+        git_executable: System.get_env("BIOT_NODE_GIT", "git"),
+        nix_executable: System.get_env("BIOT_NODE_NIX", "nix"),
+        nix_instantiate_executable:
+          System.get_env("BIOT_NODE_NIX_INSTANTIATE", "nix-instantiate"),
+        podman_executable: System.get_env("BIOT_NODE_PODMAN", "podman"),
+        podman_network_command: System.get_env("BIOT_NODE_PODMAN_NETWORK_COMMAND", "slirp4netns"),
+        flock_executable: System.get_env("BIOT_NODE_FLOCK", "flock"),
+        setsid_executable: System.get_env("BIOT_NODE_SETSID", "setsid"),
+        nix_build_file: node_required_env.("BIOT_NODE_NIX_BUILD_FILE"),
+        nix_pin_file: node_required_env.("BIOT_NODE_NIX_PIN_FILE"),
+        nixpkgs_repository:
+          System.get_env("BIOT_NODE_NIXPKGS_REPOSITORY", "https://github.com/NixOS/nixpkgs"),
+        nixpkgs_ref: System.get_env("BIOT_NODE_NIXPKGS_REF", "nixos-unstable"),
+        host_command_timeout_ms:
+          node_integer_env.("BIOT_NODE_HOST_COMMAND_TIMEOUT_MS", 600_000, 1),
+        host_command_max_output_bytes:
+          node_integer_env.("BIOT_NODE_HOST_COMMAND_MAX_OUTPUT_BYTES", 256_000, 1),
         server_host: node_required_env.("BIOT_SERVER_HOST"),
-        server_port: node_integer_env.("BIOT_SERVER_PORT", 4443),
+        server_port: node_integer_env.("BIOT_SERVER_PORT", 4443, 1),
         server_fingerprint: node_fingerprint,
         registration_id: registration_id,
         tls: [
@@ -104,10 +138,10 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
           keyfile: node_required_env.("BIOT_NODE_KEYFILE"),
           cacertfile: node_required_env.("BIOT_NODE_CACERTFILE")
         ],
-        heartbeat_interval_ms: node_integer_env.("BIOT_NODE_HEARTBEAT_INTERVAL_MS", 30_000),
-        heartbeat_timeout_ms: node_integer_env.("BIOT_NODE_HEARTBEAT_TIMEOUT_MS", 10_000),
-        reconnect_backoff_min_ms: node_integer_env.("BIOT_NODE_BACKOFF_MIN_MS", 250),
-        reconnect_backoff_max_ms: node_integer_env.("BIOT_NODE_BACKOFF_MAX_MS", 30_000)
+        heartbeat_interval_ms: node_integer_env.("BIOT_NODE_HEARTBEAT_INTERVAL_MS", 30_000, 1),
+        heartbeat_timeout_ms: node_integer_env.("BIOT_NODE_HEARTBEAT_TIMEOUT_MS", 10_000, 1),
+        reconnect_backoff_min_ms: node_integer_env.("BIOT_NODE_BACKOFF_MIN_MS", 250, 1),
+        reconnect_backoff_max_ms: node_integer_env.("BIOT_NODE_BACKOFF_MAX_MS", 30_000, 1)
 
     {:error, _reason} ->
       raise "BIOT_NODE_REGISTRATION_ID must be a canonical UUID"

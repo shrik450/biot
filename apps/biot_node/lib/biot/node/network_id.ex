@@ -1,12 +1,16 @@
 defmodule Biot.Node.NetworkId do
-  @moduledoc "The node-minted identity of the private network one allocation owns."
+  @moduledoc "The identity of the private network derived from its owning Biot."
 
+  alias Biot.Protocol.BiotId
   alias Biot.Protocol.CanonicalUuid
 
   @enforce_keys [:value]
   defstruct [:value]
 
   @opaque t :: %__MODULE__{value: String.t()}
+
+  @spec from_biot_id(BiotId.t()) :: t()
+  def from_biot_id(%BiotId{} = biot_id), do: %__MODULE__{value: BiotId.to_string(biot_id)}
 
   @spec parse(term()) :: {:ok, t()} | {:error, :invalid_format}
   def parse(value) do

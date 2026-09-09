@@ -3,7 +3,7 @@ FROM elixir:1.20.4-otp-28
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes ca-certificates curl fuse-overlayfs git podman slirp4netns uidmap xz-utils \
+    && apt-get install --no-install-recommends --yes ca-certificates curl fuse-overlayfs git nftables podman slirp4netns uidmap xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /bin/bash biot \
     && usermod --add-subuids 100000-165535 --add-subgids 100000-165535 biot \

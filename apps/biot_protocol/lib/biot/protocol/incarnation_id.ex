@@ -8,6 +8,9 @@ defmodule Biot.Protocol.IncarnationId do
 
   @opaque t :: %__MODULE__{value: String.t()}
 
+  @spec generate() :: t()
+  def generate, do: %__MODULE__{value: CanonicalUuid.generate()}
+
   @spec parse(term()) :: {:ok, t()} | {:error, :invalid_format}
   def parse(value) do
     with {:ok, value} <- CanonicalUuid.parse(value) do

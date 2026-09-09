@@ -22,4 +22,15 @@ defmodule Biot.Node.Allocation do
           network_id: NetworkId.t(),
           initialization: initialization()
         }
+
+  @spec resources(t()) :: {BiotId.t(), uid_range(), NodePrivatePath.t(), NetworkId.t()}
+  def resources(%__MODULE__{} = allocation) do
+    {allocation.biot_id, allocation.uid_range, allocation.data_root, allocation.network_id}
+  end
+
+  @spec subordinate_start(t(), non_neg_integer()) :: pos_integer()
+  def subordinate_start(%__MODULE__{} = allocation, uid_range_base) do
+    # Podman's rootless namespace reserves container ID zero for the invoking user.
+    allocation.uid_range.start - uid_range_base + 1
+  end
 end
