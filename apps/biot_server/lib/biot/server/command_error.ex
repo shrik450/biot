@@ -8,6 +8,7 @@ defmodule Biot.Server.CommandError do
           | :forbidden
           | {:invalid_input, field_errors()}
           | {:revision_conflict, pos_integer()}
+          | :destroyed
           | :creation_conflict
           | :name_conflict
           | :hostname_conflict

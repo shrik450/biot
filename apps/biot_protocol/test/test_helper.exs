@@ -4,13 +4,27 @@ defmodule Biot.Protocol.TestGenerators do
   import ExUnitProperties
   import StreamData
 
+  alias Biot.Protocol.BiotId
+  alias Biot.Protocol.ConnectionId
+  alias Biot.Protocol.Desired
   alias Biot.Protocol.Digest
+  alias Biot.Protocol.EnvironmentId
+  alias Biot.Protocol.EnvironmentSelection
+  alias Biot.Protocol.Failure
   alias Biot.Protocol.Hostname
+  alias Biot.Protocol.IncarnationId
+  alias Biot.Protocol.Manifest
   alias Biot.Protocol.PinnedSource
   alias Biot.Protocol.Port
+  alias Biot.Protocol.PrivateDiagnosticId
+  alias Biot.Protocol.ProjectSnapshot
   alias Biot.Protocol.RelativeDirectory
   alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.SourceSelector
+
+  @failure_stages ~w(allocate initialize resolve prepare install start retire remove_data release_allocation inspect)a
+  @failure_codes ~w(resource_unavailable invalid_source resolution_failed preparation_failed installation_failed container_failed lost_data inspection_failed)a
+  @failure_retries ~w(automatic after_change operator)a
 
   def canonical_uuid do
     gen all(
@@ -95,6 +109,87 @@ defmodule Biot.Protocol.TestGenerators do
       nar_hash = "sha256-" <> Base.encode64(nar_bytes)
       {:ok, pinned_source} = PinnedSource.pin(selector, revision, nar_hash)
       pinned_source
+    end
+  end
+
+  def biot_id, do: identifier(BiotId)
+  def connection_id, do: identifier(ConnectionId)
+  def environment_id, do: identifier(EnvironmentId)
+  def incarnation_id, do: identifier(IncarnationId)
+  def private_diagnostic_id, do: identifier(PrivateDiagnosticId)
+
+  def identifier(module) do
+    map(canonical_uuid(), fn value ->
+      {:ok, id} = module.parse(value)
+      id
+    end)
+  end
+
+  def container_state do
+    one_of([constant(:running), map(non_negative_integer(), &{:exited, &1})])
+  end
+
+  def failure do
+    gen all(
+          stage <- member_of(@failure_stages),
+          code <- member_of(@failure_codes),
+          retry_policy <- member_of(@failure_retries),
+          message <- string(:printable, max_length: 100),
+          diagnostic_ref <- one_of([constant(nil), private_diagnostic_id()])
+        ) do
+      %Failure{
+        stage: stage,
+        code: code,
+        retry: retry_policy,
+        message: message,
+        diagnostic_ref: diagnostic_ref
+      }
+    end
+  end
+
+  def project_snapshot do
+    one_of([
+      constant(nil),
+      gen all(
+            snapshot_id <- string(:alphanumeric, min_length: 1, max_length: 32),
+            digest <- digest()
+          ) do
+        %ProjectSnapshot{snapshot_id: snapshot_id, digest: digest}
+      end
+    ])
+  end
+
+  def manifest do
+    gen all(
+          base_nixpkgs <- pinned_source(),
+          layers <- list_of(pinned_source(), max_length: 4),
+          project_snapshot <- project_snapshot()
+        ) do
+      Manifest.build(base_nixpkgs, layers, project_snapshot)
+    end
+  end
+
+  def environment_selection do
+    gen all(
+          base_nixpkgs <- source_selector(),
+          layers <- list_of(source_selector(), max_length: 4),
+          project_context <- one_of([constant(nil), relative_directory()])
+        ) do
+      %EnvironmentSelection{
+        base_nixpkgs: base_nixpkgs,
+        layers: layers,
+        project_context: project_context
+      }
+    end
+  end
+
+  def desired do
+    gen all(
+          revision <- positive_integer(),
+          state <- member_of(Desired.states()),
+          environment_id <- environment_id()
+        ) do
+      %Desired{revision: revision, state: state, environment_id: environment_id}
     end
   end
 

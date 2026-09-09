@@ -7,7 +7,9 @@ defmodule Biot.Protocol.ParseRobustnessTest do
   @parsers [
     {Biot.Protocol.CanonicalUuid, [:invalid_format]},
     {Biot.Protocol.BiotId, [:invalid_format]},
+    {Biot.Protocol.ConnectionId, [:invalid_format]},
     {Biot.Protocol.EnvironmentId, [:invalid_format]},
+    {Biot.Protocol.IncarnationId, [:invalid_format]},
     {Biot.Protocol.NodeId, [:invalid_format]},
     {Biot.Protocol.OperationId, [:invalid_format]},
     {Biot.Protocol.PrincipalId, [:invalid_format]},

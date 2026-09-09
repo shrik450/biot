@@ -1,5 +1,24 @@
 import Config
 
+alias Biot.Protocol.NodeId
+
+default_node_id =
+  case System.get_env("BIOT_DEFAULT_NODE_ID") do
+    nil ->
+      nil
+
+    value ->
+      case NodeId.parse(value) do
+        {:ok, node_id} ->
+          node_id
+
+        {:error, _reason} ->
+          raise "BIOT_DEFAULT_NODE_ID must be a canonical UUID"
+      end
+  end
+
+config :biot_server, default_node_id: default_node_id
+
 if config_env() in [:dev, :prod] do
   config :biot_server,
     node_registrations_file: System.get_env("BIOT_NODE_REGISTRATIONS")

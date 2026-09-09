@@ -21,7 +21,7 @@ defmodule Biot.Server.Schema.Biot do
     field(:repository, ProtocolValue, module: RepositorySource)
     field(:creation_fingerprint, ProtocolValue, module: Digest)
     field(:desired_revision, :integer)
-    field(:desired_state, Ecto.Enum, values: [:running, :stopped, :destroyed])
+    field(:desired_state, Ecto.Enum, values: Desired.states())
     field(:desired_environment_id, ProtocolValue, module: EnvironmentId)
     field(:access_revision, :integer)
 

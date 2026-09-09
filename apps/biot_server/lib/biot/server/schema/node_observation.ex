@@ -3,6 +3,7 @@ defmodule Biot.Server.Schema.NodeObservation do
 
   use Ecto.Schema
 
+  alias Biot.Protocol.ConnectionId
   alias Biot.Protocol.NodeId
   alias Biot.Server.Ecto.OrphanedAllocations
   alias Biot.Server.Ecto.ProtocolValue
@@ -10,7 +11,7 @@ defmodule Biot.Server.Schema.NodeObservation do
   @primary_key false
   schema "node_observations" do
     field(:node_id, ProtocolValue, module: NodeId, primary_key: true)
-    field(:connection_id, :string)
+    field(:connection_id, ProtocolValue, module: ConnectionId)
     field(:received_at, :utc_datetime_usec)
     field(:orphaned_allocations, OrphanedAllocations)
 

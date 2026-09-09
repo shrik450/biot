@@ -1,7 +1,8 @@
 import Config
 
 config :biot_server,
-  ecto_repos: [Biot.Server.Repo]
+  ecto_repos: [Biot.Server.Repo],
+  default_node_id: nil
 
 config :biot_server, Biot.Server.Repo, foreign_keys: :on
 
@@ -37,7 +38,14 @@ config :tailwind,
 
 config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
-  metadata: [:request_id]
+  metadata: [
+    :request_id,
+    :node_id,
+    :connection_id,
+    :received_at,
+    :orphaned_allocations,
+    :environment_id
+  ]
 
 config :phoenix, :json_library, Jason
 

@@ -30,8 +30,13 @@ This app owns shared parsed values and wire codecs.
 - **Environment:** `ProjectSnapshot` represents a project identifier and its digest.
 - **Environment:** `Digest` represents a raw SHA-256 digest with a named encoding.
 - **Execution:** `Desired` represents execution intent and provides `transition/2`.
+- **Execution:** `BiotSpec` contains execution and access intent for an assigned node.
+- **Execution:** `ExecutionSpec` contains complete server-owned execution intent.
+- **Execution:** `ExecutionReport` contains node-supplied execution facts.
 - **Execution:** `Failure` represents a bounded description of a failed lifecycle action.
 - **Execution:** `ContainerState` represents the observed state of a container.
+- **Identifiers:** `ConnectionId` identifies an authenticated node connection.
+- **Identifiers:** `IncarnationId` identifies a container incarnation.
 - **Other parsed values:** `Hostname` represents a lowercase DNS label.
 - **Other parsed values:** `Port` represents a valid user-facing TCP port.
 - **Other parsed values:** `RelativeDirectory` represents a safe relative checkout directory.
@@ -57,6 +62,19 @@ The other custom types wrap protocol `encode/1` and `parse/1` functions.
 `Nodes.Startup` runs enrollment at boot and fails boot with a readable message on rejection.
 `Actor` is the authenticated caller.
 `CommandError` is the model's error union.
+`CommandError` includes `destroyed` for lifecycle changes against a destroyed Biot.
+
+### Application modules
+
+- `Biots` handles `create`, `start`, `stop`, `update_environment`, `destroy`, `get`, `list`, and `spec`.
+- `Biots.Create`, `Biots.SelectEnvironment`, `Biots.Accepted`, `Biots.Unchanged`, and `Biots.CreationFingerprint` define lifecycle inputs, results, and fingerprints.
+- `Operations` owns operation queries.
+- `Operations.Completion` provides pure completion evidence.
+- `Reports` handles node-facing ingestion through `observation`, `resolution`, and `node_observation`.
+- `Queries.BiotView` and `Queries.OperationView` provide pure projections.
+- `Authorization` provides pure predicates.
+- `NodeConnections` is an ETS registry of current node connections written by the control link.
+- `NodeWake` provides one PubSub topic per node, plus `spec_changed/2` and `subscribe/1`.
 
 ### Migrations
 

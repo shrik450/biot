@@ -398,6 +398,7 @@ CommandError =
   unauthenticated | not_found | forbidden
   | invalid_input(field_errors)
   | revision_conflict(current_revision)
+  | destroyed
   | creation_conflict | name_conflict | hostname_conflict
   | node_disabled | capacity_exceeded
   | temporarily_unavailable
@@ -406,6 +407,9 @@ Failure =
   {stage, code, retry: automatic | after_change | operator,
    message, diagnostic_ref: none | PrivateDiagnosticId}
 ```
+
+A lifecycle change other than destroy against a destroyed Biot returns
+`destroyed`; the Biot remains readable.
 
 The node retains a bounded diagnostic log for the latest failed attempt of each
 Biot revision and returns its `PrivateDiagnosticId` with the Failure. The actor

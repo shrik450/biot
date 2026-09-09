@@ -2,11 +2,14 @@ defmodule Biot.Server.TestFixtures do
   @moduledoc false
 
   alias Biot.Protocol.BiotId
+  alias Biot.Protocol.ConnectionId
   alias Biot.Protocol.Digest
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.EnvironmentSelection
+  alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Failure
   alias Biot.Protocol.Hostname
+  alias Biot.Protocol.IncarnationId
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.OperationId
@@ -16,6 +19,8 @@ defmodule Biot.Server.TestFixtures do
   alias Biot.Protocol.RegistrationId
   alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.SourceSelector
+  alias Biot.Server.Actor
+  alias Biot.Server.Biots.Create
   alias Biot.Server.Nodes.Registration
   alias Biot.Server.Repo
   alias Biot.Server.Schema.Biot, as: BiotSchema
@@ -103,7 +108,7 @@ defmodule Biot.Server.TestFixtures do
   def observation(biot, number, opts \\ []) do
     Repo.insert!(%Observation{
       biot_id: biot.id,
-      connection_id: Keyword.get(opts, :connection_id, "connection-#{number}"),
+      connection_id: Keyword.get(opts, :connection_id, id(ConnectionId, number + 5_000)),
       received_at: DateTime.utc_now(),
       accepted_revision: Keyword.get(opts, :accepted_revision, 1),
       installed_environment_id: Keyword.get(opts, :installed_environment_id),
@@ -114,19 +119,52 @@ defmodule Biot.Server.TestFixtures do
     })
   end
 
-  def selection do
-    %EnvironmentSelection{
-      base_nixpkgs: SourceSelector.nixpkgs(),
-      layers: [],
-      project_context: nil
+  def actor(%Principal{} = principal), do: %Actor{principal_id: principal.id}
+
+  def create_command(opts \\ []) do
+    %Create{
+      name: Keyword.get(opts, :name, "created-biot"),
+      repository: Keyword.get(opts, :repository, repository()),
+      environment: Keyword.get(opts, :environment, selection()),
+      node_id: Keyword.get(opts, :node_id, :default)
     }
   end
 
-  def manifest do
-    revision = String.duplicate("a", 40)
+  def execution_report(opts \\ []) do
+    %ExecutionReport{
+      accepted_revision: Keyword.get(opts, :accepted_revision, 1),
+      installed_environment_id: Keyword.get(opts, :installed_environment_id),
+      container: Keyword.get(opts, :container, :unknown),
+      data: Keyword.get(opts, :data, :unknown),
+      failure: Keyword.get(opts, :failure),
+      applied_access_revision: Keyword.get(opts, :applied_access_revision, 1)
+    }
+  end
+
+  def running_container(number \\ 1) do
+    {:present, id(IncarnationId, number + 6_000), :running}
+  end
+
+  def connection_id(number), do: id(ConnectionId, number + 5_000)
+
+  def selection(opts \\ []) do
+    %EnvironmentSelection{
+      base_nixpkgs: SourceSelector.nixpkgs(),
+      layers: Keyword.get(opts, :layers, []),
+      project_context: Keyword.get(opts, :project_context)
+    }
+  end
+
+  def manifest(opts \\ []) do
+    revision = String.duplicate(Keyword.get(opts, :revision_digit, "a"), 40)
     nar_hash = "sha256-" <> Base.encode64(:binary.copy(<<1>>, 32))
     {:ok, pinned} = PinnedSource.pin(SourceSelector.nixpkgs(), revision, nar_hash)
     Manifest.build(pinned, [], nil)
+  end
+
+  def repository(url \\ "https://github.com/example/project.git") do
+    {:ok, repository} = RepositorySource.parse(url)
+    repository
   end
 
   def failure do
@@ -156,10 +194,5 @@ defmodule Biot.Server.TestFixtures do
     |> Integer.to_string(16)
     |> String.downcase()
     |> String.pad_leading(64, "0")
-  end
-
-  defp repository do
-    {:ok, repository} = RepositorySource.parse("https://github.com/example/project.git")
-    repository
   end
 end
