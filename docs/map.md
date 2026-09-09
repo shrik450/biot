@@ -15,6 +15,32 @@ The node owns host resources and reports inspected state.
 The protocol app owns shared boundary values and codecs.
 The web and CLI code do not own domain state.
 
+## `apps/biot_protocol`
+
+This app owns shared parsed values and wire codecs.
+
+### Value modules
+
+- **Identifiers:** `CanonicalUuid` parses canonical UUID strings.
+- **Sources:** `RepositorySource` represents a credential-free Git repository URL.
+- **Sources:** `SourceSelector` represents an unpinned source and its ref.
+- **Sources:** `PinnedSource` represents a source with a commit revision and Nix NAR hash.
+- **Environment:** `EnvironmentSelection` represents the sources and project directory for an environment.
+- **Environment:** `Manifest` represents resolved sources, a project snapshot, and a content digest.
+- **Environment:** `ProjectSnapshot` represents a project identifier and its digest.
+- **Environment:** `Digest` represents a raw SHA-256 digest with a named encoding.
+- **Execution:** `Desired` represents execution intent and provides `transition/2`.
+- **Execution:** `Failure` represents a bounded description of a failed lifecycle action.
+- **Execution:** `ContainerState` represents the observed state of a container.
+- **Other parsed values:** `Hostname` represents a lowercase DNS label.
+- **Other parsed values:** `Port` represents a valid user-facing TCP port.
+- **Other parsed values:** `RelativeDirectory` represents a safe relative checkout directory.
+
+Parsed values share `parse/1`, which returns `{:ok, t} | {:error, atom}`.
+Their `to_string/1` output round-trips through `parse/1`.
+Tests for this app are pure unit tests with StreamData property tests.
+`test/test_helper.exs` holds the generators.
+
 ## Releases
 
 The root Mix project defines two releases.
