@@ -2,6 +2,7 @@ defmodule Biot.Protocol.Manifest do
   @moduledoc "A resolved environment manifest with a digest of its contents."
 
   alias Biot.Protocol.Digest
+  alias Biot.Protocol.ParsedList
   alias Biot.Protocol.PinnedSource
   alias Biot.Protocol.ProjectSnapshot
 
@@ -14,6 +15,41 @@ defmodule Biot.Protocol.Manifest do
           project_snapshot: ProjectSnapshot.t() | nil,
           digest: Digest.t()
         }
+
+  @spec encode(t()) :: map()
+  def encode(%__MODULE__{} = manifest) do
+    %{
+      "base_nixpkgs" => PinnedSource.to_string(manifest.base_nixpkgs),
+      "layers" => Enum.map(manifest.layers, &PinnedSource.to_string/1),
+      "project_snapshot" => encode_project_snapshot(manifest.project_snapshot),
+      "digest" => Digest.to_string(manifest.digest)
+    }
+  end
+
+  @spec parse(term()) :: {:ok, t()} | {:error, atom()}
+  def parse(value) when is_map(value) do
+    with {:ok, base_nixpkgs} <- Map.fetch(value, "base_nixpkgs"),
+         {:ok, base_nixpkgs} <- PinnedSource.parse(base_nixpkgs),
+         {:ok, layers} <- Map.fetch(value, "layers"),
+         {:ok, layers} <- ParsedList.parse(layers, &PinnedSource.parse/1),
+         {:ok, project_snapshot} <- Map.fetch(value, "project_snapshot"),
+         {:ok, project_snapshot} <- parse_project_snapshot(project_snapshot),
+         {:ok, digest} <- Map.fetch(value, "digest"),
+         {:ok, digest} <- Digest.parse(digest),
+         manifest = %__MODULE__{
+           base_nixpkgs: base_nixpkgs,
+           layers: layers,
+           project_snapshot: project_snapshot,
+           digest: digest
+         },
+         true <- verify(manifest) do
+      {:ok, manifest}
+    else
+      _error -> {:error, :invalid_format}
+    end
+  end
+
+  def parse(_value), do: {:error, :invalid_format}
 
   @spec build(PinnedSource.t(), [PinnedSource.t()], ProjectSnapshot.t() | nil) :: t()
   def build(base_nixpkgs, layers, project_snapshot) do
@@ -57,6 +93,26 @@ defmodule Biot.Protocol.Manifest do
          digest: %Digest{value: digest}
        }) do
     [<<1>>, encode_field(snapshot_id), encode_field(digest)]
+  end
+
+  defp parse_project_snapshot(nil), do: {:ok, nil}
+
+  defp parse_project_snapshot(%{"snapshot_id" => snapshot_id, "digest" => digest})
+       when is_binary(snapshot_id) and snapshot_id != "" do
+    with {:ok, digest} <- Digest.parse(digest) do
+      {:ok, %ProjectSnapshot{snapshot_id: snapshot_id, digest: digest}}
+    end
+  end
+
+  defp parse_project_snapshot(_value), do: {:error, :invalid_format}
+
+  defp encode_project_snapshot(nil), do: nil
+
+  defp encode_project_snapshot(%ProjectSnapshot{} = snapshot) do
+    %{
+      "snapshot_id" => snapshot.snapshot_id,
+      "digest" => Digest.to_string(snapshot.digest)
+    }
   end
 
   defp encode_count(values), do: <<length(values)::unsigned-big-32>>

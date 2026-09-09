@@ -3,6 +3,8 @@ import Config
 config :biot_server,
   ecto_repos: [Biot.Server.Repo]
 
+config :biot_server, Biot.Server.Repo, foreign_keys: :on
+
 config :biot_web, BiotWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,

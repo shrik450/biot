@@ -38,8 +38,37 @@ This app owns shared parsed values and wire codecs.
 
 Parsed values share `parse/1`, which returns `{:ok, t} | {:error, atom}`.
 Their `to_string/1` output round-trips through `parse/1`.
+`ParsedList` parses lists of values with a supplied parser.
+`Failure`, `Manifest`, `EnvironmentSelection`, and `ContainerState` provide `encode/1` and `parse/1`.
 Tests for this app are pure unit tests with StreamData property tests.
 `test/test_helper.exs` holds the generators.
+
+## apps/biot_server
+
+### Layout
+
+`Schema.*` are plain Ecto schemas with no changesets.
+`Ecto.*` are custom types.
+`ProtocolValue` stores any parsed protocol value as text.
+The other custom types wrap protocol `encode/1` and `parse/1` functions.
+`Principals` and `Nodes` own transactions.
+`Nodes.Plan` is the pure enrollment planner.
+`Nodes.RegistrationLoader` reads the JSON file named by `BIOT_NODE_REGISTRATIONS`.
+`Nodes.Startup` runs enrollment at boot and fails boot with a readable message on rejection.
+`Actor` is the authenticated caller.
+`CommandError` is the model's error union.
+
+### Migrations
+
+Migrations live under `priv/repo/migrations`.
+Raw SQL is used only for `biots` and `view_grants`.
+SQLite needs their composite foreign keys inline.
+
+### Tests
+
+`test/support/data_case.ex` gives tests a sandboxed Repo.
+`test/support/fixtures.ex` builds rows.
+Integration tests hit the real SQLite test database.
 
 ## Releases
 

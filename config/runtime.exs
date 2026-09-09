@@ -1,5 +1,10 @@
 import Config
 
+if config_env() in [:dev, :prod] do
+  config :biot_server,
+    node_registrations_file: System.get_env("BIOT_NODE_REGISTRATIONS")
+end
+
 if config_env() == :prod do
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
