@@ -1,0 +1,25 @@
+# Elixir and Mix
+/_build/
+/deps/
+.elixir_ls/
+*.ez
+*.beam
+*.dump
+
+# Phoenix assets
+/apps/*/assets/node_modules/
+/apps/*/priv/static/assets/
+/apps/*/priv/static/cache_manifest.json
+
+# Local databases
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Go
+cli/biot
+
+# mise local state
+.mise/
+.mise.local.toml
+.mise.local.*

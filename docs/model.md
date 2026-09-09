@@ -1,7 +1,7 @@
 # Biot implementation model
 
 This is the working implementation contract for [Biot](../README.md), building
-on [design.md](design.md). It defines the smallest model needed for the initial
+on `README.md`. It defines the smallest model needed for the initial
 system. Implementation details should remain local until a real failure or a
 second implementation makes a broader abstraction useful.
 

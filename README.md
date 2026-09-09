@@ -108,8 +108,8 @@ self-hostable solution.
 $ biot create --repo https://github.com/me/app.git --name checkout-flow
 biot ready: checkout-flow
 $ biot publish checkout-flow 3000
-https://patient-owl-k7m2.env.example.com
-$ biot share checkout-flow --port 3000 --to alice@example.com
+https://patient-owl-k7m2.env.test
+$ biot share checkout-flow --port 3000 --to alice@company.test
 ```
 
 You can also do these via the web UI. The CLI and web UI have all the same

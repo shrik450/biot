@@ -1,0 +1,11 @@
+@import "tailwindcss" source(none);
+@import "phoenix-colocated/biot_web/colocated.css";
+@source "../css";
+@source "../js";
+@source "../../lib/biot_web";
+@source "../../../../_build/dev/phoenix-colocated/biot_web/*/";
+
+[data-phx-session],
+[data-phx-teleported-src] {
+  display: contents;
+}

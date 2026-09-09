@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - run: podman --version
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28.5"
+          elixir-version: "1.20.4-otp-28"
+          version-type: strict
+          install-hex: true
+          install-rebar: true
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+            ~/.mix/archives
+          key: ${{ runner.os }}-mix-otp-28.5-elixir-1.20.4-otp-28-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-
+
+      - run: mix deps.get
+      - run: mix check
+      - run: mix test
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+      - working-directory: cli
+        run: go build ./...
+      - working-directory: cli
+        run: go vet ./...
