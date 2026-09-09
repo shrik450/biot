@@ -5,6 +5,10 @@ defmodule Biot.Protocol.Manifest do
   alias Biot.Protocol.ParsedList
   alias Biot.Protocol.PinnedSource
   alias Biot.Protocol.ProjectSnapshot
+  alias Biot.Protocol.StrictMap
+
+  @fields ["base_nixpkgs", "layers", "project_snapshot", "digest"]
+  @project_snapshot_fields ["snapshot_id", "digest"]
 
   @enforce_keys [:base_nixpkgs, :layers, :project_snapshot, :digest]
   defstruct [:base_nixpkgs, :layers, :project_snapshot, :digest]
@@ -28,7 +32,8 @@ defmodule Biot.Protocol.Manifest do
 
   @spec parse(term()) :: {:ok, t()} | {:error, atom()}
   def parse(value) when is_map(value) do
-    with {:ok, base_nixpkgs} <- Map.fetch(value, "base_nixpkgs"),
+    with {:ok, value} <- StrictMap.fetch_exact(value, @fields),
+         {:ok, base_nixpkgs} <- Map.fetch(value, "base_nixpkgs"),
          {:ok, base_nixpkgs} <- PinnedSource.parse(base_nixpkgs),
          {:ok, layers} <- Map.fetch(value, "layers"),
          {:ok, layers} <- ParsedList.parse(layers, &PinnedSource.parse/1),
@@ -97,9 +102,10 @@ defmodule Biot.Protocol.Manifest do
 
   defp parse_project_snapshot(nil), do: {:ok, nil}
 
-  defp parse_project_snapshot(%{"snapshot_id" => snapshot_id, "digest" => digest})
-       when is_binary(snapshot_id) and snapshot_id != "" do
-    with {:ok, digest} <- Digest.parse(digest) do
+  defp parse_project_snapshot(%{"snapshot_id" => snapshot_id, "digest" => digest} = snapshot) do
+    with {:ok, _snapshot} <- StrictMap.fetch_exact(snapshot, @project_snapshot_fields),
+         true <- is_binary(snapshot_id) and snapshot_id != "",
+         {:ok, digest} <- Digest.parse(digest) do
       {:ok, %ProjectSnapshot{snapshot_id: snapshot_id, digest: digest}}
     end
   end

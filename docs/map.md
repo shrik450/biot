@@ -19,6 +19,19 @@ The web and CLI code do not own domain state.
 
 This app owns shared parsed values and wire codecs.
 
+### Protocol layer
+
+- `Message.*` defines the protocol message structs.
+- `Wire` provides a versioned, strict JSON codec with table-driven dispatch.
+- `Frame` encodes and incrementally decodes length-prefixed frames.
+- `Version` selects the highest protocol version shared by both peers.
+- `Liveness` matches heartbeat responses.
+- `Platform` represents supported Linux host platforms.
+- `PeerIdentity` computes certificate public-key fingerprints.
+- `Certificates` and `mix biot.gen.certs` write deployment certificates and keys.
+  The task writes CA, server, and node certificates, keys with mode 0600, and `fingerprints.json`.
+- `OrphanedAllocation` represents node allocations absent from server intent.
+
 ### Value modules
 
 - **Identifiers:** `CanonicalUuid` parses canonical UUID strings.
@@ -76,6 +89,15 @@ The other custom types wrap protocol `encode/1` and `parse/1` functions.
 - `NodeConnections` is an ETS registry of current node connections written by the control link.
 - `NodeWake` provides one PubSub topic per node, plus `spec_changed/2` and `subscribe/1`.
 
+### Control protocol
+
+- `Control.Listener` accepts mutually authenticated TLS node connections.
+- `Control.Connection` owns one process per node connection.
+  It handles hello, synchronize, ready, wake, reports, heartbeats, and diagnostics.
+  The Registry enforces newest-wins connection replacement.
+- `Control.Synchronization` builds the complete intent set for a node.
+- `Diagnostics` authorizes and retrieves bounded node-held diagnostics.
+
 ### Migrations
 
 Migrations live under `priv/repo/migrations`.
@@ -87,6 +109,19 @@ SQLite needs their composite foreign keys inline.
 `test/support/data_case.ex` gives tests a sandboxed Repo.
 `test/support/fixtures.ex` builds rows.
 Integration tests hit the real SQLite test database.
+
+## `apps/biot_node`
+
+The node owns host reconciliation and reports inspected state to the server.
+
+### Control protocol
+
+- `Control` sends observations, resolutions, and orphaned allocation reports.
+- `Control.Connection` is a reconnecting TLS client.
+  Configuration gates startup, and Linux hosts are required.
+- `Intents` stores specs in ETS and supports per-Biot and all-Biots subscriptions.
+  Step 9 replaces this state with durable `LocalIntent` persistence.
+- `Diagnostics` stores bounded node diagnostics for on-demand requests.
 
 ## Releases
 
@@ -135,3 +170,5 @@ Build the Linux host image, then run host tests with privileged access:
 docker build -t biot-linux-host docker/linux-host
 docker run --privileged --rm -it biot-linux-host
 ```
+
+Run the full suite on Linux with `docker/linux-host/run-tests.sh` from the repository root.

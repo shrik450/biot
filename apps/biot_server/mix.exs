@@ -30,7 +30,9 @@ defmodule Biot.Server.MixProject do
       {:ecto_sqlite3, "~> 0.22"},
       {:jason, "~> 1.4"},
       {:phoenix_pubsub, "~> 2.1"},
+      {:thousand_island, "~> 1.5"},
       {:stream_data, "~> 1.1", only: :test},
+      {:biot_node, in_umbrella: true, only: :test},
       {:biot_protocol, in_umbrella: true}
     ]
   end

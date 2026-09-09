@@ -2,6 +2,9 @@ defmodule Biot.Protocol.BiotSpec do
   @moduledoc "The execution and access intent sent to an assigned node."
 
   alias Biot.Protocol.ExecutionSpec
+  alias Biot.Protocol.StrictMap
+
+  @fields ["execution", "access_revision"]
 
   @enforce_keys [:execution, :access_revision]
   defstruct [:execution, :access_revision]
@@ -17,16 +20,14 @@ defmodule Biot.Protocol.BiotSpec do
   end
 
   @spec parse(term()) :: {:ok, t()} | {:error, :invalid_format}
-  def parse(%{"execution" => execution, "access_revision" => access_revision})
-      when is_integer(access_revision) and access_revision > 0 do
-    case ExecutionSpec.parse(execution) do
-      {:ok, execution} ->
-        {:ok, %__MODULE__{execution: execution, access_revision: access_revision}}
-
-      {:error, _reason} ->
-        {:error, :invalid_format}
+  def parse(value) do
+    with {:ok, %{"execution" => execution, "access_revision" => access_revision}} <-
+           StrictMap.fetch_exact(value, @fields),
+         true <- is_integer(access_revision) and access_revision > 0,
+         {:ok, execution} <- ExecutionSpec.parse(execution) do
+      {:ok, %__MODULE__{execution: execution, access_revision: access_revision}}
+    else
+      _error -> {:error, :invalid_format}
     end
   end
-
-  def parse(_value), do: {:error, :invalid_format}
 end

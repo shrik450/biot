@@ -2,6 +2,9 @@ defmodule Biot.Protocol.Desired do
   @moduledoc "The server-owned execution intent for a biot."
 
   alias Biot.Protocol.EnvironmentId
+  alias Biot.Protocol.StrictMap
+
+  @fields ["revision", "state", "environment_id"]
 
   @states [:running, :stopped, :destroyed]
   @type state :: :running | :stopped | :destroyed
@@ -33,17 +36,17 @@ defmodule Biot.Protocol.Desired do
   end
 
   @spec parse(term()) :: {:ok, t()} | {:error, :invalid_format}
-  def parse(%{"revision" => revision, "state" => state, "environment_id" => environment_id})
-      when is_integer(revision) and revision > 0 do
-    with {:ok, state} <- parse_state(state),
+  def parse(value) do
+    with {:ok, %{"revision" => revision, "state" => state, "environment_id" => environment_id}} <-
+           StrictMap.fetch_exact(value, @fields),
+         true <- is_integer(revision) and revision > 0,
+         {:ok, state} <- parse_state(state),
          {:ok, environment_id} <- EnvironmentId.parse(environment_id) do
       {:ok, %__MODULE__{revision: revision, state: state, environment_id: environment_id}}
     else
       _error -> {:error, :invalid_format}
     end
   end
-
-  def parse(_value), do: {:error, :invalid_format}
 
   @spec transition(t(), change()) :: {:changed, t()} | :unchanged | {:error, :destroyed}
   def transition(%__MODULE__{state: :destroyed}, :destroy), do: :unchanged

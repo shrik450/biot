@@ -2,7 +2,29 @@ import Config
 
 config :biot_server,
   ecto_repos: [Biot.Server.Repo],
-  default_node_id: nil
+  default_node_id: nil,
+  control_port: nil,
+  control_tls: nil,
+  handshake_timeout_ms: 10_000,
+  heartbeat_interval_ms: 30_000,
+  heartbeat_timeout_ms: 10_000,
+  diagnostic_timeout_ms: 10_000,
+  diagnostic_max_bytes: 256_000,
+  max_frame_bytes: 1_000_000
+
+config :biot_node,
+  server_host: nil,
+  server_port: nil,
+  server_fingerprint: nil,
+  registration_id: nil,
+  tls: nil,
+  heartbeat_interval_ms: 30_000,
+  heartbeat_timeout_ms: 10_000,
+  reconnect_backoff_min_ms: 250,
+  reconnect_backoff_max_ms: 30_000,
+  max_frame_bytes: 1_000_000,
+  diagnostic_max_entries: 100,
+  diagnostic_max_entry_bytes: 1_000_000
 
 config :biot_server, Biot.Server.Repo, foreign_keys: :on
 

@@ -5,6 +5,18 @@ defmodule Biot.Protocol.ExecutionReport do
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.Failure
   alias Biot.Protocol.IncarnationId
+  alias Biot.Protocol.StrictMap
+
+  @fields [
+    "accepted_revision",
+    "installed_environment_id",
+    "container",
+    "data",
+    "failure",
+    "applied_access_revision"
+  ]
+  @present_container_fields ["state", "incarnation_id", "container_state"]
+  @reported_failure_fields ["target_revision", "failure"]
 
   @data_states [:no_allocation, :unknown, :uninitialized, :present, :lost]
   @type data_state :: :no_allocation | :unknown | :uninitialized | :present | :lost
@@ -54,17 +66,19 @@ defmodule Biot.Protocol.ExecutionReport do
   end
 
   @spec parse(term()) :: {:ok, t()} | {:error, :invalid_format}
-  def parse(%{
-        "accepted_revision" => accepted_revision,
-        "installed_environment_id" => installed_environment_id,
-        "container" => container,
-        "data" => data,
-        "failure" => failure,
-        "applied_access_revision" => applied_access_revision
-      })
-      when is_integer(accepted_revision) and accepted_revision > 0 and
-             is_integer(applied_access_revision) and applied_access_revision > 0 do
-    with {:ok, installed_environment_id} <- parse_environment_id(installed_environment_id),
+  def parse(value) do
+    with {:ok,
+          %{
+            "accepted_revision" => accepted_revision,
+            "installed_environment_id" => installed_environment_id,
+            "container" => container,
+            "data" => data,
+            "failure" => failure,
+            "applied_access_revision" => applied_access_revision
+          }} <- StrictMap.fetch_exact(value, @fields),
+         true <- is_integer(accepted_revision) and accepted_revision > 0,
+         true <- is_integer(applied_access_revision) and applied_access_revision > 0,
+         {:ok, installed_environment_id} <- parse_environment_id(installed_environment_id),
          {:ok, container} <- parse_container(container),
          {:ok, data} <- parse_data(data),
          {:ok, failure} <- parse_failure(failure) do
@@ -81,8 +95,6 @@ defmodule Biot.Protocol.ExecutionReport do
       _error -> {:error, :invalid_format}
     end
   end
-
-  def parse(_value), do: {:error, :invalid_format}
 
   defp encode_environment_id(nil), do: nil
   defp encode_environment_id(environment_id), do: EnvironmentId.to_string(environment_id)
@@ -103,15 +115,23 @@ defmodule Biot.Protocol.ExecutionReport do
   end
 
   @spec parse_container(term()) :: {:ok, container()} | {:error, :invalid_format}
-  def parse_container(%{"state" => "unknown"}), do: {:ok, :unknown}
-  def parse_container(%{"state" => "absent"}), do: {:ok, :absent}
+  def parse_container(%{"state" => "unknown"} = container) do
+    with {:ok, _container} <- StrictMap.fetch_exact(container, ["state"]), do: {:ok, :unknown}
+  end
 
-  def parse_container(%{
-        "state" => "present",
-        "incarnation_id" => incarnation_id,
-        "container_state" => container_state
-      }) do
-    with {:ok, incarnation_id} <- IncarnationId.parse(incarnation_id),
+  def parse_container(%{"state" => "absent"} = container) do
+    with {:ok, _container} <- StrictMap.fetch_exact(container, ["state"]), do: {:ok, :absent}
+  end
+
+  def parse_container(
+        %{
+          "state" => "present",
+          "incarnation_id" => incarnation_id,
+          "container_state" => container_state
+        } = container
+      ) do
+    with {:ok, _container} <- StrictMap.fetch_exact(container, @present_container_fields),
+         {:ok, incarnation_id} <- IncarnationId.parse(incarnation_id),
          {:ok, container_state} <- ContainerState.parse(container_state) do
       {:ok, {:present, incarnation_id, container_state}}
     end
@@ -136,9 +156,13 @@ defmodule Biot.Protocol.ExecutionReport do
 
   defp parse_failure(nil), do: {:ok, nil}
 
-  defp parse_failure(%{"target_revision" => target_revision, "failure" => failure})
-       when is_integer(target_revision) and target_revision > 0 do
-    with {:ok, failure} <- Failure.parse(failure) do
+  defp parse_failure(
+         %{"target_revision" => target_revision, "failure" => failure} = reported_failure
+       ) do
+    with {:ok, _reported_failure} <-
+           StrictMap.fetch_exact(reported_failure, @reported_failure_fields),
+         true <- is_integer(target_revision) and target_revision > 0,
+         {:ok, failure} <- Failure.parse(failure) do
       {:ok, {target_revision, failure}}
     end
   end

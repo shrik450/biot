@@ -6,6 +6,7 @@ defmodule Biot.Server.ReportsTest do
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.NodeId
+  alias Biot.Protocol.OrphanedAllocation
   alias Biot.Server.Biots
   alias Biot.Server.Biots.Accepted
   alias Biot.Server.Biots.SelectEnvironment
@@ -298,7 +299,10 @@ defmodule Biot.Server.ReportsTest do
   end
 
   test "a node observation upserts the connection and orphan list", context do
-    orphan = {TestFixtures.id(BiotId, 7_777), {100_000, 65_536}}
+    orphan = %OrphanedAllocation{
+      biot_id: TestFixtures.id(BiotId, 7_777),
+      uid_range: %{start: 100_000, count: 65_536}
+    }
 
     assert {:ok, %NodeObservation{}} =
              Reports.node_observation(context.node.id, context.connection_id, [orphan])

@@ -2,6 +2,9 @@ defmodule Biot.Protocol.Failure do
   @moduledoc "A bounded description of a failed node lifecycle action."
 
   alias Biot.Protocol.PrivateDiagnosticId
+  alias Biot.Protocol.StrictMap
+
+  @fields ["stage", "code", "retry", "message", "diagnostic_ref"]
 
   @enforce_keys [:stage, :code, :retry, :message, :diagnostic_ref]
   defstruct [:stage, :code, :retry, :message, :diagnostic_ref]
@@ -34,7 +37,8 @@ defmodule Biot.Protocol.Failure do
 
   @spec parse(term()) :: {:ok, t()} | {:error, atom()}
   def parse(value) when is_map(value) do
-    with {:ok, stage} <- Map.fetch(value, "stage"),
+    with {:ok, value} <- StrictMap.fetch_exact(value, @fields),
+         {:ok, stage} <- Map.fetch(value, "stage"),
          {:ok, stage} <- parse_enum(stage, @stages),
          {:ok, code} <- Map.fetch(value, "code"),
          {:ok, code} <- parse_enum(code, @codes),

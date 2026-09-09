@@ -6,6 +6,10 @@ defmodule Biot.Protocol.ExecutionSpec do
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.EnvironmentSelection
   alias Biot.Protocol.RepositorySource
+  alias Biot.Protocol.StrictMap
+
+  @fields ["biot_id", "repository", "desired", "environment"]
+  @environment_fields ["id", "selection"]
 
   @enforce_keys [:biot_id, :repository, :desired, :environment]
   defstruct [:biot_id, :repository, :desired, :environment]
@@ -32,13 +36,17 @@ defmodule Biot.Protocol.ExecutionSpec do
   end
 
   @spec parse(term()) :: {:ok, t()} | {:error, :invalid_format}
-  def parse(%{
-        "biot_id" => biot_id,
-        "repository" => repository,
-        "desired" => desired,
-        "environment" => %{"id" => environment_id, "selection" => selection}
-      }) do
-    with {:ok, biot_id} <- BiotId.parse(biot_id),
+  def parse(value) do
+    with {:ok,
+          %{
+            "biot_id" => biot_id,
+            "repository" => repository,
+            "desired" => desired,
+            "environment" => environment
+          }} <- StrictMap.fetch_exact(value, @fields),
+         {:ok, %{"id" => environment_id, "selection" => selection}} <-
+           StrictMap.fetch_exact(environment, @environment_fields),
+         {:ok, biot_id} <- BiotId.parse(biot_id),
          {:ok, repository} <- RepositorySource.parse(repository),
          {:ok, desired} <- Desired.parse(desired),
          {:ok, environment_id} <- EnvironmentId.parse(environment_id),
@@ -55,6 +63,4 @@ defmodule Biot.Protocol.ExecutionSpec do
       _error -> {:error, :invalid_format}
     end
   end
-
-  def parse(_value), do: {:error, :invalid_format}
 end

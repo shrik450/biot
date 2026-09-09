@@ -9,7 +9,9 @@ defmodule Biot.Server.Application do
       Biot.Server.Repo,
       {Phoenix.PubSub, name: Biot.Server.PubSub},
       Biot.Server.NodeConnections,
-      Biot.Server.Nodes.Startup
+      Biot.Server.Nodes.Startup,
+      {Registry, keys: :unique, name: Biot.Server.Control.Registry},
+      Biot.Server.Control.Listener
     ]
 
     opts = [strategy: :one_for_one, name: Biot.Server.Supervisor]

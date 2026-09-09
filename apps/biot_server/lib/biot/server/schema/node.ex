@@ -4,6 +4,7 @@ defmodule Biot.Server.Schema.Node do
   use Ecto.Schema
 
   alias Biot.Protocol.NodeId
+  alias Biot.Protocol.Platform
   alias Biot.Protocol.RegistrationId
   alias Biot.Server.Ecto.ProtocolValue
 
@@ -13,7 +14,7 @@ defmodule Biot.Server.Schema.Node do
     field(:registration, ProtocolValue, module: RegistrationId)
     field(:peer_identity, :string)
     field(:status, Ecto.Enum, values: [:enabled, :disabled, :retired])
-    field(:platform, :string)
+    field(:platform, ProtocolValue, module: Platform)
     field(:max_biots, :integer)
 
     timestamps(type: :utc_datetime_usec)

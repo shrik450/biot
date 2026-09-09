@@ -1,0 +1,408 @@
+defmodule Biot.Protocol.ControlProtocolTest do
+  use ExUnit.Case, async: true
+  use ExUnitProperties
+
+  require Record
+
+  alias Biot.Protocol.BiotId
+  alias Biot.Protocol.BiotSpec
+  alias Biot.Protocol.Certificates
+  alias Biot.Protocol.ConnectionId
+  alias Biot.Protocol.Desired
+  alias Biot.Protocol.Digest
+  alias Biot.Protocol.EnvironmentId
+  alias Biot.Protocol.EnvironmentSelection
+  alias Biot.Protocol.ExecutionReport
+  alias Biot.Protocol.ExecutionSpec
+  alias Biot.Protocol.Frame
+  alias Biot.Protocol.Liveness
+  alias Biot.Protocol.Manifest
+  alias Biot.Protocol.Message
+  alias Biot.Protocol.OrphanedAllocation
+  alias Biot.Protocol.PeerIdentity
+  alias Biot.Protocol.PinnedSource
+  alias Biot.Protocol.Platform
+  alias Biot.Protocol.PrivateDiagnosticId
+  alias Biot.Protocol.ProjectSnapshot
+  alias Biot.Protocol.RegistrationId
+  alias Biot.Protocol.RepositorySource
+  alias Biot.Protocol.SourceSelector
+  alias Biot.Protocol.Version
+  alias Biot.Protocol.Wire
+
+  Record.defrecordp(
+    :certificate,
+    Record.extract(:Certificate, from_lib: "public_key/include/OTP-PUB-KEY.hrl")
+  )
+
+  Record.defrecordp(
+    :tbs_certificate,
+    Record.extract(:TBSCertificate, from_lib: "public_key/include/OTP-PUB-KEY.hrl")
+  )
+
+  property "frames round-trip arbitrary binary payloads" do
+    check all(payload <- StreamData.binary(max_length: 8_192)) do
+      encoded = IO.iodata_to_binary(Frame.encode(payload))
+      assert Frame.decode(encoded, 8_192) == {:ok, [payload], <<>>}
+    end
+  end
+
+  test "frame decoding preserves partial input and accepts zero-length frames" do
+    frame = IO.iodata_to_binary(Frame.encode("payload"))
+
+    for length <- 0..(byte_size(frame) - 1) do
+      partial = binary_part(frame, 0, length)
+      assert Frame.decode(partial, 100) == {:ok, [], partial}
+    end
+
+    assert Frame.decode(<<0::unsigned-big-32>>, 100) == {:ok, [<<>>], <<>>}
+  end
+
+  test "frame decoding returns two frames and a trailing remainder" do
+    buffer = IO.iodata_to_binary([Frame.encode("one"), Frame.encode("two"), <<0, 0>>])
+    assert Frame.decode(buffer, 100) == {:ok, ["one", "two"], <<0, 0>>}
+  end
+
+  test "an oversized frame is rejected from its header alone" do
+    assert Frame.decode(<<101::unsigned-big-32>>, 100) == {:error, {:frame_too_large, 101}}
+  end
+
+  test "every control message round-trips in its context" do
+    for {context, message} <- messages() do
+      assert {:ok, encoded} = Wire.encode(message, context)
+      assert Wire.decode(encoded, context) == {:ok, message}
+    end
+  end
+
+  test "messages from the wrong phase are rejected" do
+    observation = find_message(Message.Observation)
+    hello = find_message(Message.Hello)
+
+    assert {:ok, encoded} = Wire.encode(observation, 1)
+    assert Wire.decode(encoded, :handshake) == {:error, :unknown_message_type}
+
+    assert {:ok, encoded} = Wire.encode(hello, :handshake)
+    assert Wire.decode(encoded, 1) == {:error, :unknown_message_type}
+  end
+
+  test "unknown versions are rejected for encoding and decoding" do
+    heartbeat = find_message(Message.Heartbeat)
+    assert Wire.encode(heartbeat, 2) == {:error, :unsupported_protocol_version}
+
+    assert {:ok, encoded} = Wire.encode(heartbeat, 1)
+    assert Wire.decode(encoded, 2) == {:error, :unsupported_protocol_version}
+  end
+
+  test "top-level messages reject unknown, missing, and wrongly typed fields without raising" do
+    for {context, message} <- messages() do
+      {:ok, encoded} = Wire.encode(message, context)
+      decoded = Jason.decode!(encoded)
+      fields = Map.keys(decoded) -- ["type"]
+
+      assert_decode_error(Map.put(decoded, "unknown", true), context)
+
+      for field <- fields do
+        assert_decode_error(Map.delete(decoded, field), context)
+        assert_decode_error(Map.put(decoded, field, wrong_value(decoded[field])), context)
+      end
+    end
+  end
+
+  test "nested protocol records reject unknown fields" do
+    cases = [
+      {Message.Desired, ["biot_spec"]},
+      {Message.Observation, ["execution_report"]},
+      {Message.Resolution, ["manifest"]},
+      {Message.Desired, ["biot_spec", "execution"]},
+      {Message.Observation, ["execution_report", "container"]},
+      {Message.Resolution, ["manifest", "project_snapshot"]}
+    ]
+
+    for {module, path} <- cases do
+      message = find_message(module)
+      {:ok, encoded} = Wire.encode(message, 1)
+      decoded = Jason.decode!(encoded)
+      changed = put_nested(decoded, path, &Map.put(&1, "unknown", true))
+      assert_decode_error(changed, 1)
+    end
+  end
+
+  property "wire decoding never raises for random binary input" do
+    check all(value <- StreamData.binary(max_length: 2_048)) do
+      assert_wire_result(Wire.decode(value, context_for(value)))
+    end
+  end
+
+  property "wire decoding never raises for random JSON maps" do
+    scalar =
+      StreamData.one_of([
+        StreamData.string(:printable, max_length: 40),
+        StreamData.integer(),
+        StreamData.boolean(),
+        StreamData.constant(nil)
+      ])
+
+    check all(
+            value <- StreamData.map_of(StreamData.string(:alphanumeric, max_length: 20), scalar)
+          ) do
+      assert_wire_result(value |> Jason.encode!() |> Wire.decode(1))
+    end
+  end
+
+  test "version selection chooses the highest common version without depending on offer order" do
+    cases = [
+      {[], [1], {:error, :unsupported_protocol_version}},
+      {[99], [1], {:error, :unsupported_protocol_version}},
+      {[1], [1], {:ok, 1}},
+      {[1, 3, 2], [1, 2, 3], {:ok, 3}},
+      {[2, 1, 3], [1, 3], {:ok, 3}},
+      {[3, 2, 1], [1, 2], {:ok, 2}}
+    ]
+
+    for {offered, supported, expected} <- cases do
+      assert Version.select_version(offered, supported) == expected
+      assert Version.select_version(Enum.reverse(offered), supported) == expected
+    end
+  end
+
+  test "liveness accepts only the matching binary challenge" do
+    assert Liveness.response_matches?("expected", "expected")
+    refute Liveness.response_matches?("expected", "other")
+    refute Liveness.response_matches?(nil, "other")
+  end
+
+  test "platform parsing accepts only supported Linux systems" do
+    for value <- ["x86_64-linux", "aarch64-linux"] do
+      assert {:ok, platform} = Platform.parse(value)
+      assert Platform.to_string(platform) == value
+    end
+
+    for value <- ["armv7-linux", "x86_64-darwin", "aarch64-darwin", "", nil, 1] do
+      assert {:error, reason} = Platform.parse(value)
+      assert reason in [:unsupported_platform, :invalid_format]
+    end
+  end
+
+  test "the current host reports a supported Linux platform or rejects a non-Linux host" do
+    architecture = :erlang.system_info(:system_architecture) |> List.to_string()
+
+    if String.contains?(architecture, "linux") do
+      assert {:ok, platform} = Platform.current()
+      assert Platform.to_string(platform) in ["x86_64-linux", "aarch64-linux"]
+    else
+      assert Platform.current() == {:error, :unsupported_platform}
+    end
+  end
+
+  test "peer identity is the lowercase SHA-256 digest of SubjectPublicKeyInfo DER" do
+    directory = temp_directory("peer-identity")
+    assert {:ok, certificates} = Certificates.generate(directory, 1)
+    der = certificates.nodes |> hd() |> Map.fetch!(:cert) |> certificate_der()
+
+    decoded = :public_key.der_decode(:Certificate, der)
+    tbs = certificate(decoded, :tbsCertificate)
+    spki = tbs_certificate(tbs, :subjectPublicKeyInfo)
+
+    expected =
+      :public_key.der_encode(:SubjectPublicKeyInfo, spki)
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
+
+    assert PeerIdentity.from_certificate(der) == {:ok, expected}
+  end
+
+  test "certificate generation writes usable roles, protected keys, and fingerprints" do
+    directory = temp_directory("certificates")
+    assert {:ok, certificates} = Certificates.generate(directory, 3)
+
+    assert File.exists?(certificates.ca)
+    assert length(certificates.nodes) == 3
+
+    for key <- [certificates.server.key | Enum.map(certificates.nodes, & &1.key)] do
+      assert {:ok, stat} = File.stat(key)
+      assert Bitwise.band(stat.mode, 0o777) == 0o600
+    end
+
+    assert extension_usage(certificates.server.cert) == [:serverAuth, :clientAuth]
+
+    for node <- certificates.nodes do
+      assert extension_usage(node.cert) == [:clientAuth]
+      assert node.fingerprint == recompute_fingerprint(node.cert)
+    end
+
+    assert certificates.server.fingerprint == recompute_fingerprint(certificates.server.cert)
+
+    fingerprints_path = Path.join(directory, "fingerprints.json")
+    assert File.exists?(fingerprints_path)
+    assert Jason.decode!(File.read!(fingerprints_path)) == fingerprint_document(certificates)
+  end
+
+  test "mix biot.gen.certs generates the requested node certificates" do
+    directory = temp_directory("mix-task")
+    Mix.Task.reenable("biot.gen.certs")
+    Mix.Task.run("biot.gen.certs", ["--nodes", "2", directory])
+
+    assert File.exists?(Path.join(directory, "ca.pem"))
+    assert File.exists?(Path.join(directory, "server-cert.pem"))
+    assert File.exists?(Path.join(directory, "node-1-cert.pem"))
+    assert File.exists?(Path.join(directory, "node-2-cert.pem"))
+  end
+
+  defp messages do
+    registration_id = id(RegistrationId, 1)
+    connection_id = id(ConnectionId, 2)
+    biot_id = id(BiotId, 3)
+    environment_id = id(EnvironmentId, 4)
+    diagnostic_id = id(PrivateDiagnosticId, 5)
+
+    orphaned_allocation =
+      %OrphanedAllocation{biot_id: biot_id, uid_range: %{start: 100_000, count: 65_536}}
+
+    {:ok, platform} = Platform.parse("aarch64-linux")
+    {:ok, repository} = RepositorySource.parse("https://example.test/repo.git")
+
+    selection = %EnvironmentSelection{
+      base_nixpkgs: SourceSelector.nixpkgs(),
+      layers: [],
+      project_context: nil
+    }
+
+    execution = %ExecutionSpec{
+      biot_id: biot_id,
+      repository: repository,
+      desired: %Desired{revision: 7, state: :running, environment_id: environment_id},
+      environment: %{id: environment_id, selection: selection}
+    }
+
+    spec = %BiotSpec{execution: execution, access_revision: 9}
+
+    report = %ExecutionReport{
+      accepted_revision: 7,
+      installed_environment_id: environment_id,
+      container: :absent,
+      data: :present,
+      failure: nil,
+      applied_access_revision: 9
+    }
+
+    {:ok, pinned} =
+      PinnedSource.pin(
+        SourceSelector.nixpkgs(),
+        String.duplicate("a", 40),
+        "sha256-" <> Base.encode64(:binary.copy(<<1>>, 32))
+      )
+
+    snapshot = %ProjectSnapshot{snapshot_id: "snapshot", digest: Digest.compute(:snapshot, "1")}
+    manifest = Manifest.build(pinned, [], snapshot)
+
+    [
+      {:handshake,
+       %Message.Hello{
+         registration_id: registration_id,
+         supported_protocol_versions: [1],
+         platform: platform
+       }},
+      {:handshake,
+       %Message.Connected{connection_id: connection_id, selected_protocol_version: 1}},
+      {:handshake, %Message.Reject{reason: :registration_rejected}},
+      {1, %Message.Synchronize{connection_id: connection_id, biot_specs: [spec]}},
+      {1, %Message.Desired{biot_spec: spec}},
+      {1,
+       %Message.Diagnostic{
+         request_id: "request-1",
+         diagnostic_id: diagnostic_id,
+         max_bytes: 100,
+         timeout_ms: 200
+       }},
+      {1, %Message.Synchronized{connection_id: connection_id}},
+      {1, %Message.Observation{biot_id: biot_id, execution_report: report}},
+      {1, %Message.Resolution{environment_id: environment_id, manifest: manifest}},
+      {1, %Message.NodeObservation{orphaned_allocations: [orphaned_allocation]}},
+      {1, %Message.DiagnosticResult{request_id: "request-1", result: {<<0, 1, 2>>, true}}},
+      {1, %Message.DiagnosticResult{request_id: "request-2", result: :not_found}},
+      {1, %Message.Heartbeat{challenge: "challenge"}},
+      {1, %Message.HeartbeatResponse{challenge: "challenge"}}
+    ]
+  end
+
+  defp find_message(module) do
+    {_context, message} = Enum.find(messages(), &(elem(&1, 1).__struct__ == module))
+    message
+  end
+
+  defp wrong_value(value) when is_binary(value), do: 42
+  defp wrong_value(value) when is_integer(value), do: "wrong"
+  defp wrong_value(value) when is_list(value), do: %{}
+  defp wrong_value(value) when is_map(value), do: []
+  defp wrong_value(value) when is_boolean(value), do: "wrong"
+  defp wrong_value(nil), do: "wrong"
+
+  defp put_nested(map, [key], change), do: Map.update!(map, key, change)
+
+  defp put_nested(map, [key | rest], change) do
+    Map.update!(map, key, &put_nested(&1, rest, change))
+  end
+
+  defp assert_decode_error(value, context) do
+    assert {:error, reason} = value |> Jason.encode!() |> Wire.decode(context)
+    assert is_atom(reason) or match?({_, field} when is_atom(field), reason)
+  end
+
+  defp assert_wire_result({:ok, message}) when is_struct(message), do: :ok
+  defp assert_wire_result({:error, reason}) when is_atom(reason), do: :ok
+
+  defp assert_wire_result({:error, {reason, field}}) when is_atom(reason) and is_atom(field),
+    do: :ok
+
+  defp assert_wire_result(result), do: flunk("wire returned #{inspect(result)}")
+
+  defp context_for(value) when rem(byte_size(value), 2) == 0, do: :handshake
+  defp context_for(_value), do: 1
+
+  defp id(module, number) do
+    value = "00000000-0000-4000-8000-" <> String.pad_leading(Integer.to_string(number), 12, "0")
+    {:ok, identifier} = module.parse(value)
+    identifier
+  end
+
+  defp temp_directory(suffix) do
+    directory =
+      Path.join(System.tmp_dir!(), "biot-step5-#{suffix}-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(directory) end)
+    directory
+  end
+
+  defp certificate_der(path) do
+    path |> File.read!() |> X509.Certificate.from_pem!() |> X509.Certificate.to_der()
+  end
+
+  defp extension_usage(path) do
+    path
+    |> File.read!()
+    |> X509.Certificate.from_pem!()
+    |> X509.Certificate.extension(:ext_key_usage)
+    |> elem(3)
+    |> Enum.map(fn
+      {1, 3, 6, 1, 5, 5, 7, 3, 1} -> :serverAuth
+      {1, 3, 6, 1, 5, 5, 7, 3, 2} -> :clientAuth
+    end)
+  end
+
+  defp recompute_fingerprint(path) do
+    path
+    |> certificate_der()
+    |> PeerIdentity.from_certificate()
+    |> elem(1)
+  end
+
+  defp fingerprint_document(certificates) do
+    %{
+      "server" => certificates.server.fingerprint,
+      "nodes" =>
+        certificates.nodes
+        |> Enum.with_index(1)
+        |> Map.new(fn {node, number} -> {"node-#{number}", node.fingerprint} end)
+    }
+  end
+end

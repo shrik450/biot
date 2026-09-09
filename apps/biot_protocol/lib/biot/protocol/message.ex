@@ -1,0 +1,149 @@
+defmodule Biot.Protocol.Message.Hello do
+  @moduledoc "Starts protocol negotiation for one node registration."
+  @enforce_keys [:registration_id, :supported_protocol_versions, :platform]
+  defstruct [:registration_id, :supported_protocol_versions, :platform]
+
+  @type t :: %__MODULE__{
+          registration_id: Biot.Protocol.RegistrationId.t(),
+          supported_protocol_versions: [pos_integer()],
+          platform: Biot.Protocol.Platform.t()
+        }
+
+  def type, do: "hello"
+end
+
+defmodule Biot.Protocol.Message.Connected do
+  @moduledoc "Confirms the connection identity and selected protocol version."
+  @enforce_keys [:connection_id, :selected_protocol_version]
+  defstruct [:connection_id, :selected_protocol_version]
+
+  @type t :: %__MODULE__{
+          connection_id: Biot.Protocol.ConnectionId.t(),
+          selected_protocol_version: pos_integer()
+        }
+
+  def type, do: "connected"
+end
+
+defmodule Biot.Protocol.Message.Reject do
+  @moduledoc "Rejects a connection during the fixed-version handshake."
+  @reasons [
+    :unsupported_protocol_version,
+    :registration_rejected,
+    :registration_retired
+  ]
+  @type reason ::
+          :unsupported_protocol_version
+          | :registration_rejected
+          | :registration_retired
+
+  @enforce_keys [:reason]
+  defstruct [:reason]
+  @type t :: %__MODULE__{reason: reason()}
+
+  def type, do: "reject"
+  def reasons, do: @reasons
+end
+
+defmodule Biot.Protocol.Message.Synchronize do
+  @moduledoc "Carries the complete server intent set for a node connection."
+  @enforce_keys [:connection_id, :biot_specs]
+  defstruct [:connection_id, :biot_specs]
+
+  @type t :: %__MODULE__{
+          connection_id: Biot.Protocol.ConnectionId.t(),
+          biot_specs: [Biot.Protocol.BiotSpec.t()]
+        }
+
+  def type, do: "synchronize"
+end
+
+defmodule Biot.Protocol.Message.Desired do
+  @moduledoc "Carries one changed biot intent."
+  @enforce_keys [:biot_spec]
+  defstruct [:biot_spec]
+  @type t :: %__MODULE__{biot_spec: Biot.Protocol.BiotSpec.t()}
+  def type, do: "desired"
+end
+
+defmodule Biot.Protocol.Message.Diagnostic do
+  @moduledoc "Requests one bounded diagnostic from the node."
+  @enforce_keys [:request_id, :diagnostic_id, :max_bytes, :timeout_ms]
+  defstruct [:request_id, :diagnostic_id, :max_bytes, :timeout_ms]
+
+  @type t :: %__MODULE__{
+          request_id: String.t(),
+          diagnostic_id: Biot.Protocol.PrivateDiagnosticId.t(),
+          max_bytes: pos_integer(),
+          timeout_ms: pos_integer()
+        }
+
+  def type, do: "diagnostic"
+end
+
+defmodule Biot.Protocol.Message.Synchronized do
+  @moduledoc "Acknowledges the complete intent set for a connection."
+  @enforce_keys [:connection_id]
+  defstruct [:connection_id]
+  @type t :: %__MODULE__{connection_id: Biot.Protocol.ConnectionId.t()}
+  def type, do: "synchronized"
+end
+
+defmodule Biot.Protocol.Message.Observation do
+  @moduledoc "Reports inspected execution state for one biot."
+  @enforce_keys [:biot_id, :execution_report]
+  defstruct [:biot_id, :execution_report]
+
+  @type t :: %__MODULE__{
+          biot_id: Biot.Protocol.BiotId.t(),
+          execution_report: Biot.Protocol.ExecutionReport.t()
+        }
+
+  def type, do: "observation"
+end
+
+defmodule Biot.Protocol.Message.Resolution do
+  @moduledoc "Reports the immutable manifest resolved for an environment."
+  @enforce_keys [:environment_id, :manifest]
+  defstruct [:environment_id, :manifest]
+
+  @type t :: %__MODULE__{
+          environment_id: Biot.Protocol.EnvironmentId.t(),
+          manifest: Biot.Protocol.Manifest.t()
+        }
+
+  def type, do: "resolution"
+end
+
+defmodule Biot.Protocol.Message.NodeObservation do
+  @moduledoc "Reports allocations that are absent from synchronized server intent."
+  @enforce_keys [:orphaned_allocations]
+  defstruct [:orphaned_allocations]
+  @type t :: %__MODULE__{orphaned_allocations: [Biot.Protocol.OrphanedAllocation.t()]}
+  def type, do: "node_observation"
+end
+
+defmodule Biot.Protocol.Message.DiagnosticResult do
+  @moduledoc "Returns one bounded diagnostic result."
+  @enforce_keys [:request_id, :result]
+  defstruct [:request_id, :result]
+  @type result :: {binary(), boolean()} | :not_found
+  @type t :: %__MODULE__{request_id: String.t(), result: result()}
+  def type, do: "diagnostic_result"
+end
+
+defmodule Biot.Protocol.Message.Heartbeat do
+  @moduledoc "Challenges the peer to prove that the control connection is live."
+  @enforce_keys [:challenge]
+  defstruct [:challenge]
+  @type t :: %__MODULE__{challenge: String.t()}
+  def type, do: "heartbeat"
+end
+
+defmodule Biot.Protocol.Message.HeartbeatResponse do
+  @moduledoc "Answers one peer heartbeat challenge."
+  @enforce_keys [:challenge]
+  defstruct [:challenge]
+  @type t :: %__MODULE__{challenge: String.t()}
+  def type, do: "heartbeat_response"
+end

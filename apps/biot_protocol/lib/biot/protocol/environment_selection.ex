@@ -5,6 +5,10 @@ defmodule Biot.Protocol.EnvironmentSelection do
   alias Biot.Protocol.RelativeDirectory
   alias Biot.Protocol.SourceSelector
 
+  alias Biot.Protocol.StrictMap
+
+  @fields ["base_nixpkgs", "layers", "project_context"]
+
   @enforce_keys [:base_nixpkgs, :layers, :project_context]
   defstruct [:base_nixpkgs, :layers, :project_context]
 
@@ -25,7 +29,8 @@ defmodule Biot.Protocol.EnvironmentSelection do
 
   @spec parse(term()) :: {:ok, t()} | {:error, atom()}
   def parse(value) when is_map(value) do
-    with {:ok, base_nixpkgs} <- Map.fetch(value, "base_nixpkgs"),
+    with {:ok, value} <- StrictMap.fetch_exact(value, @fields),
+         {:ok, base_nixpkgs} <- Map.fetch(value, "base_nixpkgs"),
          {:ok, base_nixpkgs} <- SourceSelector.parse(base_nixpkgs),
          {:ok, layers} <- Map.fetch(value, "layers"),
          {:ok, layers} <- ParsedList.parse(layers, &SourceSelector.parse/1),

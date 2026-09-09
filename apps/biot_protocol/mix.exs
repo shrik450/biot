@@ -24,6 +24,7 @@ defmodule Biot.Protocol.MixProject do
   defp deps do
     [
       {:jason, "~> 1.4"},
+      {:x509, "~> 0.9"},
       {:stream_data, "~> 1.1", only: :test}
     ]
   end

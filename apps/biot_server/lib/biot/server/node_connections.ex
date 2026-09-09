@@ -25,6 +25,11 @@ defmodule Biot.Server.NodeConnections do
   @spec delete(NodeId.t()) :: :ok
   def delete(%NodeId{} = node_id), do: GenServer.call(__MODULE__, {:delete, node_id})
 
+  @spec delete(NodeId.t(), ConnectionId.t()) :: :ok
+  def delete(%NodeId{} = node_id, %ConnectionId{} = connection_id) do
+    GenServer.call(__MODULE__, {:delete, node_id, connection_id})
+  end
+
   @spec current(NodeId.t()) :: connection() | nil
   def current(%NodeId{} = node_id) do
     case :ets.lookup(__MODULE__, node_id) do
@@ -47,6 +52,15 @@ defmodule Biot.Server.NodeConnections do
 
   def handle_call({:delete, node_id}, _from, state) do
     true = :ets.delete(__MODULE__, node_id)
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:delete, node_id, connection_id}, _from, state) do
+    case :ets.lookup(__MODULE__, node_id) do
+      [{^node_id, %{connection_id: ^connection_id}}] -> :ets.delete(__MODULE__, node_id)
+      _other -> :ok
+    end
+
     {:reply, :ok, state}
   end
 end
