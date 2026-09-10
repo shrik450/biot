@@ -99,6 +99,21 @@ defmodule Biot.Protocol.Message.Diagnostic do
   def type, do: "diagnostic"
 end
 
+defmodule Biot.Protocol.Message.RuntimeLogs do
+  @moduledoc "Requests bounded service-runner output from the node."
+  @enforce_keys [:request_id, :biot_id, :max_bytes, :timeout_ms]
+  defstruct [:request_id, :biot_id, :max_bytes, :timeout_ms]
+
+  @type t :: %__MODULE__{
+          request_id: String.t(),
+          biot_id: Biot.Protocol.BiotId.t(),
+          max_bytes: pos_integer(),
+          timeout_ms: pos_integer()
+        }
+
+  def type, do: "runtime_logs"
+end
+
 defmodule Biot.Protocol.Message.Synchronized do
   @moduledoc "Acknowledges the complete intent set for a connection."
   @enforce_keys [:connection_id]
@@ -161,6 +176,17 @@ defmodule Biot.Protocol.Message.DiagnosticResult do
   @type result :: {binary(), boolean()} | :not_found
   @type t :: %__MODULE__{request_id: String.t(), result: result()}
   def type, do: "diagnostic_result"
+end
+
+defmodule Biot.Protocol.Message.RuntimeLogsResult do
+  @moduledoc "Returns bounded service-runner output for one container incarnation."
+  @enforce_keys [:request_id, :result]
+  defstruct [:request_id, :result]
+
+  @type result :: {Biot.Protocol.IncarnationId.t(), binary(), boolean()} | :not_found
+  @type t :: %__MODULE__{request_id: String.t(), result: result()}
+
+  def type, do: "runtime_logs_result"
 end
 
 defmodule Biot.Protocol.Message.Heartbeat do

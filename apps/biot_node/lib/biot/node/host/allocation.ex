@@ -2,6 +2,7 @@ defmodule Biot.Node.Host.Allocation do
   @moduledoc "Inspects and changes an allocation's network and private working data."
 
   alias Biot.Node.Allocation
+  alias Biot.Node.Diagnostic
   alias Biot.Node.Host.Command
   alias Biot.Node.Host.Config
   alias Biot.Node.Host.Container
@@ -116,7 +117,7 @@ defmodule Biot.Node.Host.Allocation do
         {:error,
          Outcome.new(
            :host_unavailable,
-           "all configured UID and GID ranges are allocated"
+           Diagnostic.text("all configured UID and GID ranges are allocated")
          )}
     end
   end
@@ -424,7 +425,11 @@ defmodule Biot.Node.Host.Allocation do
         {:ok, :stale}
 
       {:error, :records_remain} ->
-        {:error, Outcome.new(:host_unavailable, "the allocation still has journal records")}
+        {:error,
+         Outcome.new(
+           :host_unavailable,
+           Diagnostic.text("the allocation still has journal records")
+         )}
 
       {:error, reason} ->
         {:error, Outcome.from_reason(reason)}
@@ -434,12 +439,14 @@ defmodule Biot.Node.Host.Allocation do
   defp command(config, executable, arguments, options \\ []) do
     Command.run(
       config.setsid_executable,
+      Config.capture_tools(config),
       executable,
       arguments,
       Keyword.merge(
         [
           timeout_ms: config.command_timeout_ms,
-          max_output_bytes: config.command_max_output_bytes
+          max_output_bytes: config.command_max_output_bytes,
+          max_stderr_bytes: config.command_max_stderr_bytes
         ],
         options
       )

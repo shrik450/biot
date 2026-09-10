@@ -154,9 +154,16 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     assert decision(running, host) == :settled
     assert {:present, first_container} = settled.container
 
+    assert %{"Type" => "k8s-file", "Size" => "1.049MB", "Path" => log_path} =
+             container_log_config(host, first_container)
+
+    assert Path.basename(log_path) == "ctr.log"
+    assert File.stat!(log_path).size <= host.config.runtime_log_max_bytes
+
     assert {:ok, _intent} =
              Journal.put_intent(%BiotSpec{execution: running, access_revision: 1})
 
+    start_supervised!(Biot.Node.RuntimeLogs)
     start_supervised!(Controllers)
     start_supervised!(ContainerEvents)
     assert eventually(fn -> controller_running?(biot_id) end)
@@ -175,7 +182,8 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     assert System.monotonic_time(:millisecond) - started < 30_000
     stop_supervised!(ContainerEvents)
     stop_supervised!(Controllers)
-    assert :ok = Journal.replace_intents([])
+    stop_supervised!(Biot.Node.RuntimeLogs)
+    assert {:ok, _removed} = Journal.replace_intents([])
     {settled, _recovery_actions} = converge(running, host)
     assert {:present, first_container} = settled.container
 
@@ -512,6 +520,18 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     String.trim(output)
   end
 
+  defp container_log_config(host, container) do
+    assert {:ok, %Command.Result{status: 0, stdout: output}} =
+             Podman.run(host.config, [
+               "inspect",
+               "--format",
+               "{{json .HostConfig.LogConfig}}",
+               Names.container(container.incarnation_id)
+             ])
+
+    output |> String.trim() |> Jason.decode!()
+  end
+
   defp container_reaches(host, container, curl, address) do
     match?(
       {:ok, %Command.Result{status: 0}},
@@ -763,12 +783,18 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
       podman_network_command: "slirp4netns",
       flock_executable: "flock",
       setsid_executable: "setsid",
+      mkfifo_executable: "mkfifo",
+      head_executable: "head",
+      cat_executable: "cat",
+      sleep_executable: "sleep",
       nix_build_file: Path.join(project_root, "nix/build.nix"),
       nix_pin_file: Path.join(project_root, "nix/pin.nix"),
       nixpkgs_repository: "https://github.com/NixOS/nixpkgs",
       nixpkgs_ref: "nixos-unstable",
       host_command_timeout_ms: 1_200_000,
       host_command_max_output_bytes: 256_000,
+      host_command_max_stderr_bytes: 256_000,
+      runtime_log_max_bytes: 1_048_576,
       observation_interval_ms: 600_000,
       inspection_retry_ms: 600_000,
       retry_backoff_min_ms: 2_000,

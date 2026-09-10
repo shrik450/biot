@@ -7,6 +7,7 @@ defmodule Biot.Node.ReconcileFixtures do
 
   alias Biot.Node.Allocation
   alias Biot.Node.ArtifactId
+  alias Biot.Node.Diagnostic
   alias Biot.Node.InspectionFailure
   alias Biot.Node.Installation
   alias Biot.Node.NetworkId
@@ -91,7 +92,11 @@ defmodule Biot.Node.ReconcileFixtures do
   end
 
   def inspection(resource, reason \\ :unavailable) do
-    %InspectionFailure{resource: resource, reason: reason, detail: "the host could not be read"}
+    %InspectionFailure{
+      resource: resource,
+      reason: reason,
+      detail: Diagnostic.text("the host could not be read")
+    }
   end
 
   @doc "A live container this biot owns, running one environment."

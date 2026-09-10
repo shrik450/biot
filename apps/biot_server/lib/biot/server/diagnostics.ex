@@ -10,7 +10,6 @@ defmodule Biot.Server.Diagnostics do
   alias Biot.Protocol.PrivateDiagnosticId
   alias Biot.Server.Actor
   alias Biot.Server.Control.Connection
-  alias Biot.Server.Control.Registry, as: ControlRegistry
   alias Biot.Server.NodeConnections
   alias Biot.Server.Repo
   alias Biot.Server.Schema.{Biot, Operation}
@@ -22,20 +21,13 @@ defmodule Biot.Server.Diagnostics do
 
   def get(%Actor{} = actor, %PrivateDiagnosticId{} = diagnostic_ref) do
     with {:ok, biot} <- authorized_biot(actor, diagnostic_ref),
-         %{connection_id: connection_id, state: :ready} <- NodeConnections.current(biot.node_id),
-         [{pid, ^connection_id}] <- Registry.lookup(ControlRegistry, biot.node_id) do
+         {:ok, pid} <- NodeConnections.ready(biot.node_id) do
       Connection.request_diagnostic(
         pid,
         diagnostic_ref,
-        Application.fetch_env!(:biot_server, :diagnostic_max_bytes),
-        Application.fetch_env!(:biot_server, :diagnostic_timeout_ms)
+        Application.fetch_env!(:biot_server, :node_response_max_bytes),
+        Application.fetch_env!(:biot_server, :node_request_timeout_ms)
       )
-    else
-      nil -> {:error, :temporarily_unavailable}
-      %{state: :synchronizing} -> {:error, :temporarily_unavailable}
-      [] -> {:error, :temporarily_unavailable}
-      [{_pid, _connection_id}] -> {:error, :temporarily_unavailable}
-      {:error, reason} -> {:error, reason}
     end
   end
 

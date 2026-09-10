@@ -7,6 +7,7 @@ defmodule Biot.Protocol.Wire do
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Frame
+  alias Biot.Protocol.IncarnationId
   alias Biot.Protocol.Limits
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.Message
@@ -24,12 +25,14 @@ defmodule Biot.Protocol.Wire do
       Message.SynchronizeEnd,
       Message.Desired,
       Message.Diagnostic,
+      Message.RuntimeLogs,
       Message.Synchronized,
       Message.Observation,
       Message.AccessApplied,
       Message.Resolution,
       Message.NodeObservation,
       Message.DiagnosticResult,
+      Message.RuntimeLogsResult,
       Message.Heartbeat,
       Message.HeartbeatResponse
     ],
@@ -211,6 +214,15 @@ defmodule Biot.Protocol.Wire do
        when field in [:max_bytes, :timeout_ms],
        do: {:ok, value}
 
+  defp encode_field(Message.RuntimeLogs, :request_id, value, _context), do: {:ok, value}
+
+  defp encode_field(Message.RuntimeLogs, :biot_id, value, _context),
+    do: {:ok, BiotId.to_string(value)}
+
+  defp encode_field(Message.RuntimeLogs, field, value, _context)
+       when field in [:max_bytes, :timeout_ms],
+       do: {:ok, value}
+
   defp encode_field(Message.Synchronized, :connection_id, value, _context),
     do: {:ok, ConnectionId.to_string(value)}
 
@@ -243,6 +255,26 @@ defmodule Biot.Protocol.Wire do
     {:ok,
      %{
        "status" => "found",
+       "content" => Base.encode64(content),
+       "truncated" => truncated
+     }}
+  end
+
+  defp encode_field(Message.RuntimeLogsResult, :request_id, value, _context), do: {:ok, value}
+
+  defp encode_field(Message.RuntimeLogsResult, :result, :not_found, _context),
+    do: {:ok, %{"status" => "not_found"}}
+
+  defp encode_field(
+         Message.RuntimeLogsResult,
+         :result,
+         {incarnation_id, content, truncated},
+         _context
+       ) do
+    {:ok,
+     %{
+       "status" => "found",
+       "incarnation_id" => IncarnationId.to_string(incarnation_id),
        "content" => Base.encode64(content),
        "truncated" => truncated
      }}
@@ -295,6 +327,15 @@ defmodule Biot.Protocol.Wire do
        when field in [:max_bytes, :timeout_ms],
        do: positive_integer(value)
 
+  defp decode_field(Message.RuntimeLogs, :request_id, value, _context),
+    do: nonempty_string(value)
+
+  defp decode_field(Message.RuntimeLogs, :biot_id, value, _context), do: BiotId.parse(value)
+
+  defp decode_field(Message.RuntimeLogs, field, value, _context)
+       when field in [:max_bytes, :timeout_ms],
+       do: positive_integer(value)
+
   defp decode_field(Message.Synchronized, :connection_id, value, _context),
     do: ConnectionId.parse(value)
 
@@ -323,6 +364,12 @@ defmodule Biot.Protocol.Wire do
   defp decode_field(Message.DiagnosticResult, :result, value, _context),
     do: diagnostic_result(value)
 
+  defp decode_field(Message.RuntimeLogsResult, :request_id, value, _context),
+    do: nonempty_string(value)
+
+  defp decode_field(Message.RuntimeLogsResult, :result, value, _context),
+    do: runtime_logs_result(value)
+
   defp decode_field(module, :challenge, value, _context)
        when module in [Message.Heartbeat, Message.HeartbeatResponse],
        do: nonempty_string(value)
@@ -343,13 +390,37 @@ defmodule Biot.Protocol.Wire do
          %{"status" => "found", "content" => content, "truncated" => truncated} = value
        )
        when map_size(value) == 3 and is_binary(content) and is_boolean(truncated) do
-    case Base.decode64(content) do
-      {:ok, decoded} -> {:ok, {decoded, truncated}}
-      :error -> {:error, :invalid_format}
-    end
+    with {:ok, decoded} <- decode_base64(content), do: {:ok, {decoded, truncated}}
   end
 
   defp diagnostic_result(_value), do: {:error, :invalid_format}
+
+  defp runtime_logs_result(%{"status" => "not_found"} = value) when map_size(value) == 1,
+    do: {:ok, :not_found}
+
+  defp runtime_logs_result(
+         %{
+           "status" => "found",
+           "incarnation_id" => incarnation_id,
+           "content" => content,
+           "truncated" => truncated
+         } = value
+       )
+       when map_size(value) == 4 and is_binary(content) and is_boolean(truncated) do
+    with {:ok, incarnation_id} <- IncarnationId.parse(incarnation_id),
+         {:ok, content} <- decode_base64(content) do
+      {:ok, {incarnation_id, content, truncated}}
+    end
+  end
+
+  defp runtime_logs_result(_value), do: {:error, :invalid_format}
+
+  defp decode_base64(value) do
+    case Base.decode64(value) do
+      {:ok, decoded} -> {:ok, decoded}
+      :error -> {:error, :invalid_format}
+    end
+  end
 
   defp positive_integer(value) when is_integer(value) and value > 0, do: {:ok, value}
   defp positive_integer(_value), do: {:error, :invalid_format}

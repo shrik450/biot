@@ -57,8 +57,8 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "node" do
     heartbeat_interval_ms: integer_env.("BIOT_HEARTBEAT_INTERVAL_MS", 30_000),
     heartbeat_timeout_ms: integer_env.("BIOT_HEARTBEAT_TIMEOUT_MS", 10_000),
     desired_sweep_interval_ms: integer_env.("BIOT_DESIRED_SWEEP_INTERVAL_MS", 60_000),
-    diagnostic_timeout_ms: integer_env.("BIOT_DIAGNOSTIC_TIMEOUT_MS", 10_000),
-    diagnostic_max_bytes: integer_env.("BIOT_DIAGNOSTIC_MAX_BYTES", 256_000),
+    node_request_timeout_ms: integer_env.("BIOT_NODE_REQUEST_TIMEOUT_MS", 10_000),
+    node_response_max_bytes: integer_env.("BIOT_NODE_RESPONSE_MAX_BYTES", 256_000),
     max_frame_bytes: integer_env.("BIOT_MAX_FRAME_BYTES", 1_000_000)
 
   secret_key_base =
@@ -131,6 +131,10 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
         podman_network_command: System.get_env("BIOT_NODE_PODMAN_NETWORK_COMMAND", "slirp4netns"),
         flock_executable: System.get_env("BIOT_NODE_FLOCK", "flock"),
         setsid_executable: System.get_env("BIOT_NODE_SETSID", "setsid"),
+        mkfifo_executable: System.get_env("BIOT_NODE_MKFIFO", "mkfifo"),
+        head_executable: System.get_env("BIOT_NODE_HEAD", "head"),
+        cat_executable: System.get_env("BIOT_NODE_CAT", "cat"),
+        sleep_executable: System.get_env("BIOT_NODE_SLEEP", "sleep"),
         nix_build_file: node_required_env.("BIOT_NODE_NIX_BUILD_FILE"),
         nix_pin_file: node_required_env.("BIOT_NODE_NIX_PIN_FILE"),
         nixpkgs_repository:
@@ -140,6 +144,8 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
           node_integer_env.("BIOT_NODE_HOST_COMMAND_TIMEOUT_MS", 600_000, 1),
         host_command_max_output_bytes:
           node_integer_env.("BIOT_NODE_HOST_COMMAND_MAX_OUTPUT_BYTES", 256_000, 1),
+        host_command_max_stderr_bytes:
+          node_integer_env.("BIOT_NODE_HOST_COMMAND_MAX_STDERR_BYTES", 256_000, 1),
         server_host: node_required_env.("BIOT_SERVER_HOST"),
         server_port: node_integer_env.("BIOT_SERVER_PORT", 4443, 1),
         server_fingerprint: node_fingerprint,
@@ -164,6 +170,7 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
           node_integer_env.("BIOT_NODE_DIAGNOSTIC_MAX_ENTRIES_PER_BIOT", 5, 1),
         diagnostic_max_entry_bytes:
           node_integer_env.("BIOT_NODE_DIAGNOSTIC_MAX_ENTRY_BYTES", 65_536, 1),
+        runtime_log_max_bytes: node_integer_env.("BIOT_NODE_RUNTIME_LOG_MAX_BYTES", 1_048_576, 1),
         heartbeat_interval_ms: node_integer_env.("BIOT_NODE_HEARTBEAT_INTERVAL_MS", 30_000, 1),
         heartbeat_timeout_ms: node_integer_env.("BIOT_NODE_HEARTBEAT_TIMEOUT_MS", 10_000, 1),
         reconnect_backoff_min_ms: node_integer_env.("BIOT_NODE_BACKOFF_MIN_MS", 250, 1),

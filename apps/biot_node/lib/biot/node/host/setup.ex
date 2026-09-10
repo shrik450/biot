@@ -17,7 +17,13 @@ defmodule Biot.Node.Host.Setup do
   @spec start_link(keyword()) :: :ignore | {:error, term()}
   def start_link(_options) do
     with {:ok, config} <- Config.from_application(),
-         :ok <- FileSystem.ensure_directories([Paths.biots(config), Paths.environments(config)]),
+         :ok <-
+           FileSystem.ensure_directories([
+             Paths.biots(config),
+             Paths.environments(config),
+             Paths.diagnostics(config),
+             Paths.runtime_logs(config)
+           ]),
          :ok <- write_podman_config(config) do
       :ignore
     end

@@ -22,7 +22,8 @@ This app owns shared parsed values and wire codecs.
 
 ### Protocol layer
 
-- `Message.*` defines the protocol message structs. Version 1 uses `SynchronizeBegin(connection_id, count)`, `SynchronizeItem(biot_spec)`, `SynchronizeEnd(connection_id)`, and `AccessApplied(biot_id, access_revision)`.
+- `Message.*` defines the protocol message structs. Version 1 includes `RuntimeLogs(request_id, biot_id, max_bytes, timeout_ms)` and `RuntimeLogsResult(request_id, result)`. A found result carries an incarnation ID, content, and truncation flag.
+- `Wire` lists both runtime-log messages in the version 1 table. Their request pair follows the diagnostic pattern. The node returns the caller's request ID with bounded content or `:not_found`.
 - `Wire` provides a versioned, strict JSON codec with table-driven dispatch. It enforces the 256 KiB version 1 `BiotSpec` bound on encode and decode with `:biot_spec_too_large`. It measures the envelope of every spec-carrying message. It owns `min_frame_bytes/1` and `check_frame_limit!/1`. Both applications call the frame check at boot.
 - `Frame` encodes and incrementally decodes length-prefixed frames.
 - `Version` selects the highest protocol version shared by both peers.
@@ -66,6 +67,7 @@ Their `to_string/1` output round-trips through `parse/1`.
 `Failure`, `Manifest`, `EnvironmentSelection`, and `ContainerState` provide `encode/1` and `parse/1`.
 Tests for this app are pure unit tests with StreamData property tests.
 `test/test_helper.exs` holds the generators.
+`test/control_protocol_test.exs` covers the version 1 runtime-log request pair and malformed result shapes.
 
 ## apps/biot_server
 
@@ -112,7 +114,7 @@ A new status cannot compile until all six functions answer it.
 - `Queries.Deployment.get/1` returns the publication and SSH settings in `DeploymentView`.
 - `Queries.BiotView`, `Queries.PublicationView`, and `Queries.OperationView` provide pure projections. `BiotView` includes the actor's `role` and the row's `direct_secret_exposure_possible` column. Creation sets that column to `false`.
 - `Authorization` owns the `grants` and `role` types and the pure role and policy predicates.
-- `NodeConnections` is an ETS registry of current node connections written by the control link.
+- `NodeConnections` is a registry of current node connections written by the control link.
 - `NodeWake` provides one PubSub topic per node, plus `spec_changed/2` and `subscribe/1`.
 
 #### `Biot.Server.Publications`
@@ -191,7 +193,7 @@ transaction.
 - `Control.Listener` accepts mutually authenticated TLS node connections.
 - `Control.Connection` owns one process per node connection.
   It handles hello, snapshot synchronization, ready, wake, desired sweeps, reports,
-  heartbeats, and diagnostics.
+  heartbeats, diagnostics, and runtime-log requests.
   It sends `registration_abandoned` when an abandoned node attempts a connection.
   It sends one snapshot from one `Synchronization.specs/1` list as `SynchronizeBegin`,
   `SynchronizeItem` messages, and `SynchronizeEnd`. The connection schedules its first
@@ -209,7 +211,13 @@ transaction.
   reports at debug level.
 - `AccessApplied` is accepted during synchronization because the node sends it
   before `synchronized`.
-- `Diagnostics` authorizes and retrieves bounded node-held diagnostics.
+- `Biot.Server.RuntimeLogs.get/3` reads a Biot's bounded runtime log after `Access.fetch_readable/2`.
+  Owners and shell collaborators may read it. View-only collaborators may not.
+- `Biot.Server.Diagnostics.get/2` authorizes a diagnostic through its failed operation and
+  retrieves the bounded node-held content.
+- The server connection keeps diagnostics and runtime-log requests in one `pending_requests` map.
+  Each request has a `{:request_timeout, id}` timer. Timeout removes the request and releases its caller.
+  Disconnect cleanup cancels every timer and releases every pending caller.
 
 ### Node status and lifecycle
 
@@ -326,9 +334,8 @@ The controller records an attempt before it starts the action. It records an eff
 when the effect started under the current desired revision.
 
 The controller resumes saved backoff from `next_attempt_at` and clamps the wait to
-`retry_backoff_max_ms`. A refused retry write discards its diagnostic with
-`Diagnostics.discard/2` and reloads the current intent. The controller also reloads after a refused
-write without a diagnostic.
+`retry_backoff_max_ms`. A refused retry write leaves its keyed diagnostic in the journal index and
+reloads the current intent. The controller also reloads after a refused write without a diagnostic.
 
 The controller's `phase` makes its waiting state explicit:
 
@@ -442,10 +449,15 @@ Support modules provide the smaller boundaries:
   stdout and stderr. Its handshake announces the process group, registers that
   group with `Host.Command.Reaper`, sends the go line, and then lets the shell
   `exec` the command. No command runs before the reaper owns its group.
-  `open/4` returns a `Command.Stream` for a long-running command, and `close/1`
-  releases its reaper record and stderr file. `Host.Podman` adds the configured
-  Podman module and recognizes absent resources.
-- `Host.ContainerEvents` reads Podman's `events` stream through `Command.open/4` and
+  `run/5` returns `Result` with `status`, `stdout`, `stderr`, `stdout_truncated`, and
+  `stderr_truncated`. The stderr capture creates a FIFO in Elixir. One `head` process reads the
+  configured bound plus one byte while the command writes. An `exec cat` process drains the FIFO.
+  A grace guard ends a reader held open by a grandchild. `stderr_truncated` comes from the capture
+  size. `capture_tools` comes from `Host.Config`. A failed FIFO setup returns
+  `:stderr_capture_failed`. `open/5` returns a `Command.Stream` for a long-running command, and
+  `close/1` releases its reaper record. `Host.Command.Reaper` owns stderr and FIFO cleanup.
+  `Host.Podman` adds the configured Podman module and recognizes absent resources.
+- `Host.ContainerEvents` reads Podman's `events` stream through `Command.open/5` and
   `Command.Stream`. It calls `Command.close/1` when a stream ends and reopens it after
   `container_events_retry_ms`. `Names.owner/1` parses the owning Biot ID from a container label.
 - `Host.Paths` owns every node-private path. Its moduledoc is the authority for
@@ -471,8 +483,8 @@ running without an owner.
 
 `Biot.Node.Repo` is the Ecto SQLite repository, and `Biot.Node.Journal` is the
 node-local domain API. The journal schemas are
-`Journal.Schema.Allocation`, `Installation`, `Resolution`, `LocalIntent`, and
-`RetryState`. `local_intents` has a `destruction_report` column, and `retry_states`
+`Journal.Schema.Allocation`, `Installation`, `Resolution`, `LocalIntent`, `RetryState`, and
+`Journal.Schema.Diagnostic`. `local_intents` has a `destruction_report` column, and `retry_states`
 holds one retry row per Biot. `Journal.Ecto.ParsedValue` stores canonical parsed
 values as strings. `Journal.Ecto.Manifest`, `Journal.Ecto.BiotSpec`, `Journal.Ecto.Attempts`,
 `Journal.Ecto.Failure`, and `Journal.Ecto.ExecutionReport` store validated JSON values.
@@ -488,8 +500,8 @@ concurrent-insert race.
 
 `Journal.put_intent/1` and `Journal.replace_intents/1` accept intent and drop a
 superseded retry row in the same transaction. `replace_intents/1` also deletes
-local intents and retry rows for Biots omitted from the snapshot. That deletion
-stops the controller, leaving any allocation for orphan reporting.
+local intents and retry rows for Biots omitted from the snapshot. It returns the omitted Biot IDs.
+That deletion stops the controller, leaving any allocation for orphan reporting.
 `Journal.put_destruction_report/2` keeps the intent row as a receipt and removes
 its retry row. A later `put_intent/1` keeps that report.
 
@@ -499,12 +511,12 @@ its retry row. A later `put_intent/1` keeps that report.
 `clear_failure/2` return `{:ok, state}` or `:superseded`.
 
 `Biot.Node.DataRootLock` owns a long-lived `flock` port on the data-root lock file.
-`application.ex` always starts `Diagnostics` and `Host.Command.Reaper` first.
+`application.ex` starts `Host.Command.Reaper` before host processes.
 When host configuration exists, it then starts `DataRootLock`, `Host.Setup`,
-`Repo`, journal migration, `Controllers`, `Host.ContainerEvents`, and finally the
-configured control connection. The lock exists before setup or journal access,
-and the connection starts after the journal and controller tree are ready. Without host
-configuration, the node starts neither controllers nor a control connection.
+`Repo`, journal migration, `Control.RequestSupervisor`, `RuntimeLogs`, `Controllers`,
+`Host.ContainerEvents`, and finally the configured control connection. The lock exists before
+setup or journal access, and the connection starts after the journal and controller tree are ready.
+Without host configuration, the node starts neither controllers nor a control connection.
 
 ### Environment artifact
 
@@ -549,11 +561,19 @@ variables, NAR hashes, mounts, and state across a container restart.
 
 ### Node configuration
 
-`config/config.exs` supplies node defaults. The controller and diagnostic
-settings are:
+`config/config.exs` supplies server request and node defaults. The request, capture, controller,
+and diagnostic settings are:
 
 | Key | Default | Production override |
 | --- | ---: | --- |
+| `node_request_timeout_ms` | `10_000` | `BIOT_NODE_REQUEST_TIMEOUT_MS` |
+| `node_response_max_bytes` | `256_000` | `BIOT_NODE_RESPONSE_MAX_BYTES` |
+| `runtime_log_max_bytes` | `1_048_576` | `BIOT_NODE_RUNTIME_LOG_MAX_BYTES` |
+| `host_command_max_stderr_bytes` | `256_000` | `BIOT_NODE_HOST_COMMAND_MAX_STDERR_BYTES` |
+| `mkfifo_executable` | `mkfifo` | `BIOT_NODE_MKFIFO` |
+| `head_executable` | `head` | `BIOT_NODE_HEAD` |
+| `cat_executable` | `cat` | `BIOT_NODE_CAT` |
+| `sleep_executable` | `sleep` | `BIOT_NODE_SLEEP` |
 | `retry_budget` | `5` | `BIOT_NODE_RETRY_BUDGET` |
 | `retry_backoff_min_ms` | `2_000` | `BIOT_NODE_RETRY_BACKOFF_MIN_MS` |
 | `retry_backoff_max_ms` | `300_000` | `BIOT_NODE_RETRY_BACKOFF_MAX_MS` |
@@ -569,45 +589,63 @@ settings are:
 
 `max_frame_bytes` is read from application configuration only by the node
 connection. `config/runtime.exs` also reads the data root, UID/GID range, executable,
-connection, heartbeat, reconnect, Nix, Podman, and TLS settings. The listed
-`BIOT_NODE_*` overrides must be positive integers. `Host.Config` validates the
-resulting settings before host setup or effects use them.
+connection, heartbeat, reconnect, Nix, Podman, and TLS settings. The numeric
+`BIOT_NODE_*` overrides must be positive integers. `Host.Config.from_application!/0`
+requires complete, valid host configuration before node effects use it.
 
-### Diagnostics and control
+### Diagnostics, runtime logs, and control
 
-`Biot.Node.Diagnostics` keeps a bounded in-memory log for failed revisions. One
-writer process owns the per-Biot revision index and writes diagnostic entries to
-protected ETS. It keeps the latest failed attempt for a revision, limits each
-entry by `diagnostic_max_entry_bytes`, and evicts superseded revisions after
-`diagnostic_max_entries_per_biot`. `fetch/2` reads ETS directly, applies the
-caller's byte limit, and returns whether content was truncated. `forget/1`
-drops every entry for a Biot that loses local intent.
+`Biot.Node.Diagnostic` is the pure pair `{text, truncated}`. `Host.Diagnostic.from_command/1`
+selects stderr when it is non-empty. It selects stdout otherwise. It carries the selected stream's
+truncation flag. `Biot.Node.Host.Outcome` carries the diagnostic for an effect result.
+`Biot.Node.InspectionFailure` carries the diagnostic for an unreadable inspection.
 
-`Biot.Node.Control.Outbox` coalesces reports in ETS. It keys observations by
-Biot, resolutions by environment, and the node observation as one node-wide
-entry. A single wakeup marker prevents duplicate connection wakeups. The
-connection drains the outbox after it acknowledges `synchronized` and whenever
-a report wakes it. `Control` sends observations, resolutions, and orphaned
-allocation reports to the outbox.
+`Biot.Node.Diagnostics` is a module of functions. `put/4` writes a file under
+`Paths.diagnostic/2` and indexes it in the journal table `diagnostics`. The unique key is Biot,
+revision, and stage. A journal-owned sequence orders retention, so the newest
+`diagnostic_max_entries_per_biot` rows stay. A same-key write replaces both the row and file.
+`fetch/2` reads only an indexed file and applies a read bound. `forget/1` removes every indexed
+file for a Biot. The index is authoritative. Unlink failures are logged. `Config.from_application!/0`
+is the host configuration precondition for these operations.
 
-`Control.Connection` owns the reconnecting mutually authenticated TLS client,
-synchronization, heartbeats, and report delivery. It has one `:synchronizing`
-status with a `Staging` value. `Control.Staging` is pure: `begin/3`, `add/2`, and
-`complete/2` accept a bounded snapshot and return five reasons:
-`:snapshot_count_over_capacity`, `:staged_count_exceeded`, `:duplicate_biot_id`,
-`:synchronize_connection_mismatch`, and `:synchronize_count_mismatch`.
-A desired message during staging also closes the connection with
-`:desired_during_snapshot`. Any snapshot error clears staging before reconnecting.
+`Biot.Node.RuntimeLogs` is a Supervisor over a Registry and a DynamicSupervisor.
+`Biot.Node.BiotController.observe/1` calls `attach/3` with the inspected container. One `Capture`
+follows each running container with `podman logs --follow`. It copies output into
+`Paths.runtime_log/2`. The capture stays bounded by `runtime_log_max_bytes`.
+`Metadata` owns the JSON file with the incarnation ID and truncation flag. A restart re-attaches to
+the same incarnation and marks the gap. A new incarnation empties the log.
+`fetch/2` returns the incarnation, bounded output, and truncation flag. `forget/1` stops capture and
+removes the log and metadata. Capture faults log a warning and never change lifecycle results.
+`Host.Container` starts containers with `--log-driver k8s-file` and
+`--log-opt max-size=<runtime_log_max_bytes>`.
 
-An individual desired message uses `Journal.put_intent/1`; a complete snapshot
-uses `Journal.replace_intents/1`. The node sends `access_applied` after either
-durable write, then hands controller starts to `Controllers` before it sends
-`synchronized`. After that acknowledgement, the connection compares journal
-allocations with synchronized intents and puts orphan reports in the outbox.
-The connection replays stored destruction reports when it becomes ready and after
-each repeated `desired` message. The application starts this connection only after
-host configuration, the journal, and the controller tree are ready. Linux is
-required for the node control path.
+`Biot.Node.Control.Outbox` coalesces reports in a shared table. It keys observations by
+Biot, resolutions by environment, and the node observation as one node-wide entry. A single wakeup
+marker prevents duplicate connection wakeups. The connection drains the outbox after it acknowledges
+`synchronized` and whenever a report wakes it. `Control` sends observations, resolutions, and
+orphaned allocation reports to the outbox.
+
+`Biot.Node.Control.Connection` runs diagnostic and runtime-log reads under
+`Biot.Node.Control.RequestSupervisor`. It stores each task in `pending_reads` with a deadline.
+A timeout terminates the task. A disconnect cancels all pending reads before reconnecting.
+A complete snapshot calls `Journal.replace_intents/1`, then calls `Diagnostics.forget/1` and
+`RuntimeLogs.forget/1` for every returned omitted Biot ID.
+
+`Control.Connection` owns the reconnecting mutually authenticated TLS client, synchronization,
+heartbeats, and report delivery. It has one `:synchronizing` status with a `Staging` value.
+`Control.Staging` is pure: `begin/3`, `add/2`, and `complete/2` accept a bounded snapshot and return
+five reasons: `:snapshot_count_over_capacity`, `:staged_count_exceeded`, `:duplicate_biot_id`,
+`:synchronize_connection_mismatch`, and `:synchronize_count_mismatch`. A desired message during
+staging also closes the connection with `:desired_during_snapshot`. Any snapshot error clears
+staging before reconnecting.
+
+An individual desired message uses `Journal.put_intent/1`; a complete snapshot uses
+`Journal.replace_intents/1`. The node sends `access_applied` after either durable write, then hands
+controller starts to `Controllers` before it sends `synchronized`. After that acknowledgement, the
+connection compares journal allocations with synchronized intents and puts orphan reports in the
+outbox. The connection replays stored destruction reports when it becomes ready and after each
+repeated `desired` message. The application starts this connection only after host configuration,
+the journal, and the controller tree are ready. Linux is required for the node control path.
 
 ### Tests
 
@@ -617,22 +655,25 @@ real Linux effects, and the controller shell:
 
 - `action_test.exs` covers action stages and cancellation rules.
 - `controller_pure_test.exs` covers pure controller projections, retry rules, and `RetryState`.
-- `host_journal_integration_test.exs` covers retry rows, intent replacement, and destruction reports.
-- `host_linux_integration_test.exs` covers stream cleanup with real Linux commands.
-- `host_pure_test.exs` covers data markers, per-environment prepared resources, owner labels, and retry map types.
+- `diagnostics_integration_test.exs` covers journal-indexed files, source and read truncation, replacement, retention, missing files, and logged unlink failures.
+- `runtime_logs_metadata_integration_test.exs` covers metadata round trips and strict JSON validation.
+- `host_command_ownership_test.exs` covers bounded stderr capture, overflow flags, FIFO drain cleanup, cancellation, and reaper ownership.
+- `host_journal_integration_test.exs` covers diagnostic indexing, same-key replacement, retention order, omitted Biot IDs, retry rows, intent replacement, and destruction reports.
+- `host_linux_integration_test.exs` covers Podman log-driver bounds and stream cleanup with real Linux commands.
+- `host_pure_test.exs` covers diagnostic selection, data markers, per-environment prepared resources, owner labels, and retry map types.
 - `node_values_test.exs` covers node-owned parsed values, including `NetworkId`.
 - `reconcile_important_cases_test.exs` covers unknown desired and sibling environments.
 - `reconcile_invariants_test.exs` covers `Reconcile.next/3` result shapes and safety invariants.
 - `reconcile_release_test.exs` covers release eligibility and ordering.
 - `reconcile_sequences_test.exs` covers running, stopped, and destroyed convergence sequences.
-- `support/reconcile_fixtures.ex` and `support/reconcile_generators.ex` define the current state shapes and property generators.
+- `support/reconcile_fixtures.ex` defines diagnostic-bearing inspection failures and current state shapes; `support/reconcile_generators.ex` defines property generators.
 
 The server's Linux controller test is self-contained under `test/support` and is Linux-only.
-`support/step9_full_proof.exs` covers lost responses, controller startup and retry, cancellation, reconnects, and orphan reporting.
-`support/step14_controller_proof.exs` covers durable attempts, backoff, revision races, destruction, event wakeups, and network isolation.
+`support/step14_controller_proof.exs` covers durable attempts, backoff, revision races, destruction, event wakeups, network isolation, diagnostic retention, and runtime-log capture lifecycle.
 `support/step9_controller_runner.exs` starts both controller proofs in the Linux test process.
+`support/step9_full_proof.exs` covers command capture settings, process cleanup, lost responses, controller startup and retry, cancellation, reconnects, and orphan reporting.
 `biot_controller_linux_integration_test.exs` runs that server and node proof with real resources.
-`control_protocol_integration_test.exs` covers destruction report replay on ready and repeated `desired`, then snapshot omission.
+`control_protocol_integration_test.exs` covers diagnostics, runtime-log authorization, request deadlines, disconnect cleanup, destruction report replay, and snapshot omission.
 
 `docker/linux-host/run-tests.sh` builds or reuses the privileged Linux test image
 and runs the full Mix test suite inside it.

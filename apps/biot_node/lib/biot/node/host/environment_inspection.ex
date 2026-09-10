@@ -2,6 +2,7 @@ defmodule Biot.Node.Host.EnvironmentInspection do
   @moduledoc "Derives environment states from journal rows and inspected host facts."
 
   alias Biot.Node.ArtifactId
+  alias Biot.Node.Diagnostic
   alias Biot.Node.Host.FileSystem
   alias Biot.Node.Host.Outcome
   alias Biot.Node.Installation
@@ -42,7 +43,7 @@ defmodule Biot.Node.Host.EnvironmentInspection do
   defp artifact_state({:present, artifact_id}), do: {:present, artifact_id}
 
   defp artifact_state({:error, {reason, detail}}) do
-    {:unknown, Outcome.inspection(:prepared, reason, detail)}
+    {:unknown, Outcome.inspection(:prepared, reason, Diagnostic.text(detail))}
   end
 
   defp installed_state(
@@ -72,7 +73,11 @@ defmodule Biot.Node.Host.EnvironmentInspection do
 
   defp resolution_state(%Resolution{} = resolution, {:error, reason}) do
     failure =
-      Outcome.inspection(:resolution, reason, "the project snapshot could not be inspected")
+      Outcome.inspection(
+        :resolution,
+        reason,
+        Diagnostic.text("the project snapshot could not be inspected")
+      )
 
     {:unknown, resolution, failure}
   end

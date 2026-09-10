@@ -7,6 +7,7 @@ defmodule Biot.Node.Journal do
   alias Biot.Node.ArtifactId
   alias Biot.Node.Installation
   alias Biot.Node.Journal.Schema.Allocation, as: AllocationRow
+  alias Biot.Node.Journal.Schema.Diagnostic, as: DiagnosticRow
   alias Biot.Node.Journal.Schema.Installation, as: InstallationRow
   alias Biot.Node.Journal.Schema.LocalIntent, as: LocalIntentRow
   alias Biot.Node.Journal.Schema.Resolution, as: ResolutionRow
@@ -21,6 +22,7 @@ defmodule Biot.Node.Journal do
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Failure
   alias Biot.Protocol.Manifest
+  alias Biot.Protocol.PrivateDiagnosticId
 
   @spec allocation(BiotId.t()) :: Allocation.t() | nil
   def allocation(%BiotId{} = biot_id) do
@@ -217,26 +219,95 @@ defmodule Biot.Node.Journal do
   for loses its row, which stops its controller and leaves its allocation to be reported as an
   orphan. Its retry budget and any destruction receipt go with that row.
   """
-  @spec replace_intents([BiotSpec.t()]) :: :ok | {:error, term()}
+  @spec replace_intents([BiotSpec.t()]) :: {:ok, [BiotId.t()]} | {:error, term()}
   def replace_intents(specs) when is_list(specs) do
     Repo.transaction(
       fn ->
         Enum.each(specs, fn spec -> _row = accept_intent(spec) end)
         synchronized = Enum.map(specs, & &1.execution.biot_id)
 
-        LocalIntentRow
-        |> where([row], row.biot_id not in ^synchronized)
-        |> Repo.delete_all()
+        {_count, removed} =
+          LocalIntentRow
+          |> where([row], row.biot_id not in ^synchronized)
+          |> select([row], row.biot_id)
+          |> Repo.delete_all()
 
         RetryStateRow
         |> where([row], row.biot_id not in ^synchronized)
         |> Repo.delete_all()
 
-        :ok
+        removed
       end,
       mode: :immediate
     )
-    |> transaction_value()
+  end
+
+  @doc "Indexes a diagnostic and returns file IDs that the committed index no longer names."
+  @spec index_diagnostic(
+          PrivateDiagnosticId.t(),
+          BiotId.t(),
+          pos_integer(),
+          Failure.stage(),
+          boolean(),
+          pos_integer()
+        ) :: {:ok, [PrivateDiagnosticId.t()]} | {:error, term()}
+  def index_diagnostic(
+        %PrivateDiagnosticId{} = diagnostic_id,
+        %BiotId{} = biot_id,
+        revision,
+        stage,
+        truncated,
+        max_entries
+      ) do
+    Repo.transaction(
+      fn ->
+        previous =
+          Repo.get_by(DiagnosticRow,
+            biot_id: biot_id,
+            revision: revision,
+            stage: Atom.to_string(stage)
+          )
+
+        sequence = next_diagnostic_sequence(biot_id)
+        upsert_diagnostic(diagnostic_id, biot_id, revision, stage, truncated, sequence)
+        evicted = evict_diagnostics(biot_id, max_entries)
+
+        [previous && previous.diagnostic_id | evicted]
+        |> Enum.reject(&(is_nil(&1) or &1 == diagnostic_id))
+        |> Enum.uniq()
+      end,
+      mode: :immediate
+    )
+  end
+
+  @spec diagnostic(PrivateDiagnosticId.t()) :: boolean() | nil
+  def diagnostic(%PrivateDiagnosticId{} = diagnostic_id) do
+    case Repo.get(DiagnosticRow, diagnostic_id) do
+      nil -> nil
+      row -> row.truncated
+    end
+  end
+
+  @doc "Deletes one Biot's diagnostic index and returns the files that belonged to it."
+  @spec forget_diagnostics(BiotId.t()) ::
+          {:ok, [PrivateDiagnosticId.t()]} | {:error, term()}
+  def forget_diagnostics(%BiotId{} = biot_id) do
+    Repo.transaction(
+      fn ->
+        ids =
+          DiagnosticRow
+          |> where([row], row.biot_id == ^biot_id)
+          |> select([row], row.diagnostic_id)
+          |> Repo.all()
+
+        DiagnosticRow
+        |> where([row], row.biot_id == ^biot_id)
+        |> Repo.delete_all()
+
+        ids
+      end,
+      mode: :immediate
+    )
   end
 
   @doc """
@@ -374,6 +445,62 @@ defmodule Biot.Node.Journal do
       returning: true
     )
     |> retry_state_value()
+  end
+
+  # Each new or replacement row gets the next per-Biot sequence, so retention has one total order.
+  defp next_diagnostic_sequence(biot_id) do
+    latest =
+      DiagnosticRow
+      |> where([row], row.biot_id == ^biot_id)
+      |> select([row], max(row.sequence))
+      |> Repo.one()
+
+    (latest || 0) + 1
+  end
+
+  defp upsert_diagnostic(
+         diagnostic_id,
+         biot_id,
+         revision,
+         stage,
+         truncated,
+         sequence
+       ) do
+    changes = [
+      diagnostic_id: diagnostic_id,
+      truncated: truncated,
+      sequence: sequence
+    ]
+
+    %DiagnosticRow{}
+    |> Ecto.Changeset.change(
+      diagnostic_id: diagnostic_id,
+      biot_id: biot_id,
+      revision: revision,
+      stage: Atom.to_string(stage),
+      truncated: truncated,
+      sequence: sequence
+    )
+    |> Repo.insert!(
+      on_conflict: [set: changes],
+      conflict_target: [:biot_id, :revision, :stage]
+    )
+  end
+
+  defp evict_diagnostics(biot_id, max_entries) do
+    ids =
+      DiagnosticRow
+      |> where([row], row.biot_id == ^biot_id)
+      |> order_by([row], desc: row.sequence)
+      |> select([row], row.diagnostic_id)
+      |> Repo.all()
+      |> Enum.drop(max_entries)
+
+    DiagnosticRow
+    |> where([row], row.diagnostic_id in ^ids)
+    |> Repo.delete_all()
+
+    ids
   end
 
   defp drop_superseded_retry_state(biot_id, revision) do

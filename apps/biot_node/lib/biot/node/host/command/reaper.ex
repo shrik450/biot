@@ -90,7 +90,8 @@ defmodule Biot.Node.Host.Command.Reaper do
   defp remove(nil), do: :ok
 
   defp remove({_process_group, stderr_path}) do
-    File.rm(stderr_path)
+    Enum.each([stderr_path, stderr_path <> ".pipe"], &File.rm/1)
+
     :ok
   end
 end

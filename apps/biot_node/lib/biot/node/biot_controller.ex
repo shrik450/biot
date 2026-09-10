@@ -55,6 +55,7 @@ defmodule Biot.Node.BiotController do
   alias Biot.Node.Resolution
   alias Biot.Node.Retry
   alias Biot.Node.RetryState
+  alias Biot.Node.RuntimeLogs
   alias Biot.Protocol.BiotSpec
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Failure
@@ -239,12 +240,10 @@ defmodule Biot.Node.BiotController do
   end
 
   # A biot whose intent is gone is one the server no longer assigns here. The controller stops and
-  # leaves its host resources alone; the node reports them as orphaned allocations. Its
-  # diagnostics go, because nobody can ask this node about that biot again.
+  # leaves its host resources alone; the node reports them as orphaned allocations.
   defp reload(state) do
     case Journal.intent(state.biot_id) do
       nil ->
-        Diagnostics.forget(state.biot_id)
         {:stop, :normal, state}
 
       %LocalIntent{biot_spec: spec} ->
@@ -279,9 +278,11 @@ defmodule Biot.Node.BiotController do
   end
 
   defp observe(%State{} = state) do
+    inspection = Host.inspect_state(state.biot_id, state.context)
+    :ok = RuntimeLogs.attach(state.context.config, state.biot_id, inspection.container)
+
     node_state =
-      state.biot_id
-      |> Host.inspect_state(state.context)
+      inspection
       |> Observation.node_state(
         state.spec.execution.desired,
         state.pending_exit,
@@ -362,18 +363,10 @@ defmodule Biot.Node.BiotController do
     end
   end
 
-  # The journal refuses a retry write whose revision the stored intent no longer holds, because the
-  # server replaced that intent while this work was in flight. Nothing was recorded and no action
-  # started, so the controller drops the work and reads the intent now in force.
+  # A refused retry write leaves its keyed diagnostic in place. The next write for that key
+  # replaces it, while the controller drops this work and reads the intent now in force.
   defp after_retry_write(%State{}, {:ok, %State{} = written}, next), do: next.(written)
-  defp after_retry_write(%State{} = state, {:superseded, nil}, _next), do: reload(state)
-
-  # A refused write must leave no trace. The diagnostic store keeps a bounded number of entries per
-  # biot, so a diagnostic nothing will ever report can push out one that a reported failure names.
-  defp after_retry_write(%State{} = state, {:superseded, diagnostic_ref}, _next) do
-    :ok = Diagnostics.discard(state.biot_id, diagnostic_ref)
-    reload(state)
-  end
+  defp after_retry_write(%State{} = state, :superseded, _next), do: reload(state)
 
   # Destruction is the one desired state a controller can finish. The report of the inspection that
   # found it finished is the receipt the server waits for, so the journal keeps it until the server
@@ -458,11 +451,11 @@ defmodule Biot.Node.BiotController do
     failure =
       effect.action
       |> Retry.classify(outcome.outcome, attempt, state.retry_budget)
-      |> with_diagnostic(state, outcome.diagnostic)
+      |> with_diagnostic(state, outcome)
 
     case record_failure(state, effect.revision, failure, attempt) do
       {:ok, recorded} -> {:ok, recorded}
-      {:superseded, nil} -> {:superseded, failure.diagnostic_ref}
+      :superseded -> :superseded
     end
   end
 
@@ -520,12 +513,23 @@ defmodule Biot.Node.BiotController do
   defp put_retry(%State{} = state, {:ok, %RetryState{} = retry}),
     do: {:ok, %{state | retry: retry}}
 
-  defp put_retry(%State{}, :superseded), do: {:superseded, nil}
+  defp put_retry(%State{}, :superseded), do: :superseded
 
-  defp with_diagnostic(%Failure{} = failure, %State{}, nil), do: failure
+  defp with_diagnostic(%Failure{} = failure, %State{}, %Outcome{diagnostic: nil}), do: failure
 
-  defp with_diagnostic(%Failure{} = failure, %State{} = state, diagnostic) do
-    diagnostic_ref = Diagnostics.put(state.biot_id, revision(state.spec), diagnostic)
+  defp with_diagnostic(
+         %Failure{} = failure,
+         %State{} = state,
+         %Outcome{diagnostic: diagnostic}
+       ) do
+    diagnostic_ref =
+      Diagnostics.put(
+        state.biot_id,
+        revision(state.spec),
+        failure.stage,
+        diagnostic
+      )
+
     %{failure | diagnostic_ref: diagnostic_ref}
   end
 

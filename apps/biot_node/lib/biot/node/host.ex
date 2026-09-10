@@ -21,12 +21,13 @@ defmodule Biot.Node.Host do
     allocation = Journal.allocation(biot_id)
     resolution_rows = Journal.resolutions(biot_id)
     prepared = Environment.prepared(config, resolution_rows)
+    container = Container.state(config, biot_id)
 
     %Inspection{
       data: data(config, allocation),
       resolutions: Environment.resolutions(config, resolution_rows),
       installation: Environment.installation(Journal.installation(biot_id), prepared),
-      container: Container.state(config, biot_id),
+      container: container,
       prepared: prepared
     }
   end

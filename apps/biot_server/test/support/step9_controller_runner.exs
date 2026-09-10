@@ -94,7 +94,7 @@ defmodule Biot.Server.Step9ControllerRunner do
         Enum.any?(Controllers.running(), fn {biot_id, _pid} -> biot_id == retried end)
       end)
 
-    :ok = Journal.replace_intents([])
+    {:ok, _removed} = Journal.replace_intents([])
     :ok = Controllers.synchronized([])
     true = eventually(fn -> Controllers.running() == [] end)
   end

@@ -76,5 +76,27 @@ defmodule Biot.Node.Repo.Migrations.CreateNodeJournal do
 
       timestamps(type: :utc_datetime_usec)
     end
+
+    create table(:diagnostics, primary_key: false) do
+      add(:diagnostic_id, :string, primary_key: true, null: false)
+      add(:biot_id, :string, null: false)
+
+      add(:revision, :integer,
+        null: false,
+        check: %{name: "diagnostics_revision_positive", expr: "revision > 0"}
+      )
+
+      add(:stage, :string, null: false)
+
+      add(:truncated, :boolean, null: false)
+
+      add(:sequence, :integer,
+        null: false,
+        check: %{name: "diagnostics_sequence_positive", expr: "sequence > 0"}
+      )
+    end
+
+    create(unique_index(:diagnostics, [:biot_id, :revision, :stage]))
+    create(index(:diagnostics, [:biot_id, :sequence]))
   end
 end

@@ -4,6 +4,7 @@ defmodule Biot.Step14Evidence do
   @moduledoc false
 
   alias Biot.Node.Action
+  alias Biot.Node.ArtifactId
   alias Biot.Node.BiotController
   alias Biot.Node.Control.Connection, as: NodeConnection
   alias Biot.Node.Control.Outbox
@@ -12,17 +13,21 @@ defmodule Biot.Step14Evidence do
   alias Biot.Node.Host
   alias Biot.Node.Host.Command
   alias Biot.Node.Host.Command.Reaper
+  alias Biot.Node.Host.Container
   alias Biot.Node.Host.ContainerEvents
   alias Biot.Node.Host.Environment, as: HostEnvironment
   alias Biot.Node.Host.Names
   alias Biot.Node.Host.Paths
   alias Biot.Node.Host.Podman
+  alias Biot.Node.Installation
   alias Biot.Node.Journal
   alias Biot.Node.Journal.Schema.Allocation, as: AllocationRow
+  alias Biot.Node.Journal.Schema.Diagnostic, as: DiagnosticRow
   alias Biot.Node.Observation
   alias Biot.Node.Reconcile
   alias Biot.Node.Repo, as: NodeRepo
   alias Biot.Node.RetryState
+  alias Biot.Node.RuntimeLogs
   alias Biot.Node.StorePath
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.BiotSpec
@@ -70,6 +75,7 @@ defmodule Biot.Step14Evidence do
     try do
       source_checks()
       first = lifecycle_check(fixtures)
+      runtime_log_check(supervisor)
       event_check(first)
       second = second_biot_check(fixtures)
       isolation_check(first, second)
@@ -113,8 +119,6 @@ defmodule Biot.Step14Evidence do
         controller_words:
           word_counts([controller], ["offline", "requires_control", "Control.status"]),
         controller_control_uses: uses(controller, ~r/Control\.[a-z_]+/),
-        reconcile_next_arity_3: function_exported?(Reconcile, :next, 3),
-        reconcile_next_arity_4: function_exported?(Reconcile, :next, 4),
         action_environments_exported: function_exported?(Action, :environments, 1),
         action_requires_control_exported: function_exported?(Action, :requires_control?, 1),
         marker_id_module_loadable: Code.ensure_loaded?(Biot.Node.MarkerId),
@@ -186,6 +190,176 @@ defmodule Biot.Step14Evidence do
 
     %{biot_id: biot_id, environment_id: environment_id, host: host, spec: spec}
   end
+
+  # The proof keeps one resource lifecycle so each assertion observes the same container.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp runtime_log_check(supervisor) do
+    biot_id = id(BiotId, 895)
+    environment_id = id(EnvironmentId, 896)
+    {:ok, host} = Host.context(biot_id)
+    :ok = Host.run({:allocate, biot_id}, host)
+
+    Enum.each(Paths.mounts(host.config, biot_id), fn {source, _target} ->
+      File.mkdir_p!(source)
+    end)
+
+    allocation = Journal.allocation(biot_id)
+    first_runner = runtime_runner("first")
+    write_runtime_bundle(host.config, environment_id, first_runner)
+    {:ok, first_artifact} = ArtifactId.parse(first_runner)
+
+    installation = %Installation{
+      biot_id: biot_id,
+      environment_id: environment_id,
+      artifact_id: first_artifact
+    }
+
+    :ok = Container.start(host, allocation, installation)
+    {:present, first_container} = running_container(host, biot_id)
+    :ok = RuntimeLogs.attach(host.config, biot_id, {:present, first_container})
+
+    eventually(fn ->
+      case RuntimeLogs.fetch(biot_id, 10_000) do
+        {:ok, {id, content, false}} ->
+          id == first_container.incarnation_id and String.contains?(content, "first-service")
+
+        _other ->
+          false
+      end
+    end)
+
+    before_restart = RuntimeLogs.fetch(biot_id, 10_000)
+    :ok = Supervisor.terminate_child(supervisor, RuntimeLogs)
+    {:ok, _runtime_logs} = Supervisor.restart_child(supervisor, RuntimeLogs)
+    :ok = RuntimeLogs.attach(host.config, biot_id, {:present, first_container})
+
+    eventually(fn ->
+      match?(
+        {:ok, {_, content, true}} when byte_size(content) > 0,
+        RuntimeLogs.fetch(biot_id, 10_000)
+      )
+    end)
+
+    eventually(fn -> runtime_log_size(host.config, biot_id) == 4_096 end, 30_000)
+    first_size = runtime_log_size(host.config, biot_id)
+    Process.sleep(300)
+    first_later_size = runtime_log_size(host.config, biot_id)
+    first_after_restart = RuntimeLogs.fetch(biot_id, 10_000)
+
+    :ok = Container.retire(host, first_container.incarnation_id)
+    after_retire = RuntimeLogs.fetch(biot_id, 10_000)
+    metadata_before_failure = File.read!(Paths.runtime_log_metadata(host.config, biot_id))
+    failed_rootfs = Paths.rootfs(host.config, biot_id) <> ".failed-run"
+    :ok = File.rename(Paths.rootfs(host.config, biot_id), failed_rootfs)
+
+    failed_start =
+      try do
+        Container.start(host, allocation, installation)
+      after
+        :ok = File.rename(failed_rootfs, Paths.rootfs(host.config, biot_id))
+      end
+
+    after_failed_start = RuntimeLogs.fetch(biot_id, 10_000)
+    metadata_after_failure = File.read!(Paths.runtime_log_metadata(host.config, biot_id))
+
+    second_runner = runtime_runner("second")
+    write_runtime_bundle(host.config, environment_id, second_runner)
+    {:ok, second_artifact} = ArtifactId.parse(second_runner)
+    second_installation = %{installation | artifact_id: second_artifact}
+    :ok = Container.start(host, allocation, second_installation)
+    {:present, second_container} = running_container(host, biot_id)
+    :ok = RuntimeLogs.attach(host.config, biot_id, {:present, second_container})
+
+    eventually(fn ->
+      case RuntimeLogs.fetch(biot_id, 10_000) do
+        {:ok, {id, content, _truncated}} ->
+          id == second_container.incarnation_id and
+            String.contains?(content, "second-service") and
+            not String.contains?(content, "first-service")
+
+        _other ->
+          false
+      end
+    end)
+
+    second_read = RuntimeLogs.fetch(biot_id, 10_000)
+
+    IO.inspect(
+      %{
+        before_restart_exact: match?({:ok, {_, _, false}}, before_restart),
+        restart_kept_incarnation:
+          log_incarnation(first_after_restart) == first_container.incarnation_id,
+        restart_marked_gap: match?({:ok, {_, _, true}}, first_after_restart),
+        capture_stayed_bounded: first_size == 4_096 and first_later_size == 4_096,
+        failed_start_failed: match?({:error, _outcome}, failed_start),
+        failed_start_kept_log: after_failed_start == after_retire,
+        failed_start_kept_metadata: metadata_after_failure == metadata_before_failure,
+        new_incarnation: second_container.incarnation_id != first_container.incarnation_id,
+        new_log_replaced_old:
+          log_contains?(second_read, "second-service") and
+            not log_contains?(second_read, "first-service")
+      },
+      label: "step 15 runtime logs"
+    )
+
+    :ok = Container.retire(host, second_container.incarnation_id)
+    :ok = RuntimeLogs.forget(biot_id)
+  end
+
+  defp runtime_runner(label) do
+    expression = """
+    let pkgs = import <nixpkgs> {};
+    in pkgs.writeShellScript "biot-step15-#{label}" ''
+      i=0
+      while [ "$i" -lt 400 ]; do
+        printf '#{label}-service-%04d-abcdefghijklmnopqrstuvwxyz0123456789\\n' "$i"
+        i=$((i + 1))
+        ${pkgs.coreutils}/bin/sleep 0.02
+      done
+      exec ${pkgs.coreutils}/bin/sleep 300
+    ''
+    """
+
+    case System.cmd("nix-build", ["--no-out-link", "--expr", expression], stderr_to_stdout: true) do
+      {output, 0} -> output |> String.split("\n", trim: true) |> List.last()
+      {output, status} -> raise "nix-build exited with #{status}: #{output}"
+    end
+  end
+
+  defp write_runtime_bundle(config, environment_id, runner) do
+    root = Paths.environment_root(config, environment_id)
+    File.mkdir_p!(root)
+
+    File.write!(
+      Path.join(root, "bundle.json"),
+      Jason.encode!(%{
+        "format" => 1,
+        "closure_root" => runner,
+        "entrypoint" => runner,
+        "environment_file" => runner,
+        "config_root" => runner
+      })
+    )
+  end
+
+  defp running_container(host, biot_id) do
+    case Host.inspect_state(biot_id, host).container do
+      {:present, %{state: :running} = container} -> {:present, container}
+      _other -> nil
+    end
+  end
+
+  defp runtime_log_size(config, biot_id) do
+    File.stat!(Paths.runtime_log(config, biot_id)).size
+  end
+
+  defp log_incarnation({:ok, {incarnation_id, _content, _truncated}}), do: incarnation_id
+  defp log_incarnation(_other), do: nil
+
+  defp log_contains?({:ok, {_incarnation_id, content, _truncated}}, value),
+    do: String.contains?(content, value)
+
+  defp log_contains?(_other, _value), do: false
 
   # Goal 6: a podman kill reaches the controller long before its observation interval.
   defp event_check(biot) do
@@ -910,7 +1084,7 @@ defmodule Biot.Step14Evidence do
     end
   end
 
-  # Fix round 3, finding 1: a refused retry write leaves no diagnostic. The controller has not read
+  # A refused retry write leaves its keyed diagnostic. The controller has not read
   # the new revision yet, so its own check accepts the result and stores the diagnostic. Only the
   # journal transaction sees the new revision, and it refuses the write after that.
   defp refused_diagnostic_check(fixtures) do
@@ -938,7 +1112,6 @@ defmodule Biot.Step14Evidence do
       eventually(fn -> running_action(biot_id) == :initialize end, 120_000)
       controller = controller(biot_id)
       entries_before = diagnostic_entries(biot_id)
-      table_before = :ets.info(Diagnostics, :size)
 
       # Nothing tells the controller about the new revision, so it still holds revision 1 when it
       # reads the failed task's result. Its own check passes and the journal's check refuses.
@@ -953,7 +1126,7 @@ defmodule Biot.Step14Evidence do
       File.chmod!(biots, 0o000)
 
       puts =
-        trace(Diagnostics, :put, 3, fn ->
+        trace(Diagnostics, :put, 4, fn ->
           :sys.resume(controller)
 
           eventually(
@@ -973,14 +1146,12 @@ defmodule Biot.Step14Evidence do
           diagnostic_entries_before: entries_before,
           diagnostics_stored_while_recording: length(puts),
           diagnostic_entries_after: diagnostic_entries(biot_id),
-          diagnostic_table_size_before: table_before,
-          diagnostic_table_size_after: :ets.info(Diagnostics, :size),
           retry_row_after_refused_write: Journal.retry_state(biot_id),
           controller_target_revision: retry.target_revision,
           controller_failure: retry.failure,
           controller_alive: Process.alive?(controller)
         },
-        label: "fix round 3 finding 1 a refused retry write leaves no diagnostic"
+        label: "a refused retry write leaves its diagnostic"
       )
 
       stop_controller(biot_id)
@@ -991,7 +1162,9 @@ defmodule Biot.Step14Evidence do
   end
 
   defp diagnostic_entries(biot_id) do
-    Diagnostics |> :sys.get_state() |> Map.fetch!(:biots) |> Map.get(biot_id, [])
+    DiagnosticRow
+    |> NodeRepo.all()
+    |> Enum.filter(&(&1.biot_id == biot_id))
   end
 
   # Fix round 2, finding 2: every stream the reader opens is released when it ends, so a reader
@@ -1128,7 +1301,7 @@ defmodule Biot.Step14Evidence do
 
     # A snapshot that omits the biot is what `Journal.replace_intents/1` receives, and it takes the
     # intent row and the retry row together.
-    :ok = Journal.replace_intents([])
+    {:ok, _removed} = Journal.replace_intents([])
 
     IO.inspect(
       %{
@@ -1513,6 +1686,8 @@ defmodule Biot.Step14Evidence do
       nix_build_file: Path.join(@project_root, "nix/build.nix"),
       nix_pin_file: Path.join(@project_root, "nix/pin.nix"),
       host_command_timeout_ms: 600_000,
+      host_command_max_stderr_bytes: 256_000,
+      runtime_log_max_bytes: 4_096,
       observation_interval_ms: @observation_interval_ms,
       inspection_retry_ms: @observation_interval_ms,
       retry_backoff_min_ms: @backoff_min_ms,
@@ -1534,7 +1709,7 @@ defmodule Biot.Step14Evidence do
     {:ok, supervisor} =
       Supervisor.start_link(
         [
-          Biot.Node.Diagnostics,
+          Biot.Node.RuntimeLogs,
           Biot.Node.Host.Command.Reaper,
           Biot.Node.DataRootLock,
           Biot.Node.Host.Setup,

@@ -2,10 +2,12 @@ defmodule Biot.Node.Host.Container do
   @moduledoc "Runs and inspects rootless Podman containers owned by one allocation."
 
   alias Biot.Node.Allocation
+  alias Biot.Node.Diagnostic
   alias Biot.Node.Host.Command
   alias Biot.Node.Host.Config
   alias Biot.Node.Host.ContainerInspection
   alias Biot.Node.Host.Context
+  alias Biot.Node.Host.Diagnostic, as: HostDiagnostic
   alias Biot.Node.Host.Environment
   alias Biot.Node.Host.FileSystem
   alias Biot.Node.Host.Names
@@ -23,9 +25,14 @@ defmodule Biot.Node.Host.Container do
   @spec state(Config.t(), BiotId.t()) :: resource()
   def state(config, biot_id) do
     case FileSystem.read(Paths.container_identity(config, biot_id)) do
-      {:present, value} -> state_for_identity(config, String.trim(value))
-      :absent -> state_for_owner(config, biot_id)
-      {:error, reason} -> unknown(reason, "the container identity could not be read")
+      {:present, value} ->
+        state_for_identity(config, String.trim(value))
+
+      :absent ->
+        state_for_owner(config, biot_id)
+
+      {:error, reason} ->
+        unknown(reason, Diagnostic.text("the container identity could not be read"))
     end
   end
 
@@ -39,9 +46,8 @@ defmodule Biot.Node.Host.Container do
     with {:ok, bundle} <- Environment.bundle(config, installation.environment_id),
          {:ok, _network} <- ensure_network(config, allocation),
          {:ok, incarnation_id} <- start_identity(config, biot_id),
-         {:ok, _container} <- create(config, allocation, installation, bundle, incarnation_id) do
-      :ok
-    end
+         {:ok, _container} <- create(config, allocation, installation, bundle, incarnation_id),
+         do: :ok
   end
 
   @spec retire(Context.t(), IncarnationId.t()) :: :ok | {:error, Outcome.t()}
@@ -55,8 +61,11 @@ defmodule Biot.Node.Host.Container do
 
   defp state_for_identity(config, value) do
     case IncarnationId.parse(value) do
-      {:ok, incarnation_id} -> state_for_name(config, incarnation_id)
-      {:error, _reason} -> unknown(:unreadable, "the container identity is invalid")
+      {:ok, incarnation_id} ->
+        state_for_name(config, incarnation_id)
+
+      {:error, _reason} ->
+        unknown(:unreadable, Diagnostic.text("the container identity is invalid"))
     end
   end
 
@@ -68,10 +77,10 @@ defmodule Biot.Node.Host.Container do
         parse_owned_list(config, stdout)
 
       {:ok, %Command.Result{} = result} ->
-        unknown({:podman, result.status}, Command.diagnostic(result))
+        unknown({:podman, result.status}, HostDiagnostic.from_command(result))
 
       {:error, reason} ->
-        unknown(reason, "Podman could not list containers")
+        unknown(reason, Diagnostic.text("Podman could not list containers"))
     end
   end
 
@@ -86,15 +95,21 @@ defmodule Biot.Node.Host.Container do
         |> Enum.filter(&is_binary/1)
         |> Enum.sort()
         |> case do
-          [reference | _rest] -> state_for_reference(config, reference)
-          [] -> unknown(:unreadable, "Podman returned a container without an identity")
+          [reference | _rest] ->
+            state_for_reference(config, reference)
+
+          [] ->
+            unknown(
+              :unreadable,
+              Diagnostic.text("Podman returned a container without an identity")
+            )
         end
 
       {:error, _reason} ->
-        unknown(:unreadable, "Podman returned invalid container JSON")
+        unknown(:unreadable, Diagnostic.text("Podman returned invalid container JSON"))
 
       {:ok, _other} ->
-        unknown(:unreadable, "Podman returned invalid container JSON")
+        unknown(:unreadable, Diagnostic.text("Podman returned invalid container JSON"))
     end
   end
 
@@ -110,10 +125,10 @@ defmodule Biot.Node.Host.Container do
       {:ok, %Command.Result{} = result} ->
         if Podman.absent?(:container, result),
           do: :absent,
-          else: unknown({:podman, result.status}, Command.diagnostic(result))
+          else: unknown({:podman, result.status}, HostDiagnostic.from_command(result))
 
       {:error, reason} ->
-        unknown(reason, "Podman could not inspect the container")
+        unknown(reason, Diagnostic.text("Podman could not inspect the container"))
     end
   end
 
@@ -122,7 +137,7 @@ defmodule Biot.Node.Host.Container do
          {:ok, container} <- ContainerInspection.parse(value) do
       {:present, container}
     else
-      _error -> unknown(:unreadable, "Podman returned invalid container JSON")
+      _error -> unknown(:unreadable, Diagnostic.text("Podman returned invalid container JSON"))
     end
   end
 
@@ -155,6 +170,7 @@ defmodule Biot.Node.Host.Container do
           incarnation_id,
           installation.environment_id
         ) ++
+        runtime_log_arguments(config) ++
         volume_arguments(config, allocation.biot_id) ++
         [Paths.rootfs(config, allocation.biot_id), StorePath.to_string(bundle.entrypoint)]
 
@@ -179,7 +195,7 @@ defmodule Biot.Node.Host.Container do
         {:error, Outcome.from_command(:host_unavailable, result)}
 
       {:unknown, failure} ->
-        {:error, Outcome.from_reason(failure, Command.diagnostic(result))}
+        {:error, Outcome.from_reason(failure, HostDiagnostic.from_command(result))}
     end
   end
 
@@ -243,7 +259,11 @@ defmodule Biot.Node.Host.Container do
         {:ok, incarnation_id}
 
       {:error, _reason} ->
-        {:error, Outcome.new(:host_unavailable, "the container identity is invalid")}
+        {:error,
+         Outcome.new(
+           :host_unavailable,
+           Diagnostic.text("the container identity is invalid")
+         )}
     end
   end
 
@@ -299,6 +319,16 @@ defmodule Biot.Node.Host.Container do
       Enum.flat_map(Paths.mounts(config, biot_id), fn {source, target} ->
         ["--volume", "#{source}:#{target}:rw"]
       end)
+  end
+
+  defp runtime_log_arguments(config) do
+    # The follower needs a file driver, and this bound keeps Podman's private copy from growing.
+    [
+      "--log-driver",
+      "k8s-file",
+      "--log-opt",
+      "max-size=#{config.runtime_log_max_bytes}"
+    ]
   end
 
   defp unknown(reason, detail) do

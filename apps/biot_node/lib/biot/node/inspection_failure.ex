@@ -4,11 +4,17 @@ defmodule Biot.Node.InspectionFailure do
   distinct from `absent`, so reconciliation never infers absence from a failed look.
   """
 
+  alias Biot.Node.Diagnostic
+
   @type resource :: :allocation | :data | :resolution | :installation | :container | :prepared
   @type reason :: :unavailable | :denied | :timed_out | :unreadable
 
   @enforce_keys [:resource, :reason, :detail]
   defstruct [:resource, :reason, :detail]
 
-  @type t :: %__MODULE__{resource: resource(), reason: reason(), detail: String.t()}
+  @type t :: %__MODULE__{
+          resource: resource(),
+          reason: reason(),
+          detail: Diagnostic.t()
+        }
 end

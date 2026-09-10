@@ -48,9 +48,10 @@ defmodule Step9Run do
   alias Ecto.Adapters.SQL.Sandbox
 
   @home System.get_env("HOME", "/home/biot")
-  @data_root Path.join(@home, "step9-data")
-  @sources Path.join(@home, "step9-sources")
-  @certificates Path.join(@home, "step9-certificates")
+  @work System.get_env("BIOT_STEP9_TEST_ROOT", @home)
+  @data_root Path.join(@work, "step9-data")
+  @sources Path.join(@work, "step9-sources")
+  @certificates Path.join(@work, "step9-certificates")
   @source_prefix "https://sources.biot.test/"
   @build_timeout_ms 600_000
 
@@ -192,6 +193,12 @@ defmodule Step9Run do
       nixpkgs_ref: "nixos-unstable",
       host_command_timeout_ms: 600_000,
       host_command_max_output_bytes: 256_000,
+      host_command_max_stderr_bytes: 256_000,
+      runtime_log_max_bytes: 4_096,
+      mkfifo_executable: "mkfifo",
+      head_executable: "head",
+      cat_executable: "cat",
+      sleep_executable: "sleep",
       retry_budget: 3,
       retry_backoff_min_ms: 2_000,
       retry_backoff_max_ms: 8_000,
@@ -211,8 +218,8 @@ defmodule Step9Run do
     ]
 
     Enum.each(settings, fn {key, value} -> Application.put_env(:biot_node, key, value) end)
-    Application.put_env(:biot_server, :diagnostic_max_bytes, 800)
-    Application.put_env(:biot_server, :diagnostic_timeout_ms, 5_000)
+    Application.put_env(:biot_server, :node_response_max_bytes, 800)
+    Application.put_env(:biot_server, :node_request_timeout_ms, 5_000)
   end
 
   defp start_node do
@@ -509,7 +516,13 @@ defmodule Step9Run do
 
     caller =
       spawn(fn ->
-        Command.run(config.setsid_executable, "sleep", ["99137"], timeout_ms: 120_000)
+        Command.run(
+          config.setsid_executable,
+          HostConfig.capture_tools(config),
+          "sleep",
+          ["99137"],
+          timeout_ms: 120_000
+        )
       end)
 
     {:watch, _caller, process_group, stderr_path} =
@@ -649,7 +662,15 @@ defmodule Step9Run do
     end
   end
 
-  defp gone?(ids), do: Enum.all?(ids, fn id -> not File.exists?("/proc/#{id}") end)
+  defp gone?(ids), do: Enum.all?(ids, &process_ended?/1)
+
+  defp process_ended?(id) do
+    case File.read("/proc/#{id}/stat") do
+      {:error, :enoent} -> true
+      {:ok, stat} -> Regex.match?(~r/^\d+ \(.+\) Z /, stat)
+      {:error, _reason} -> false
+    end
+  end
 
   defp prove_failed_build(actor, node) do
     section("failing build")

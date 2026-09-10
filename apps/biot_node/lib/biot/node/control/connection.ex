@@ -22,6 +22,7 @@ defmodule Biot.Node.Control.Connection do
   alias Biot.Node.Journal
   alias Biot.Node.LocalIntent
   alias Biot.Node.Orphans
+  alias Biot.Node.RuntimeLogs
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.Frame
   alias Biot.Protocol.Liveness
@@ -51,6 +52,7 @@ defmodule Biot.Node.Control.Connection do
       connection_id: nil,
       staging: nil,
       heartbeat_challenge: nil,
+      pending_reads: %{},
       reconnect_token: nil,
       backoff_ms: 250,
       server_host: nil,
@@ -126,6 +128,44 @@ defmodule Biot.Node.Control.Connection do
   def handle_info({:reconnect, token}, %State{reconnect_token: token} = state), do: connect(state)
 
   def handle_info({:reconnect, _token}, state), do: {:noreply, state}
+
+  def handle_info({reference, result}, %State{} = state) when is_reference(reference) do
+    case Map.pop(state.pending_reads, reference) do
+      {nil, _pending} ->
+        {:noreply, state}
+
+      {{task, timer, deadline, reply}, pending} ->
+        Process.cancel_timer(timer)
+        Process.demonitor(task.ref, [:flush])
+        state = %{state | pending_reads: pending}
+        finish_read(state, deadline, reply, result)
+    end
+  end
+
+  def handle_info(
+        {:DOWN, reference, :process, _pid, _reason},
+        %State{} = state
+      ) do
+    case Map.pop(state.pending_reads, reference) do
+      {nil, _pending} ->
+        {:noreply, state}
+
+      {{_task, timer, _deadline, _reply}, pending} ->
+        Process.cancel_timer(timer)
+        {:noreply, %{state | pending_reads: pending}}
+    end
+  end
+
+  def handle_info({:read_timeout, reference}, %State{} = state) do
+    case Map.pop(state.pending_reads, reference) do
+      {nil, _pending} ->
+        {:noreply, state}
+
+      {{task, _timer, _deadline, _reply}, pending} ->
+        Task.Supervisor.terminate_child(Biot.Node.Control.RequestSupervisor, task.pid)
+        {:noreply, %{state | pending_reads: pending}}
+    end
+  end
 
   def handle_info({:announce, _biot_ids}, %State{status: :ready} = state) do
     intents = Journal.intents()
@@ -318,18 +358,21 @@ defmodule Biot.Node.Control.Connection do
   end
 
   defp handle_message(%Message.Diagnostic{} = request, %State{status: :ready} = state) do
-    result =
-      case Diagnostics.fetch(request.diagnostic_id, request.max_bytes) do
-        {:ok, value} -> value
-        :not_found -> :not_found
-      end
+    start_read(
+      state,
+      request.timeout_ms,
+      fn -> query_diagnostic(request) end,
+      &%Message.DiagnosticResult{request_id: request.request_id, result: &1}
+    )
+  end
 
-    message = %Message.DiagnosticResult{request_id: request.request_id, result: result}
-
-    case send_message(state.socket, message, state.version) do
-      :ok -> state
-      {:error, reason} -> disconnect(state, reason)
-    end
+  defp handle_message(%Message.RuntimeLogs{} = request, %State{status: :ready} = state) do
+    start_read(
+      state,
+      request.timeout_ms,
+      fn -> query_runtime_logs(request) end,
+      &%Message.RuntimeLogsResult{request_id: request.request_id, result: &1}
+    )
   end
 
   defp handle_message(
@@ -361,8 +404,17 @@ defmodule Biot.Node.Control.Connection do
 
   defp commit_synchronization(specs, state) do
     case Journal.replace_intents(specs) do
-      :ok -> acknowledge_synchronization(specs, state)
-      {:error, reason} -> disconnect(state, reason)
+      {:ok, removed_biot_ids} ->
+        # Snapshot omission is the one authority that forgets private output for an unassigned Biot.
+        Enum.each(removed_biot_ids, fn biot_id ->
+          Diagnostics.forget(biot_id)
+          RuntimeLogs.forget(biot_id)
+        end)
+
+        acknowledge_synchronization(specs, state)
+
+      {:error, reason} ->
+        disconnect(state, reason)
     end
   end
 
@@ -435,6 +487,7 @@ defmodule Biot.Node.Control.Connection do
     Logger.info("node control connection disconnected: #{inspect(reason)}")
     token = make_ref()
     Process.send_after(self(), {:reconnect, token}, state.backoff_ms)
+    cancel_reads(state.pending_reads)
 
     %{
       state
@@ -445,6 +498,7 @@ defmodule Biot.Node.Control.Connection do
         connection_id: nil,
         staging: nil,
         heartbeat_challenge: nil,
+        pending_reads: %{},
         reconnect_token: token,
         backoff_ms: min(state.backoff_ms * 2, state.backoff_max_ms)
     }
@@ -487,6 +541,50 @@ defmodule Biot.Node.Control.Connection do
   defp registration_id(value) do
     {:ok, registration_id} = RegistrationId.parse(value)
     registration_id
+  end
+
+  defp start_read(state, timeout_ms, query, reply) do
+    task = Task.Supervisor.async_nolink(Biot.Node.Control.RequestSupervisor, query)
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    timer = Process.send_after(self(), {:read_timeout, task.ref}, timeout_ms)
+    pending = Map.put(state.pending_reads, task.ref, {task, timer, deadline, reply})
+    %{state | pending_reads: pending}
+  end
+
+  defp finish_read(state, deadline, reply, result) do
+    if System.monotonic_time(:millisecond) <= deadline do
+      send_read_result(state, reply.(result))
+    else
+      {:noreply, state}
+    end
+  end
+
+  defp send_read_result(state, message) do
+    case send_message(state.socket, message, state.version) do
+      :ok -> {:noreply, state}
+      {:error, reason} -> {:noreply, disconnect(state, reason)}
+    end
+  end
+
+  defp query_diagnostic(request) do
+    case Diagnostics.fetch(request.diagnostic_id, request.max_bytes) do
+      {:ok, value} -> value
+      :not_found -> :not_found
+    end
+  end
+
+  defp query_runtime_logs(request) do
+    case RuntimeLogs.fetch(request.biot_id, request.max_bytes) do
+      {:ok, value} -> value
+      :not_found -> :not_found
+    end
+  end
+
+  defp cancel_reads(pending_reads) do
+    Enum.each(pending_reads, fn {_reference, {task, timer, _deadline, _reply}} ->
+      Process.cancel_timer(timer)
+      Task.Supervisor.terminate_child(Biot.Node.Control.RequestSupervisor, task.pid)
+    end)
   end
 
   defp tls_options(tls) do

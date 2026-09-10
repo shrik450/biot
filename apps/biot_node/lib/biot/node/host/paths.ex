@@ -6,12 +6,14 @@ defmodule Biot.Node.Host.Paths do
   container identity sit beside those mounts. Each environment has a derived build manifest and a
   `root` symlink into the Nix store. Inspection reads `bundle.json` through that root. The SQLite journal and `flock` file sit directly below the data root. A Podman
   module selects the configured rootless network helper. Each Biot also has an empty root
-  filesystem owned by its UID range.
+  filesystem owned by its UID range. Diagnostics and runtime logs are node-private siblings of
+  the runtime and environment directories, so no container mount includes them.
   """
 
   alias Biot.Node.Host.Config
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.EnvironmentId
+  alias Biot.Protocol.PrivateDiagnosticId
 
   @spec lock(Config.t() | String.t()) :: String.t()
   def lock(%Config{data_root: root}), do: lock(root)
@@ -27,6 +29,25 @@ defmodule Biot.Node.Host.Paths do
 
   @spec podman_config(Config.t()) :: String.t()
   def podman_config(%Config{data_root: root}), do: Path.join(root, "podman.conf")
+
+  @spec diagnostics(Config.t()) :: String.t()
+  def diagnostics(%Config{data_root: root}), do: Path.join(root, "diagnostics")
+
+  @spec diagnostic(Config.t(), PrivateDiagnosticId.t()) :: String.t()
+  def diagnostic(config, diagnostic_id) do
+    Path.join(diagnostics(config), PrivateDiagnosticId.to_string(diagnostic_id))
+  end
+
+  @spec runtime_logs(Config.t()) :: String.t()
+  def runtime_logs(%Config{data_root: root}), do: Path.join(root, "runtime-logs")
+
+  @spec runtime_log(Config.t(), BiotId.t()) :: String.t()
+  def runtime_log(config, biot_id) do
+    Path.join(runtime_logs(config), BiotId.to_string(biot_id) <> ".log")
+  end
+
+  @spec runtime_log_metadata(Config.t(), BiotId.t()) :: String.t()
+  def runtime_log_metadata(config, biot_id), do: runtime_log(config, biot_id) <> ".metadata.json"
 
   @spec biots(Config.t()) :: String.t()
   def biots(%Config{data_root: root}), do: Path.join(root, "biots")

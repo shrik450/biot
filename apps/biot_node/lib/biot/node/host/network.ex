@@ -28,7 +28,7 @@ defmodule Biot.Node.Host.Network do
       {:ok, %Command.Result{} = result} ->
         if Podman.absent?(:network, result),
           do: :absent,
-          else: {:unknown, {:podman, result.status, Command.diagnostic(result)}}
+          else: {:unknown, Outcome.from_command(:host_unavailable, result)}
 
       {:error, reason} ->
         {:unknown, reason}

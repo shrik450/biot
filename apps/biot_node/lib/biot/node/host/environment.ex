@@ -3,6 +3,7 @@ defmodule Biot.Node.Host.Environment do
 
   alias Biot.Node.Allocation
   alias Biot.Node.ArtifactId
+  alias Biot.Node.Diagnostic
   alias Biot.Node.EnvironmentBundle
   alias Biot.Node.Host.Command
   alias Biot.Node.Host.Config
@@ -99,7 +100,11 @@ defmodule Biot.Node.Host.Environment do
         end
 
       _other_biot_id ->
-        {:error, Outcome.new(:ownership_mismatch, "another biot owns the environment")}
+        {:error,
+         Outcome.new(
+           :ownership_mismatch,
+           Diagnostic.text("another biot owns the environment")
+         )}
     end
   end
 
@@ -109,9 +114,14 @@ defmodule Biot.Node.Host.Environment do
     path = Path.join(Paths.environment_root(config, environment_id), "bundle.json")
 
     case FileSystem.read(path) do
-      {:present, content} -> parse_bundle(content)
-      :absent -> {:error, Outcome.new(:host_unavailable, "the prepared bundle is absent")}
-      {:error, reason} -> {:error, Outcome.from_reason(reason)}
+      {:present, content} ->
+        parse_bundle(content)
+
+      :absent ->
+        {:error, Outcome.new(:host_unavailable, Diagnostic.text("the prepared bundle is absent"))}
+
+      {:error, reason} ->
+        {:error, Outcome.from_reason(reason)}
     end
   end
 
@@ -151,7 +161,11 @@ defmodule Biot.Node.Host.Environment do
         {:ok, :stale}
 
       {:error, :ownership_mismatch} ->
-        {:error, Outcome.new(:ownership_mismatch, "another biot owns the environment")}
+        {:error,
+         Outcome.new(
+           :ownership_mismatch,
+           Diagnostic.text("another biot owns the environment")
+         )}
 
       {:error, reason} ->
         {:error, Outcome.from_reason(reason)}
@@ -179,6 +193,7 @@ defmodule Biot.Node.Host.Environment do
     result =
       Command.run(
         config.setsid_executable,
+        Config.capture_tools(config),
         config.nix_executable,
         [
           "build",
@@ -196,7 +211,8 @@ defmodule Biot.Node.Host.Environment do
           Paths.environment_root(config, environment_id)
         ],
         timeout_ms: config.command_timeout_ms,
-        max_output_bytes: config.command_max_output_bytes
+        max_output_bytes: config.command_max_output_bytes,
+        max_stderr_bytes: config.command_max_stderr_bytes
       )
 
     case result do
@@ -217,10 +233,14 @@ defmodule Biot.Node.Host.Environment do
         {:ok, artifact_id}
 
       :absent ->
-        {:error, Outcome.new(:build_failed, "nix build did not create its output link")}
+        {:error,
+         Outcome.new(
+           :build_failed,
+           Diagnostic.text("nix build did not create its output link")
+         )}
 
       {:error, {_reason, detail}} ->
-        {:error, Outcome.new(:host_unavailable, detail)}
+        {:error, Outcome.new(:host_unavailable, Diagnostic.text(detail))}
     end
   end
 
@@ -259,7 +279,12 @@ defmodule Biot.Node.Host.Environment do
          {:ok, bundle} <- EnvironmentBundle.parse(value) do
       {:ok, bundle}
     else
-      _error -> {:error, Outcome.new(:invalid_configuration, "the prepared bundle is invalid")}
+      _error ->
+        {:error,
+         Outcome.new(
+           :invalid_configuration,
+           Diagnostic.text("the prepared bundle is invalid")
+         )}
     end
   end
 
@@ -283,7 +308,10 @@ defmodule Biot.Node.Host.Environment do
 
       {:present, :directory} ->
         {:error,
-         Outcome.new(:host_unavailable, "the environment directory has no ownership record")}
+         Outcome.new(
+           :host_unavailable,
+           Diagnostic.text("the environment directory has no ownership record")
+         )}
 
       {:error, reason} ->
         {:error, Outcome.from_reason(reason)}

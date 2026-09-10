@@ -1,131 +1,121 @@
 defmodule Biot.Node.Diagnostics do
   @moduledoc """
-  The node's bounded diagnostic log. For each biot revision it keeps the output of the latest
-  failed attempt under a `PrivateDiagnosticId`, which the reported `Failure` carries, so an
-  authorized owner can ask the server for a useful excerpt afterwards.
+  Stores bounded diagnostic files under the node data root and indexes them in the journal.
 
-  One process owns the log and holds it in a protected ETS table. Writes go through the process
-  because the two bounds, the bytes kept per entry and the entries kept per biot, need one writer
-  to stay correct. Reads go straight to the table, so a fetch never waits behind a controller
-  storing a large build log; the server fetches with a deadline and expects a bounded answer
-  inside it.
-
-  Both bounds are per biot, so one noisy biot cannot push another biot's diagnostic out of the
-  log.
+  Each Biot revision and lifecycle stage has one current entry. The journal keeps entries across
+  revisions and destroyed allocations until a server snapshot omits the Biot. Files hold the
+  content, while the journal owns identity, truncation, replacement, and retention order.
   """
 
-  use GenServer
-
+  alias Biot.Node.Diagnostic
+  alias Biot.Node.Host.Config
+  alias Biot.Node.Host.FileSystem
+  alias Biot.Node.Host.Paths
+  alias Biot.Node.Journal
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.CanonicalUuid
+  alias Biot.Protocol.Failure
   alias Biot.Protocol.PrivateDiagnosticId
 
-  @table __MODULE__
+  require Logger
 
-  defmodule State do
-    @moduledoc false
+  @doc "Stores one failed stage and returns the private ID carried by its failure."
+  @spec put(BiotId.t(), pos_integer(), Failure.stage(), Diagnostic.t()) ::
+          PrivateDiagnosticId.t()
+  def put(%BiotId{} = biot_id, revision, stage, {content, source_truncated})
+      when is_integer(revision) and revision > 0 and is_atom(stage) and is_binary(content) and
+             is_boolean(source_truncated) do
+    config = Config.from_application!()
+    diagnostic_id = mint()
+    {stored, entry_truncated} = truncate_head(content, max_entry_bytes())
+    path = Paths.diagnostic(config, diagnostic_id)
+    :ok = FileSystem.write_atomic(path, stored)
 
-    @enforce_keys [:max_entry_bytes, :max_entries_per_biot]
-    defstruct [:max_entry_bytes, :max_entries_per_biot, biots: %{}]
+    case Journal.index_diagnostic(
+           diagnostic_id,
+           biot_id,
+           revision,
+           stage,
+           source_truncated or entry_truncated,
+           max_entries_per_biot()
+         ) do
+      {:ok, stale_ids} ->
+        remove_files(config, stale_ids)
+        diagnostic_id
+
+      {:error, reason} ->
+        remove_files(config, [diagnostic_id])
+        raise "could not index diagnostic: #{inspect(reason)}"
+    end
   end
 
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(options \\ []) do
-    GenServer.start_link(__MODULE__, Keyword.delete(options, :name), name: __MODULE__)
+  @doc "Returns a bounded diagnostic excerpt and whether capture or this read cut content."
+  @spec fetch(PrivateDiagnosticId.t(), pos_integer()) :: {:ok, Diagnostic.t()} | :not_found
+  def fetch(%PrivateDiagnosticId{} = diagnostic_id, max_bytes)
+      when is_integer(max_bytes) and max_bytes > 0 do
+    config = Config.from_application!()
+
+    case Journal.diagnostic(diagnostic_id) do
+      nil ->
+        :not_found
+
+      truncated ->
+        fetch_file(config, diagnostic_id, truncated, max_bytes)
+    end
   end
 
-  @doc "Stores the diagnostic for one biot revision and returns the id the failure reports."
-  @spec put(BiotId.t(), pos_integer(), binary()) :: PrivateDiagnosticId.t()
-  def put(%BiotId{} = biot_id, revision, content)
-      when is_integer(revision) and revision > 0 and is_binary(content) do
-    GenServer.call(__MODULE__, {:put, biot_id, revision, content})
+  @doc "Forgets every diagnostic after a server snapshot stops assigning the Biot to this node."
+  @spec forget(BiotId.t()) :: :ok
+  def forget(%BiotId{} = biot_id) do
+    config = Config.from_application!()
+    {:ok, diagnostic_ids} = Journal.forget_diagnostics(biot_id)
+    remove_files(config, diagnostic_ids)
   end
 
-  @doc "The stored diagnostic, bounded by the caller's limit, and whether anything was cut."
-  @spec fetch(PrivateDiagnosticId.t(), pos_integer()) ::
-          {:ok, {binary(), boolean()}} | :not_found
-  def fetch(%PrivateDiagnosticId{} = diagnostic_id, max_bytes) when max_bytes > 0 do
-    case :ets.lookup(@table, diagnostic_id) do
-      [{^diagnostic_id, content, stored_truncated}] ->
-        {content, request_truncated} = truncate(content, max_bytes)
+  defp fetch_file(config, diagnostic_id, stored_truncated, max_bytes) do
+    case File.read(Paths.diagnostic(config, diagnostic_id)) do
+      {:ok, content} ->
+        {content, request_truncated} = truncate_head(content, max_bytes)
         {:ok, {content, stored_truncated or request_truncated}}
 
-      [] ->
+      {:error, :enoent} ->
+        :not_found
+
+      {:error, reason} ->
+        Logger.warning("could not read diagnostic file: #{inspect(reason)}")
         :not_found
     end
   end
 
-  @doc "Removes one stored diagnostic of a biot, for a failure the node will never report."
-  @spec discard(BiotId.t(), PrivateDiagnosticId.t()) :: :ok
-  def discard(%BiotId{} = biot_id, %PrivateDiagnosticId{} = diagnostic_id) do
-    GenServer.call(__MODULE__, {:discard, biot_id, diagnostic_id})
+  # The index is the authority, so an unlinked stale file cannot keep a diagnostic alive.
+  defp remove_files(config, diagnostic_ids) do
+    Enum.each(diagnostic_ids, fn diagnostic_id ->
+      case File.rm(Paths.diagnostic(config, diagnostic_id)) do
+        :ok -> :ok
+        {:error, :enoent} -> :ok
+        {:error, reason} -> Logger.warning("could not remove diagnostic file: #{inspect(reason)}")
+      end
+    end)
+
+    :ok
   end
 
-  @doc "Drops every diagnostic of a biot this node no longer owns."
-  @spec forget(BiotId.t()) :: :ok
-  def forget(%BiotId{} = biot_id), do: GenServer.call(__MODULE__, {:forget, biot_id})
-
-  @impl true
-  def init(options) do
-    @table = :ets.new(@table, [:named_table, :set, :protected, read_concurrency: true])
-
-    {:ok,
-     %State{
-       max_entry_bytes: setting(options, :diagnostic_max_entry_bytes, 65_536),
-       max_entries_per_biot: setting(options, :diagnostic_max_entries_per_biot, 5)
-     }}
-  end
-
-  @impl true
-  def handle_call({:put, biot_id, revision, content}, _from, state) do
-    diagnostic_id = mint()
-    {stored, truncated} = truncate(content, state.max_entry_bytes)
-    true = :ets.insert(@table, {diagnostic_id, stored, truncated})
-
-    {replaced, older} =
-      state.biots
-      |> Map.get(biot_id, [])
-      |> Enum.split_with(&match?({^revision, _diagnostic_id}, &1))
-
-    {kept, evicted} =
-      Enum.split([{revision, diagnostic_id} | older], state.max_entries_per_biot)
-
-    delete(replaced ++ evicted)
-    {:reply, diagnostic_id, %{state | biots: Map.put(state.biots, biot_id, kept)}}
-  end
-
-  def handle_call({:discard, biot_id, diagnostic_id}, _from, state) do
-    {dropped, kept} =
-      state.biots
-      |> Map.get(biot_id, [])
-      |> Enum.split_with(&match?({_revision, ^diagnostic_id}, &1))
-
-    delete(dropped)
-    {:reply, :ok, %{state | biots: Map.put(state.biots, biot_id, kept)}}
-  end
-
-  def handle_call({:forget, biot_id}, _from, state) do
-    {entries, biots} = Map.pop(state.biots, biot_id, [])
-    delete(entries)
-    {:reply, :ok, %{state | biots: biots}}
-  end
-
-  defp delete(entries) do
-    Enum.each(entries, fn {_revision, diagnostic_id} -> :ets.delete(@table, diagnostic_id) end)
-  end
-
-  defp truncate(content, max_bytes) when byte_size(content) > max_bytes do
+  defp truncate_head(content, max_bytes) when byte_size(content) > max_bytes do
     {binary_part(content, 0, max_bytes), true}
   end
 
-  defp truncate(content, _max_bytes), do: {content, false}
+  defp truncate_head(content, _max_bytes), do: {content, false}
 
   defp mint do
     {:ok, diagnostic_id} = PrivateDiagnosticId.parse(CanonicalUuid.generate())
     diagnostic_id
   end
 
-  defp setting(options, key, default) do
-    Keyword.get(options, key, Application.get_env(:biot_node, key, default))
+  defp max_entry_bytes do
+    Application.fetch_env!(:biot_node, :diagnostic_max_entry_bytes)
+  end
+
+  defp max_entries_per_biot do
+    Application.fetch_env!(:biot_node, :diagnostic_max_entries_per_biot)
   end
 end

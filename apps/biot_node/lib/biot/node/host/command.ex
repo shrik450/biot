@@ -13,7 +13,7 @@ defmodule Biot.Node.Host.Command do
   then sends that line. A caller that dies during the handshake closes the port, so the shell reads
   the end of its input and exits without running the command.
 
-  `run/4` waits for a command that ends. `open/4` hands a `Stream` to a caller that reads a command
+  `run/5` waits for a command that ends. `open/5` hands a `Stream` to a caller that reads a command
   which does not, such as an event stream, and that caller ends its ownership with `close/1`. Both
   start the command the same way, so both leave the group with the reaper.
   """
@@ -22,25 +22,60 @@ defmodule Biot.Node.Host.Command do
   alias Biot.Protocol.CanonicalUuid
 
   @cancel :biot_command_cancel
+  @default_max_stderr_bytes 256_000
+  @stderr_reader_grace_ms 100
 
-  # `read` returning end of input means the caller died before it owned the group, so the command
-  # must not start. `exec` keeps the announced group id: the command replaces the shell.
+  # The wrapper waits for the reaper's go line, then starts the reader first because a read-only
+  # fifo open blocks until a writer arrives. The command runs while `head` saves the bound, then
+  # `exec` makes the drain use the reader's own PID. A trapped signal interrupts `wait`, so the
+  # guard can end a reader held by a grandchild; before `head` starts, TERM finds no child to
+  # forward to. Ending the reader can lose buffered bytes, but a guard-ended reader reports
+  # complete output. The wrapper then exits with the command's status, and only the reaper removes
+  # the capture files.
   @script """
   printf '%s\\n' "$$"
   read go || exit 0
-  exec "$@" 2>"$BIOT_COMMAND_STDERR"
+  stderr_pipe="$BIOT_COMMAND_STDERR.pipe"
+  {
+    exec 3<"$stderr_pipe"
+    trap '
+      kill "$reader_child" 2>/dev/null
+      wait "$reader_child" 2>/dev/null
+      exit 0
+    ' TERM
+    "$BIOT_COMMAND_HEAD" -c "$BIOT_COMMAND_STDERR_CAPTURE_BYTES" <&3 >"$BIOT_COMMAND_STDERR" &
+    reader_child=$!
+    wait "$reader_child"
+    exec "$BIOT_COMMAND_CAT" <&3 >/dev/null
+  } &
+  stderr_reader=$!
+  "$@" 2>"$stderr_pipe" &
+  command=$!
+  wait "$command"
+  status=$?
+  {
+    "$BIOT_COMMAND_SLEEP" #{@stderr_reader_grace_ms / 1_000}
+    kill "$stderr_reader" 2>/dev/null
+  } &
+  reader_guard=$!
+  wait "$stderr_reader" 2>/dev/null
+  kill "$reader_guard" 2>/dev/null
+  wait "$reader_guard" 2>/dev/null
+  exit "$status"
   """
 
   defmodule Result do
     @moduledoc "The result of one completed host command."
 
-    @enforce_keys [:status, :stdout, :stderr]
-    defstruct [:status, :stdout, :stderr]
+    @enforce_keys [:status, :stdout, :stderr, :stdout_truncated, :stderr_truncated]
+    defstruct [:status, :stdout, :stderr, :stdout_truncated, :stderr_truncated]
 
     @type t :: %__MODULE__{
             status: non_neg_integer(),
             stdout: binary(),
-            stderr: binary()
+            stderr: binary(),
+            stdout_truncated: boolean(),
+            stderr_truncated: boolean()
           }
   end
 
@@ -52,19 +87,32 @@ defmodule Biot.Node.Host.Command do
     The caller owns the command until it ends that ownership through `Biot.Node.Host.Command`.
     """
 
-    @enforce_keys [:port, :stderr_path, :ticket]
-    defstruct [:port, :stderr_path, :ticket]
+    @enforce_keys [:port, :stderr_path, :max_stderr_bytes, :ticket]
+    defstruct [:port, :stderr_path, :max_stderr_bytes, :ticket]
 
-    @type t :: %__MODULE__{port: port(), stderr_path: Path.t(), ticket: reference()}
+    @type t :: %__MODULE__{
+            port: port(),
+            stderr_path: Path.t(),
+            max_stderr_bytes: pos_integer(),
+            ticket: reference()
+          }
   end
+
+  @type capture_tools :: %{
+          mkfifo: Path.t(),
+          head: Path.t(),
+          cat: Path.t(),
+          sleep: Path.t()
+        }
 
   @type option ::
           {:cd, String.t()}
           | {:env, [{String.t(), String.t()}]}
           | {:timeout_ms, pos_integer()}
           | {:max_output_bytes, pos_integer()}
+          | {:max_stderr_bytes, pos_integer()}
 
-  @spec run(String.t(), String.t(), [String.t()], [option()]) ::
+  @spec run(String.t(), capture_tools(), String.t(), [String.t()], [option()]) ::
           {:ok, Result.t()}
           | {:error,
              :executable_not_found
@@ -72,13 +120,15 @@ defmodule Biot.Node.Host.Command do
              | :timed_out
              | :cancelled
              | :start_failed
+             | :stderr_capture_failed
              | term()}
-  def run(setsid_executable, executable, arguments, options \\ []) do
+  def run(setsid_executable, capture_tools, executable, arguments, options) do
     max_bytes = Keyword.get(options, :max_output_bytes, 256_000)
 
     with {:ok, stream, stdout, deadline} <-
-           launch(setsid_executable, executable, arguments, options) do
-      collect(stream, deadline, max_bytes, append(<<>>, stdout, max_bytes))
+           launch(setsid_executable, capture_tools, executable, arguments, options) do
+      {stdout, stdout_truncated} = append(<<>>, stdout, max_bytes)
+      collect(stream, deadline, max_bytes, stdout, stdout_truncated)
     end
   end
 
@@ -90,13 +140,18 @@ defmodule Biot.Node.Host.Command do
   group when the caller dies, so a command that never ends on its own still belongs to one live
   process. A caller that stays alive across commands calls `close/1` for each one that ends.
   """
-  @spec open(String.t(), String.t(), [String.t()], [option()]) ::
+  @spec open(String.t(), capture_tools(), String.t(), [String.t()], [option()]) ::
           {:ok, Stream.t()}
           | {:error,
-             :executable_not_found | :setsid_not_found | :timed_out | :cancelled | :start_failed}
-  def open(setsid_executable, executable, arguments, options \\ []) do
+             :executable_not_found
+             | :setsid_not_found
+             | :timed_out
+             | :cancelled
+             | :start_failed
+             | :stderr_capture_failed}
+  def open(setsid_executable, capture_tools, executable, arguments, options) do
     with {:ok, stream, _stdout, _deadline} <-
-           launch(setsid_executable, executable, arguments, options) do
+           launch(setsid_executable, capture_tools, executable, arguments, options) do
       {:ok, stream}
     end
   end
@@ -119,19 +174,15 @@ defmodule Biot.Node.Host.Command do
     :ok
   end
 
-  @spec diagnostic(Result.t()) :: binary()
-  def diagnostic(%Result{stderr: stderr, stdout: stdout}) do
-    if stderr == "", do: stdout, else: stderr
-  end
-
   # The command starts only after the go line, so nothing has written output yet and the handshake
-  # leftover is empty. `run/4` still folds it in, because the port protocol allows it.
-  defp launch(setsid_executable, executable, arguments, options) do
+  # leftover is empty. `run/5` still folds it in, because the port protocol allows it.
+  defp launch(setsid_executable, capture_tools, executable, arguments, options) do
     with {:ok, path} <- executable_path(executable, :executable_not_found),
          {:ok, setsid_path} <- executable_path(setsid_executable, :setsid_not_found) do
       deadline = deadline(Keyword.get(options, :timeout_ms, 60_000))
 
-      with {:ok, stream, stdout} <- start(setsid_path, path, arguments, options, deadline) do
+      with {:ok, stream, stdout} <-
+             start(setsid_path, path, arguments, options, capture_tools, deadline) do
         {:ok, stream, stdout, deadline}
       end
     end
@@ -144,27 +195,108 @@ defmodule Biot.Node.Host.Command do
     end
   end
 
-  @spec start(Path.t(), Path.t(), [String.t()], [option()], integer()) ::
-          {:ok, Stream.t(), binary()} | {:error, :timed_out | :cancelled | :start_failed}
-  defp start(setsid_path, path, arguments, options, deadline) do
+  @spec start(
+          Path.t(),
+          Path.t(),
+          [String.t()],
+          [option()],
+          capture_tools(),
+          integer()
+        ) ::
+          {:ok, Stream.t(), binary()}
+          | {:error, :timed_out | :cancelled | :start_failed | :stderr_capture_failed}
+  defp start(setsid_path, path, arguments, options, capture_tools, deadline) do
     stderr_path = Path.join(System.tmp_dir!(), "biot-command-#{CanonicalUuid.generate()}")
+
+    with :ok <- create_stderr_pipe(capture_tools.mkfifo, stderr_path) do
+      start_port(
+        setsid_path,
+        path,
+        arguments,
+        options,
+        capture_tools,
+        stderr_path,
+        deadline
+      )
+    end
+  end
+
+  @spec start_port(
+          Path.t(),
+          Path.t(),
+          [String.t()],
+          [option()],
+          capture_tools(),
+          Path.t(),
+          integer()
+        ) ::
+          {:ok, Stream.t(), binary()}
+          | {:error, :timed_out | :cancelled | :start_failed}
+  defp start_port(
+         setsid_path,
+         path,
+         arguments,
+         options,
+         tools,
+         stderr_path,
+         deadline
+       ) do
+    max_stderr_bytes = Keyword.get(options, :max_stderr_bytes, @default_max_stderr_bytes)
 
     port =
       Port.open(
         {:spawn_executable, String.to_charlist(setsid_path)},
-        port_options(path, arguments, stderr_path, options)
+        port_options(path, arguments, stderr_path, options, tools, max_stderr_bytes)
       )
 
-    with {:ok, process_group, stdout} <- handshake(port, <<>>, deadline) do
-      ticket = Reaper.watch(process_group, stderr_path)
-      go(port)
-      {:ok, %Stream{port: port, stderr_path: stderr_path, ticket: ticket}, stdout}
+    case handshake(port, <<>>, deadline) do
+      {:ok, process_group, stdout} ->
+        ticket = Reaper.watch(process_group, stderr_path)
+        go(port)
+
+        stream = %Stream{
+          port: port,
+          stderr_path: stderr_path,
+          max_stderr_bytes: max_stderr_bytes,
+          ticket: ticket
+        }
+
+        {:ok, stream, stdout}
+
+      {:error, _reason} = error ->
+        File.rm(stderr_path <> ".pipe")
+        error
     end
   end
 
-  defp port_options(path, arguments, stderr_path, options) do
+  defp create_stderr_pipe(mkfifo, stderr_path) do
+    case System.cmd(mkfifo, [stderr_path <> ".pipe"], stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {_output, _status} -> {:error, :stderr_capture_failed}
+    end
+  end
+
+  @spec port_options(
+          Path.t(),
+          [String.t()],
+          Path.t(),
+          [option()],
+          capture_tools(),
+          pos_integer()
+        ) :: [term()]
+  defp port_options(path, arguments, stderr_path, options, tools, max_stderr_bytes) do
     shell_arguments = ["--wait", "/bin/sh", "-c", @script, "biot-command", path | arguments]
-    environment = [{"BIOT_COMMAND_STDERR", stderr_path} | Keyword.get(options, :env, [])]
+
+    environment =
+      Keyword.get(options, :env, []) ++
+        [
+          {"BIOT_COMMAND_STDERR", stderr_path},
+          # The extra byte records overflow in the capture itself without exposing it in Result.
+          {"BIOT_COMMAND_STDERR_CAPTURE_BYTES", Integer.to_string(max_stderr_bytes + 1)},
+          {"BIOT_COMMAND_HEAD", tools.head},
+          {"BIOT_COMMAND_CAT", tools.cat},
+          {"BIOT_COMMAND_SLEEP", tools.sleep}
+        ]
 
     [:binary, :exit_status, :hide, args: Enum.map(shell_arguments, &String.to_charlist/1)]
     |> add_directory(Keyword.get(options, :cd))
@@ -208,7 +340,7 @@ defmodule Biot.Node.Host.Command do
     end
   end
 
-  # A shell that is gone already cannot run the command, and `collect/4` reports the exit status it
+  # A shell that is gone already cannot run the command, and `collect/5` reports the exit status it
   # left behind.
   defp go(port) do
     if Port.info(port), do: Port.command(port, "go\n")
@@ -220,7 +352,13 @@ defmodule Biot.Node.Host.Command do
     {:error, reason}
   end
 
-  defp collect(%Stream{port: port} = stream, deadline, max_bytes, stdout) do
+  defp collect(
+         %Stream{port: port} = stream,
+         deadline,
+         max_bytes,
+         stdout,
+         stdout_truncated
+       ) do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     if remaining <= 0 do
@@ -231,10 +369,11 @@ defmodule Biot.Node.Host.Command do
           abandon(stream, :cancelled)
 
         {^port, {:data, data}} ->
-          collect(stream, deadline, max_bytes, append(stdout, data, max_bytes))
+          {stdout, truncated} = append(stdout, data, max_bytes)
+          collect(stream, deadline, max_bytes, stdout, stdout_truncated or truncated)
 
         {^port, {:exit_status, status}} ->
-          finish(stream, status, stdout, max_bytes)
+          finish(stream, status, stdout, stdout_truncated)
       after
         remaining ->
           abandon(stream, :timed_out)
@@ -249,30 +388,34 @@ defmodule Biot.Node.Host.Command do
   end
 
   # The stderr file is read before ownership ends, because ending it removes the file.
-  defp finish(%Stream{} = stream, status, stdout, max_bytes) do
-    stderr = read_tail(stream.stderr_path, max_bytes)
+  defp finish(%Stream{} = stream, status, stdout, stdout_truncated) do
+    {stderr, stderr_truncated} = read_stderr(stream.stderr_path, stream.max_stderr_bytes)
     :ok = close(stream)
 
-    {:ok, %Result{status: status, stdout: stdout, stderr: stderr}}
+    {:ok,
+     %Result{
+       status: status,
+       stdout: stdout,
+       stderr: stderr,
+       stdout_truncated: stdout_truncated,
+       stderr_truncated: stderr_truncated
+     }}
   end
 
-  defp read_tail(path, max_bytes) do
-    case File.open(path, [:read, :binary]) do
-      {:ok, file} ->
-        try do
-          {:ok, size} = :file.position(file, :eof)
-          bytes = min(size, max_bytes)
-          {:ok, _position} = :file.position(file, size - bytes)
-          IO.binread(file, bytes)
-        after
-          File.close(file)
+  defp read_stderr(path, max_bytes) do
+    case File.read(path) do
+      {:ok, content} ->
+        if byte_size(content) > max_bytes do
+          {binary_part(content, 0, max_bytes), true}
+        else
+          {content, false}
         end
 
       {:error, :enoent} ->
-        ""
+        {"", false}
 
       {:error, reason} ->
-        "could not read command stderr: #{inspect(reason)}"
+        {"could not read command stderr: #{inspect(reason)}", false}
     end
   end
 
@@ -288,9 +431,9 @@ defmodule Biot.Node.Host.Command do
 
     if byte_size(combined) > max_bytes do
       start = byte_size(combined) - max_bytes
-      binary_part(combined, start, max_bytes)
+      {binary_part(combined, start, max_bytes), true}
     else
-      combined
+      {combined, false}
     end
   end
 

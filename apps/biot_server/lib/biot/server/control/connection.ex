@@ -38,7 +38,7 @@ defmodule Biot.Server.Control.Connection do
       version: nil,
       node_id: nil,
       connection_id: nil,
-      pending_diagnostics: %{}
+      pending_requests: %{}
     ]
   end
 
@@ -51,6 +51,20 @@ defmodule Biot.Server.Control.Connection do
           {:ok, {binary(), boolean()}} | {:error, :not_found | :temporarily_unavailable}
   def request_diagnostic(pid, diagnostic_id, max_bytes, timeout_ms) do
     GenServer.call(pid, {:diagnostic, diagnostic_id, max_bytes, timeout_ms}, timeout_ms + 1_000)
+  catch
+    :exit, _reason -> {:error, :temporarily_unavailable}
+  end
+
+  @spec request_runtime_logs(
+          pid(),
+          Biot.Protocol.BiotId.t(),
+          pos_integer(),
+          pos_integer()
+        ) ::
+          {:ok, {Biot.Protocol.IncarnationId.t(), binary(), boolean()}}
+          | {:error, :not_found | :temporarily_unavailable}
+  def request_runtime_logs(pid, biot_id, max_bytes, timeout_ms) do
+    GenServer.call(pid, {:runtime_logs, biot_id, max_bytes, timeout_ms}, timeout_ms + 1_000)
   catch
     :exit, _reason -> {:error, :temporarily_unavailable}
   end
@@ -149,14 +163,14 @@ defmodule Biot.Server.Control.Connection do
     {:noreply, {socket, state}}
   end
 
-  def handle_info({:diagnostic_timeout, request_id}, {socket, %State{} = state}) do
-    case Map.pop(state.pending_diagnostics, request_id) do
+  def handle_info({:request_timeout, request_id}, {socket, %State{} = state}) do
+    case Map.pop(state.pending_requests, request_id) do
       {nil, _pending} ->
         {:noreply, {socket, state}}
 
-      {{from, _timer}, pending} ->
+      {{from, _timer, _reply}, pending} ->
         GenServer.reply(from, {:error, :temporarily_unavailable})
-        {:noreply, {socket, %{state | pending_diagnostics: pending}}}
+        {:noreply, {socket, %{state | pending_requests: pending}}}
     end
   end
 
@@ -171,27 +185,40 @@ defmodule Biot.Server.Control.Connection do
         from,
         {socket, %State{phase: :ready} = state}
       ) do
-    request_id = random_token()
-
-    message = %Message.Diagnostic{
-      request_id: request_id,
-      diagnostic_id: diagnostic_id,
-      max_bytes: max_bytes,
-      timeout_ms: timeout_ms
-    }
-
-    case send_message(socket, message, state.version) do
-      :ok ->
-        timer = Process.send_after(self(), {:diagnostic_timeout, request_id}, timeout_ms)
-        pending = Map.put(state.pending_diagnostics, request_id, {from, timer})
-        {:noreply, {socket, %{state | pending_diagnostics: pending}}}
-
-      {:error, _reason} ->
-        {:reply, {:error, :temporarily_unavailable}, {socket, state}}
+    message = fn request_id ->
+      %Message.Diagnostic{
+        request_id: request_id,
+        diagnostic_id: diagnostic_id,
+        max_bytes: max_bytes,
+        timeout_ms: timeout_ms
+      }
     end
+
+    start_request(socket, state, from, timeout_ms, message, &diagnostic_reply/1)
   end
 
   def handle_call({:diagnostic, _id, _max, _timeout}, _from, {socket, %State{} = state}) do
+    {:reply, {:error, :temporarily_unavailable}, {socket, state}}
+  end
+
+  def handle_call(
+        {:runtime_logs, biot_id, max_bytes, timeout_ms},
+        from,
+        {socket, %State{phase: :ready} = state}
+      ) do
+    message = fn request_id ->
+      %Message.RuntimeLogs{
+        request_id: request_id,
+        biot_id: biot_id,
+        max_bytes: max_bytes,
+        timeout_ms: timeout_ms
+      }
+    end
+
+    start_request(socket, state, from, timeout_ms, message, &runtime_logs_reply/1)
+  end
+
+  def handle_call({:runtime_logs, _id, _max, _timeout}, _from, {socket, %State{} = state}) do
     {:reply, {:error, :temporarily_unavailable}, {socket, state}}
   end
 
@@ -359,15 +386,15 @@ defmodule Biot.Server.Control.Connection do
          _socket,
          %State{phase: :ready} = state
        ) do
-    case Map.pop(state.pending_diagnostics, request_id) do
-      {nil, _pending} ->
-        {:continue, state}
+    complete_request(state, request_id, result)
+  end
 
-      {{from, timer}, pending} ->
-        Process.cancel_timer(timer)
-        GenServer.reply(from, diagnostic_reply(result))
-        {:continue, %{state | pending_diagnostics: pending}}
-    end
+  defp handle_message(
+         %Message.RuntimeLogsResult{request_id: request_id, result: result},
+         _socket,
+         %State{phase: :ready} = state
+       ) do
+    complete_request(state, request_id, result)
   end
 
   defp handle_message(_message, _socket, state), do: close(:unexpected_message, state)
@@ -450,8 +477,9 @@ defmodule Biot.Server.Control.Connection do
   defp cleanup(%State{} = state) do
     NodeConnections.delete(state.node_id, state.connection_id)
 
-    Enum.each(state.pending_diagnostics, fn {_request_id, {_from, timer}} ->
+    Enum.each(state.pending_requests, fn {_request_id, {from, timer, _reply}} ->
       Process.cancel_timer(timer)
+      GenServer.reply(from, {:error, :temporarily_unavailable})
     end)
 
     :ok
@@ -459,6 +487,38 @@ defmodule Biot.Server.Control.Connection do
 
   defp diagnostic_reply(:not_found), do: {:error, :not_found}
   defp diagnostic_reply({content, truncated}), do: {:ok, {content, truncated}}
+
+  defp runtime_logs_reply(:not_found), do: {:error, :not_found}
+
+  defp runtime_logs_reply({incarnation_id, content, truncated}) do
+    {:ok, {incarnation_id, content, truncated}}
+  end
+
+  defp start_request(socket, state, from, timeout_ms, message, reply) do
+    request_id = random_token()
+
+    case send_message(socket, message.(request_id), state.version) do
+      :ok ->
+        timer = Process.send_after(self(), {:request_timeout, request_id}, timeout_ms)
+        pending = Map.put(state.pending_requests, request_id, {from, timer, reply})
+        {:noreply, {socket, %{state | pending_requests: pending}}}
+
+      {:error, _reason} ->
+        {:reply, {:error, :temporarily_unavailable}, {socket, state}}
+    end
+  end
+
+  defp complete_request(state, request_id, result) do
+    case Map.pop(state.pending_requests, request_id) do
+      {nil, _pending} ->
+        {:continue, state}
+
+      {{from, timer, reply}, pending} ->
+        Process.cancel_timer(timer)
+        GenServer.reply(from, reply.(result))
+        {:continue, %{state | pending_requests: pending}}
+    end
+  end
 
   defp new_connection_id, do: ConnectionId.parse(Ecto.UUID.generate())
 

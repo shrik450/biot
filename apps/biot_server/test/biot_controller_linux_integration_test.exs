@@ -4,7 +4,7 @@ defmodule Biot.Server.BiotControllerLinuxIntegrationTest do
 
   @moduletag :linux
   @moduletag :nix
-  @moduletag timeout: 900_000
+  @moduletag timeout: 1_200_000
 
   test "the controller survives crashes, cancellation, retries, reconnects, and orphaning" do
     project_root = Path.expand("../../..", __DIR__)
@@ -13,14 +13,37 @@ defmodule Biot.Server.BiotControllerLinuxIntegrationTest do
     database =
       Path.join(System.tmp_dir!(), "step9-server-#{System.unique_integer([:positive])}.sqlite3")
 
-    on_exit(fn -> File.rm(database) end)
+    proof_root =
+      Path.join(System.tmp_dir!(), "step9-proof-#{System.unique_integer([:positive])}")
 
-    {output, status} =
-      System.cmd("mix", ["run", "--no-start", runner],
+    proof_output = Path.join([project_root, ".work", "step15-controller-proof.log"])
+
+    on_exit(fn ->
+      File.rm(database)
+      System.cmd("podman", ["unshare", "chown", "-R", "0:0", proof_root])
+      File.rm_rf(proof_root)
+    end)
+
+    {_output, status} =
+      System.cmd(
+        "sh",
+        [
+          "-c",
+          ~S(exec mix run --no-start "$1" >"$2" 2>&1),
+          "step9-controller",
+          runner,
+          proof_output
+        ],
         cd: project_root,
-        env: [{"BIOT_STEP9_TEST_DATABASE", database}],
+        env: [
+          {"MIX_ENV", "test"},
+          {"BIOT_STEP9_TEST_DATABASE", database},
+          {"BIOT_STEP9_TEST_ROOT", proof_root}
+        ],
         stderr_to_stdout: true
       )
+
+    output = File.read!(proof_output)
 
     assert status == 0, output
     assert output =~ "step 9 controller proof passed"
@@ -31,8 +54,6 @@ defmodule Biot.Server.BiotControllerLinuxIntegrationTest do
     assert output =~ "allocation kept, not adopted or deleted: true"
     assert output =~ "attempt recorded before the action started: true"
     assert output =~ "attempt count unchanged while the controller restarted: true"
-    assert output =~ "reconcile_next_arity_3: true"
-    assert output =~ "reconcile_next_arity_4: false"
     assert output =~ "action_environments_exported: false"
     assert output =~ "action_requires_control_exported: false"
 
@@ -57,13 +78,23 @@ defmodule Biot.Server.BiotControllerLinuxIntegrationTest do
     assert output =~ "journal_row_after_superseded_result: nil"
     assert output =~ "result_reached_the_controller_before_the_notice: true"
     assert output =~ "actions_started_after_the_wake: []"
-    assert output =~ "diagnostic_entries_after: []"
+    assert output =~ ~r/diagnostic_entries_after: \[%Biot\.Node\.Journal\.Schema\.Diagnostic\{/
     assert output =~ "outbox_report_matches: true"
     assert output =~ "child_restart: :transient"
     assert output =~ "replay_when_ready: {true, true}"
     assert output =~ "replay_after_desired: {true, true}"
     assert output =~ "controller_started_for_stored_report: 0"
     assert output =~ "intent_after_omission: nil"
+    assert output =~ "step 15 runtime logs"
+    assert output =~ "before_restart_exact: true"
+    assert output =~ "restart_kept_incarnation: true"
+    assert output =~ "restart_marked_gap: true"
+    assert output =~ "capture_stayed_bounded: true"
+    assert output =~ "failed_start_failed: true"
+    assert output =~ "failed_start_kept_log: true"
+    assert output =~ "failed_start_kept_metadata: true"
+    assert output =~ "new_incarnation: true"
+    assert output =~ "new_log_replaced_old: true"
 
     assert [first_delay | _rest] =
              Regex.scan(~r/running again (\d+) ms later/, output, capture: :all_but_first)

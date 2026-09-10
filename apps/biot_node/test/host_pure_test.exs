@@ -5,10 +5,12 @@ defmodule Biot.Node.HostPureTest do
   import Biot.Node.ReconcileFixtures
 
   alias Biot.Node.Allocation
+  alias Biot.Node.Diagnostic
   alias Biot.Node.Host.Command
   alias Biot.Node.Host.Config
   alias Biot.Node.Host.ContainerInspection
   alias Biot.Node.Host.DataInspection
+  alias Biot.Node.Host.Diagnostic, as: HostDiagnostic
   alias Biot.Node.Host.EnvironmentInspection
   alias Biot.Node.Host.Names
   alias Biot.Node.Host.Outcome
@@ -201,16 +203,43 @@ defmodule Biot.Node.HostPureTest do
     ]
 
     for reason <- reasons do
-      assert %Outcome{outcome: ^reason, diagnostic: "detail"} = Outcome.new(reason, "detail")
+      diagnostic = Diagnostic.text("detail")
+      assert %Outcome{outcome: ^reason, diagnostic: ^diagnostic} = Outcome.new(reason, diagnostic)
     end
 
-    assert Outcome.from_reason(:enospc) == Outcome.new(:host_unavailable, "the disk is full")
+    assert Outcome.from_reason(:enospc) ==
+             Outcome.new(:host_unavailable, Diagnostic.text("the disk is full"))
 
-    failure = %InspectionFailure{resource: :data, reason: :denied, detail: "cannot read"}
-    assert Outcome.from_reason(failure) == Outcome.new(:host_unavailable, "cannot read")
+    failure = %InspectionFailure{
+      resource: :data,
+      reason: :denied,
+      detail: Diagnostic.text("cannot read")
+    }
 
-    command = %Command.Result{status: 9, stdout: "out", stderr: "err"}
-    assert Outcome.from_command(:build_failed, command) == Outcome.new(:build_failed, "err")
+    assert Outcome.from_reason(failure) ==
+             Outcome.new(:host_unavailable, Diagnostic.text("cannot read"))
+
+    command = command_result(stderr: "err")
+
+    assert Outcome.from_command(:build_failed, command) ==
+             Outcome.new(:build_failed, {"err", false})
+  end
+
+  test "diagnostic text marks literal text as complete" do
+    assert Diagnostic.text("detail") == {"detail", false}
+  end
+
+  test "host diagnostics choose stderr and the matching truncation flag" do
+    cases = [
+      {command_result(stdout: "out", stderr: "err"), {"err", false}},
+      {command_result(stdout: "out", stderr: "err", stderr_truncated: true), {"err", true}},
+      {command_result(stdout: "out", stdout_truncated: true), {"out", true}},
+      {command_result(stdout: "out"), {"out", false}}
+    ]
+
+    for {result, expected} <- cases do
+      assert HostDiagnostic.from_command(result) == expected
+    end
   end
 
   test "paths keep metadata outside the writable mounts" do
@@ -342,6 +371,10 @@ defmodule Biot.Node.HostPureTest do
       nix_instantiate_executable: "nix-instantiate",
       podman_executable: "podman",
       setsid_executable: "setsid",
+      mkfifo_executable: "mkfifo",
+      head_executable: "head",
+      cat_executable: "cat",
+      sleep_executable: "sleep",
       podman_network_command: "slirp4netns",
       nix_build_file: "/source/nix/build.nix",
       nix_pin_file: "/source/nix/pin.nix",
@@ -349,7 +382,22 @@ defmodule Biot.Node.HostPureTest do
       nixpkgs_ref: "nixos-unstable",
       command_timeout_ms: 1_000,
       command_max_output_bytes: 1_000,
+      command_max_stderr_bytes: 1_000,
+      runtime_log_max_bytes: 1_000,
       platform: platform
+    )
+  end
+
+  defp command_result(overrides) do
+    struct!(
+      %Command.Result{
+        status: 9,
+        stdout: "out",
+        stderr: "",
+        stdout_truncated: false,
+        stderr_truncated: false
+      },
+      overrides
     )
   end
 end

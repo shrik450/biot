@@ -15,6 +15,7 @@ defmodule Biot.Protocol.ControlProtocolTest do
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.ExecutionSpec
   alias Biot.Protocol.Frame
+  alias Biot.Protocol.IncarnationId
   alias Biot.Protocol.Liveness
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.Message
@@ -192,6 +193,35 @@ defmodule Biot.Protocol.ControlProtocolTest do
     end
   end
 
+  test "runtime log results reject malformed found and not-found shapes" do
+    incarnation_id = id(IncarnationId, 6)
+
+    found = %{
+      "type" => "runtime_logs_result",
+      "request_id" => "request",
+      "result" => %{
+        "status" => "found",
+        "incarnation_id" => to_string(incarnation_id),
+        "content" => Base.encode64(<<0, 1, 2>>),
+        "truncated" => false
+      }
+    }
+
+    invalid_results = [
+      Map.put(found["result"], "unknown", true),
+      Map.delete(found["result"], "content"),
+      Map.put(found["result"], "incarnation_id", "bad"),
+      Map.put(found["result"], "content", "not base64"),
+      Map.put(found["result"], "truncated", 0),
+      %{"status" => "not_found", "content" => "extra"},
+      %{"status" => "missing"}
+    ]
+
+    for result <- invalid_results do
+      assert_decode_error(Map.put(found, "result", result), 1)
+    end
+  end
+
   property "wire decoding never raises for random binary input" do
     check all(value <- StreamData.binary(max_length: 2_048)) do
       assert_wire_result(Wire.decode(value, context_for(value)))
@@ -319,6 +349,7 @@ defmodule Biot.Protocol.ControlProtocolTest do
     biot_id = id(BiotId, 3)
     environment_id = id(EnvironmentId, 4)
     diagnostic_id = id(PrivateDiagnosticId, 5)
+    incarnation_id = id(IncarnationId, 6)
 
     orphaned_allocation =
       %OrphanedAllocation{biot_id: biot_id, uid_range: %{start: 100_000, count: 65_536}}
@@ -380,6 +411,13 @@ defmodule Biot.Protocol.ControlProtocolTest do
          max_bytes: 100,
          timeout_ms: 200
        }},
+      {1,
+       %Message.RuntimeLogs{
+         request_id: "request-2",
+         biot_id: biot_id,
+         max_bytes: 100,
+         timeout_ms: 200
+       }},
       {1, %Message.Synchronized{connection_id: connection_id}},
       {1, %Message.Observation{biot_id: biot_id, execution_report: report}},
       {1, %Message.AccessApplied{biot_id: biot_id, access_revision: 9}},
@@ -387,6 +425,12 @@ defmodule Biot.Protocol.ControlProtocolTest do
       {1, %Message.NodeObservation{orphaned_allocations: [orphaned_allocation]}},
       {1, %Message.DiagnosticResult{request_id: "request-1", result: {<<0, 1, 2>>, true}}},
       {1, %Message.DiagnosticResult{request_id: "request-2", result: :not_found}},
+      {1,
+       %Message.RuntimeLogsResult{
+         request_id: "request-3",
+         result: {incarnation_id, <<0, 1, 2>>, true}
+       }},
+      {1, %Message.RuntimeLogsResult{request_id: "request-4", result: :not_found}},
       {1, %Message.Heartbeat{challenge: "challenge"}},
       {1, %Message.HeartbeatResponse{challenge: "challenge"}}
     ]

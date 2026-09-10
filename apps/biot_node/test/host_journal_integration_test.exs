@@ -1,6 +1,7 @@
 defmodule Biot.Node.HostJournalIntegrationTest do
   use ExUnit.Case, async: false
 
+  import Ecto.Query
   import Biot.Node.ReconcileFixtures
 
   alias Biot.Node.Allocation
@@ -9,6 +10,7 @@ defmodule Biot.Node.HostJournalIntegrationTest do
   alias Biot.Node.Host.Context
   alias Biot.Node.Journal
   alias Biot.Node.Journal.Schema.Allocation, as: AllocationRow
+  alias Biot.Node.Journal.Schema.Diagnostic, as: DiagnosticRow
   alias Biot.Node.Journal.Schema.LocalIntent, as: LocalIntentRow
   alias Biot.Node.Journal.Schema.RetryState, as: RetryStateRow
   alias Biot.Node.NetworkId
@@ -44,6 +46,7 @@ defmodule Biot.Node.HostJournalIntegrationTest do
     Repo.delete_all(Biot.Node.Journal.Schema.Installation)
     Repo.delete_all(Biot.Node.Journal.Schema.Resolution)
     Repo.delete_all(AllocationRow)
+    Repo.delete_all(DiagnosticRow)
     Repo.delete_all(RetryStateRow)
     Repo.delete_all(LocalIntentRow)
     :ok
@@ -93,7 +96,7 @@ defmodule Biot.Node.HostJournalIntegrationTest do
       assert {:ok, _intent} = Journal.put_intent(biot_spec(1))
       assert {:ok, _retry} = Journal.record_attempt(biot_id(), 1, :resolve)
 
-      assert Journal.replace_intents([]) == :ok
+      assert Journal.replace_intents([]) == {:ok, [biot_id()]}
       assert Journal.intent(biot_id()) == nil
       assert Journal.retry_state(biot_id()) == nil
     end
@@ -117,6 +120,60 @@ defmodule Biot.Node.HostJournalIntegrationTest do
       assert {:ok, intent} = Journal.put_intent(biot_spec(2))
       assert intent.biot_spec == biot_spec(2)
       assert intent.destruction_report == report
+    end
+  end
+
+  describe "diagnostic journal" do
+    test "same-key writes replace the row and return the replaced ID" do
+      first = id(Biot.Protocol.PrivateDiagnosticId, 101)
+      second = id(Biot.Protocol.PrivateDiagnosticId, 102)
+
+      assert Journal.index_diagnostic(first, biot_id(), 1, :prepare, false, 5) == {:ok, []}
+      assert Journal.index_diagnostic(second, biot_id(), 1, :prepare, true, 5) == {:ok, [first]}
+      assert Journal.diagnostic(first) == nil
+      assert Journal.diagnostic(second) == true
+    end
+
+    test "retention keeps the newest sequences across revisions" do
+      ids = Enum.map(201..204, &id(Biot.Protocol.PrivateDiagnosticId, &1))
+
+      assert Journal.index_diagnostic(Enum.at(ids, 0), biot_id(), 1, :resolve, false, 3) ==
+               {:ok, []}
+
+      assert Journal.index_diagnostic(Enum.at(ids, 1), biot_id(), 2, :prepare, false, 3) ==
+               {:ok, []}
+
+      assert Journal.index_diagnostic(Enum.at(ids, 2), biot_id(), 3, :install, false, 3) ==
+               {:ok, []}
+
+      assert Journal.index_diagnostic(Enum.at(ids, 3), biot_id(), 4, :start, false, 3) ==
+               {:ok, [hd(ids)]}
+
+      rows = Repo.all(from(row in DiagnosticRow, order_by: row.sequence))
+      assert Enum.map(rows, & &1.diagnostic_id) == tl(ids)
+      assert Enum.map(rows, & &1.sequence) == [2, 3, 4]
+    end
+
+    test "forget returns every indexed ID" do
+      ids = Enum.map(301..303, &id(Biot.Protocol.PrivateDiagnosticId, &1))
+
+      for {diagnostic_id, revision} <- Enum.zip(ids, 1..3) do
+        assert Journal.index_diagnostic(diagnostic_id, biot_id(), revision, :start, false, 5) ==
+                 {:ok, []}
+      end
+
+      assert {:ok, removed} = Journal.forget_diagnostics(biot_id())
+      assert MapSet.new(removed) == MapSet.new(ids)
+      assert Repo.all(DiagnosticRow) == []
+    end
+
+    test "replace_intents returns every omitted Biot ID" do
+      other = id(BiotId, 402)
+      assert {:ok, _intent} = Journal.put_intent(biot_spec(1))
+      assert {:ok, _intent} = Journal.put_intent(biot_spec(1, other))
+
+      assert {:ok, removed} = Journal.replace_intents([])
+      assert MapSet.new(removed) == MapSet.new([biot_id(), other])
     end
   end
 
@@ -228,6 +285,10 @@ defmodule Biot.Node.HostJournalIntegrationTest do
       nix_instantiate_executable: "nix-instantiate",
       podman_executable: "podman",
       setsid_executable: "setsid",
+      mkfifo_executable: "mkfifo",
+      head_executable: "head",
+      cat_executable: "cat",
+      sleep_executable: "sleep",
       podman_network_command: "slirp4netns",
       nix_build_file: Path.join(project_root, "nix/build.nix"),
       nix_pin_file: Path.join(project_root, "nix/pin.nix"),
@@ -235,8 +296,15 @@ defmodule Biot.Node.HostJournalIntegrationTest do
       nixpkgs_ref: "nixos-unstable",
       command_timeout_ms: 120_000,
       command_max_output_bytes: 64_000,
+      command_max_stderr_bytes: 64_000,
+      runtime_log_max_bytes: 64_000,
       platform: platform
     )
+  end
+
+  defp biot_spec(revision, biot_id) do
+    execution = %{spec(revision: revision) | biot_id: biot_id}
+    %BiotSpec{execution: execution, access_revision: revision}
   end
 
   defp id(module, number) do

@@ -10,13 +10,11 @@ defmodule Biot.Node.Application do
   @control_connection_keys [:server_host, :server_port, :registration_id, :tls]
   @host_keys [:data_root, :uid_range_base, :uid_range_count, :uid_range_limit]
 
-  # The diagnostic log and the command reaper serve the whole node and need no configuration, so
-  # they run even on a node that owns no biots.
   @impl true
   def start(_type, _args) do
     Wire.check_frame_limit!(Application.fetch_env!(:biot_node, :max_frame_bytes))
 
-    children = [Biot.Node.Diagnostics, Biot.Node.Host.Command.Reaper] ++ host_children()
+    children = [Biot.Node.Host.Command.Reaper] ++ host_children()
 
     opts = [strategy: :one_for_one, name: Biot.Node.Supervisor]
     Supervisor.start_link(children, opts)
@@ -31,6 +29,8 @@ defmodule Biot.Node.Application do
         Biot.Node.Host.Setup,
         Biot.Node.Repo,
         Biot.Node.Journal.Migrator,
+        {Task.Supervisor, name: Biot.Node.Control.RequestSupervisor},
+        Biot.Node.RuntimeLogs,
         Biot.Node.Controllers,
         Biot.Node.Host.ContainerEvents
       ] ++ control_connection_child()

@@ -1,6 +1,7 @@
 defmodule Biot.Node.Host.SourceResolver do
   @moduledoc "Pins source selectors through the fixed `nix/pin.nix` boundary."
 
+  alias Biot.Node.Diagnostic
   alias Biot.Node.Host.Command
   alias Biot.Node.Host.Config
   alias Biot.Node.Host.Outcome
@@ -36,6 +37,7 @@ defmodule Biot.Node.Host.SourceResolver do
   defp command(config, repository, reference) do
     Command.run(
       config.setsid_executable,
+      Config.capture_tools(config),
       config.nix_instantiate_executable,
       [
         "--eval",
@@ -50,7 +52,8 @@ defmodule Biot.Node.Host.SourceResolver do
         reference
       ],
       timeout_ms: config.command_timeout_ms,
-      max_output_bytes: config.command_max_output_bytes
+      max_output_bytes: config.command_max_output_bytes,
+      max_stderr_bytes: config.command_max_stderr_bytes
     )
   end
 
@@ -60,7 +63,8 @@ defmodule Biot.Node.Host.SourceResolver do
       {:ok, pinned}
     else
       _error ->
-        {:error, Outcome.new(:resolution_failed, "Nix returned invalid source JSON")}
+        {:error,
+         Outcome.new(:resolution_failed, Diagnostic.text("Nix returned invalid source JSON"))}
     end
   end
 end

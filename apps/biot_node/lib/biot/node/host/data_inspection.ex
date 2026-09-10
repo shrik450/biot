@@ -7,6 +7,7 @@ defmodule Biot.Node.Host.DataInspection do
   """
 
   alias Biot.Node.Allocation
+  alias Biot.Node.Diagnostic
   alias Biot.Node.Host.FileSystem
   alias Biot.Node.Host.Outcome
   alias Biot.Node.NodeState
@@ -22,7 +23,11 @@ defmodule Biot.Node.Host.DataInspection do
   def state(%Allocation{initialization: :uninitialized} = allocation, facts) do
     case facts.allocation_directory do
       {:error, reason} ->
-        unknown(allocation, reason, "the allocation directory could not be inspected")
+        unknown(
+          allocation,
+          reason,
+          Diagnostic.text("the allocation directory could not be inspected")
+        )
 
       _directory ->
         {:uninitialized, allocation}
@@ -32,7 +37,11 @@ defmodule Biot.Node.Host.DataInspection do
   def state(%Allocation{initialization: :complete} = allocation, facts) do
     case facts.allocation_directory do
       {:error, reason} ->
-        unknown(allocation, reason, "the allocation directory could not be inspected")
+        unknown(
+          allocation,
+          reason,
+          Diagnostic.text("the allocation directory could not be inspected")
+        )
 
       _directory ->
         initialized_state(allocation, facts.mounts, facts.marker)
@@ -59,7 +68,7 @@ defmodule Biot.Node.Host.DataInspection do
   end
 
   defp initialized_state(allocation, _mounts, {:error, reason}) do
-    unknown(allocation, reason, "the initialization marker could not be read")
+    unknown(allocation, reason, Diagnostic.text("the initialization marker could not be read"))
   end
 
   defp marker_state(%Allocation{biot_id: biot_id} = allocation, marker_text) do
@@ -72,7 +81,7 @@ defmodule Biot.Node.Host.DataInspection do
 
   defp mount_error(allocation, mounts) do
     {:error, reason} = Enum.find(mounts, &match?({:error, _reason}, &1))
-    unknown(allocation, reason, "a private mount could not be inspected")
+    unknown(allocation, reason, Diagnostic.text("a private mount could not be inspected"))
   end
 
   defp unknown(allocation, reason, detail) do
