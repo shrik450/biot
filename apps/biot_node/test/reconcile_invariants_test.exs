@@ -26,41 +26,49 @@ defmodule Biot.Node.ReconcileInvariantsTest do
   ]
 
   describe "totality" do
-    property "next/4 always returns one of the five declared shapes" do
+    property "next/3 always returns one of the five declared shapes" do
       check all(
               spec <- Generators.execution_spec(),
               state <- Generators.node_state(),
               current <- Generators.current_action(),
-              control <- Generators.control_state(),
               max_runs: 2000
             ) do
-        result = Reconcile.next(spec, state, current, control)
+        result = Reconcile.next(spec, state, current)
 
         assert Generators.valid_result?(result),
                "undeclared result #{inspect(result)}"
       end
     end
 
-    property "every action next/4 returns is one of the ten declared actions" do
+    property "every action next/3 returns is one of the ten declared actions" do
       check all(
               spec <- Generators.execution_spec(),
               state <- Generators.node_state(),
-              control <- Generators.control_state(),
               max_runs: 1000
             ) do
-        assert_valid_action(Reconcile.next(spec, state, nil, control))
+        assert_valid_action(Reconcile.next(spec, state, nil))
       end
     end
 
-    property "every block reason next/4 returns is one of the four declared reasons" do
+    property "every block reason next/3 returns is one of the three declared reasons" do
       check all(
               spec <- Generators.execution_spec(),
               state <- Generators.node_state(),
               current <- Generators.current_action(),
-              control <- Generators.control_state(),
               max_runs: 1000
             ) do
-        assert_valid_block_reason(Reconcile.next(spec, state, current, control))
+        assert_valid_block_reason(Reconcile.next(spec, state, current))
+      end
+    end
+
+    property "next/3 never returns a control block" do
+      check all(
+              spec <- Generators.execution_spec(),
+              state <- Generators.node_state(),
+              current <- Generators.current_action(),
+              max_runs: 2000
+            ) do
+        refute Reconcile.next(spec, state, current) == {:blocked, :control_offline}
       end
     end
   end
@@ -70,13 +78,11 @@ defmodule Biot.Node.ReconcileInvariantsTest do
       check all(
               spec <- Generators.execution_spec(),
               state <- Generators.node_state(),
-              control <- Generators.control_state(),
               max_runs: 1000
             ) do
         refute match?(
-                 {:run,
-                  {:initialize, %Allocation{initialization: {:complete, _marker}}, _source}},
-                 Reconcile.next(spec, state, nil, control)
+                 {:run, {:initialize, %Allocation{initialization: :complete}, _source}},
+                 Reconcile.next(spec, state, nil)
                )
       end
     end
@@ -86,67 +92,47 @@ defmodule Biot.Node.ReconcileInvariantsTest do
               spec <- Generators.execution_spec(),
               state <- Generators.node_state(),
               current <- Generators.current_action(),
-              control <- Generators.control_state(),
               max_runs: 1000
             ) do
-        result = Reconcile.next(spec, state, current, control)
+        result = Reconcile.next(spec, state, current)
 
         assert removal?(result) in [false, spec.desired.state == :destroyed]
       end
     end
 
-    property "(c) an offline node never installs or starts" do
+    property "(c) a container is never started while one is present" do
       check all(
               spec <- Generators.execution_spec(),
               state <- Generators.node_state(),
-              current <- Generators.current_action(),
               max_runs: 1000
             ) do
-        result = Reconcile.next(spec, state, current, :offline)
-
-        refute match?({:run, {:install, _allocation, _artifact, _environment}}, result)
-        refute match?({:run, {:start, _allocation, _installation}}, result)
-        refute match?({:run, {:resolve, _environment, _selection, _allocation}}, result)
-        refute match?({:run, {:prepare, _environment, _manifest}}, result)
+        assert_no_start_while_present(state.container, Reconcile.next(spec, state, nil))
       end
     end
 
-    property "(d) a container is never started while one is present" do
+    property "(d) an environment is never installed while a container is present" do
       check all(
               spec <- Generators.execution_spec(),
               state <- Generators.node_state(),
-              control <- Generators.control_state(),
-              max_runs: 1000
-            ) do
-        assert_no_start_while_present(state.container, Reconcile.next(spec, state, nil, control))
-      end
-    end
-
-    property "(e) an environment is never installed while a container is present" do
-      check all(
-              spec <- Generators.execution_spec(),
-              state <- Generators.node_state(),
-              control <- Generators.control_state(),
               max_runs: 1000
             ) do
         assert_no_install_while_present(
           state.container,
-          Reconcile.next(spec, state, nil, control)
+          Reconcile.next(spec, state, nil)
         )
       end
     end
 
-    property "(f) a recorded non-automatic failure for this revision runs nothing" do
+    property "(e) a recorded non-automatic failure for this revision runs nothing" do
       check all(
               spec <- Generators.execution_spec(),
               state <- Generators.node_state(),
               failure <- non_automatic_failure(),
               current <- Generators.current_action(),
-              control <- Generators.control_state(),
               max_runs: 1000
             ) do
         blocked = %{state | failure: {spec.desired.revision, failure}}
-        result = Reconcile.next(spec, blocked, current, control)
+        result = Reconcile.next(spec, blocked, current)
 
         refute match?({:run, _action}, result)
 
@@ -155,43 +141,40 @@ defmodule Biot.Node.ReconcileInvariantsTest do
       end
     end
 
-    property "(g) no action is returned while an input that action needs is unknown" do
+    property "(f) no action is returned while an input that action needs is unknown" do
       check all(
               spec <- Generators.execution_spec(),
               state <- Generators.node_state(),
-              control <- Generators.control_state(),
               max_runs: 2000
             ) do
-        result = Reconcile.next(spec, state, nil, control)
+        result = Reconcile.next(spec, state, nil)
 
         assert unknown_inputs(result, spec, state) == []
       end
     end
 
-    property "(h) a released environment is neither desired nor installed" do
+    property "(g) a released environment is neither desired nor installed" do
       check all(
               spec <- Generators.execution_spec(),
               state <- Generators.node_state(),
-              control <- Generators.control_state(),
               max_runs: 2000
             ) do
         assert_release_is_unretained(
-          Reconcile.next(spec, state, nil, control),
+          Reconcile.next(spec, state, nil),
           spec,
           state
         )
       end
     end
 
-    property "(i) a current action that cannot be cancelled blocks everything else" do
+    property "(h) a current action that cannot be cancelled blocks everything else" do
       check all(
               spec <- Generators.execution_spec(),
               state <- Generators.node_state(),
               action <- non_cancellable_action(),
-              control <- Generators.control_state(),
               max_runs: 1000
             ) do
-        assert Reconcile.next(spec, state, action, control) ==
+        assert Reconcile.next(spec, state, action) ==
                  {:blocked, {:current_action, action}}
       end
     end
@@ -201,21 +184,20 @@ defmodule Biot.Node.ReconcileInvariantsTest do
               spec <- Generators.execution_spec(),
               state <- Generators.node_state(),
               action <- cancellable_action(),
-              control <- Generators.control_state(),
               max_runs: 1000
             ) do
-        assert Reconcile.next(spec, state, action, control) ==
+        assert Reconcile.next(spec, state, action) ==
                  expected_for_cancellable(spec.desired.state, action)
       end
     end
   end
 
-  describe "(g) each action's own required facts" do
+  describe "each action's own required facts" do
     setup do
       %{
         initialized:
           state(
-            data: {:present, allocation(), marker()},
+            data: {:present, allocation()},
             resolutions: %{e1() => {:present, resolution(e1())}}
           )
       }
@@ -224,7 +206,7 @@ defmodule Biot.Node.ReconcileInvariantsTest do
     test "allocate needs known data" do
       failure = inspection(:allocation)
 
-      assert Reconcile.next(spec(), state(data: {:unknown, allocation(), failure}), nil, :ready) ==
+      assert Reconcile.next(spec(), state(data: {:unknown, allocation(), failure}), nil) ==
                {:blocked, {:inspection, failure}}
     end
 
@@ -232,14 +214,14 @@ defmodule Biot.Node.ReconcileInvariantsTest do
       failure = inspection(:data)
       state = state(data: {:unknown, fresh_allocation(), failure})
 
-      assert Reconcile.next(spec(), state, nil, :ready) == {:blocked, {:inspection, failure}}
+      assert Reconcile.next(spec(), state, nil) == {:blocked, {:inspection, failure}}
     end
 
     test "resolve needs a known prepared set", %{initialized: initialized} do
       failure = inspection(:prepared)
-      state = %{initialized | resolutions: %{}, prepared: {:unknown, failure}}
+      state = %{initialized | resolutions: %{}, prepared: %{e1() => {:unknown, failure}}}
 
-      assert Reconcile.next(spec(), state, nil, :ready) == {:blocked, {:inspection, failure}}
+      assert Reconcile.next(spec(), state, nil) == {:blocked, {:inspection, failure}}
     end
 
     test "prepare needs a known resolution for the desired environment", %{
@@ -248,14 +230,14 @@ defmodule Biot.Node.ReconcileInvariantsTest do
       failure = inspection(:resolution)
       state = %{initialized | resolutions: %{e1() => {:unknown, resolution(e1()), failure}}}
 
-      assert Reconcile.next(spec(), state, nil, :ready) == {:blocked, {:inspection, failure}}
+      assert Reconcile.next(spec(), state, nil) == {:blocked, {:inspection, failure}}
     end
 
     test "prepare and install need a known installation", %{initialized: initialized} do
       failure = inspection(:installation)
       state = %{initialized | installation: {:unknown, installation(e1()), failure}}
 
-      assert Reconcile.next(spec(), state, nil, :ready) == {:blocked, {:inspection, failure}}
+      assert Reconcile.next(spec(), state, nil) == {:blocked, {:inspection, failure}}
     end
 
     test "install needs a known container", %{initialized: initialized} do
@@ -263,11 +245,11 @@ defmodule Biot.Node.ReconcileInvariantsTest do
 
       state = %{
         initialized
-        | prepared: {:present, %{e1() => artifact(e1())}},
+        | prepared: %{e1() => {:present, artifact(e1())}},
           container: {:unknown, failure}
       }
 
-      assert Reconcile.next(spec(), state, nil, :ready) == {:blocked, {:inspection, failure}}
+      assert Reconcile.next(spec(), state, nil) == {:blocked, {:inspection, failure}}
     end
 
     test "start needs a known container", %{initialized: initialized} do
@@ -275,12 +257,12 @@ defmodule Biot.Node.ReconcileInvariantsTest do
 
       state = %{
         initialized
-        | prepared: {:present, %{e1() => artifact(e1())}},
+        | prepared: %{e1() => {:present, artifact(e1())}},
           installation: {:present, installation(e1())},
           container: {:unknown, failure}
       }
 
-      assert Reconcile.next(spec(), state, nil, :ready) == {:blocked, {:inspection, failure}}
+      assert Reconcile.next(spec(), state, nil) == {:blocked, {:inspection, failure}}
     end
 
     test "start needs a known installation", %{initialized: initialized} do
@@ -288,18 +270,18 @@ defmodule Biot.Node.ReconcileInvariantsTest do
 
       state = %{
         initialized
-        | prepared: {:present, %{e1() => artifact(e1())}},
+        | prepared: %{e1() => {:present, artifact(e1())}},
           installation: {:unknown, installation(e1()), failure}
       }
 
-      assert Reconcile.next(spec(), state, nil, :ready) == {:blocked, {:inspection, failure}}
+      assert Reconcile.next(spec(), state, nil) == {:blocked, {:inspection, failure}}
     end
 
     test "retire needs a known container" do
       failure = inspection(:container)
       state = %{settled(e1()) | container: {:unknown, failure}}
 
-      assert Reconcile.next(spec(state: :stopped, revision: 2), state, nil, :ready) ==
+      assert Reconcile.next(spec(state: :stopped, revision: 2), state, nil) ==
                {:blocked, {:inspection, failure}}
     end
 
@@ -307,7 +289,7 @@ defmodule Biot.Node.ReconcileInvariantsTest do
       failure = inspection(:data)
       state = state(data: {:unknown, allocation(), failure})
 
-      assert Reconcile.next(spec(state: :destroyed, revision: 3), state, nil, :ready) ==
+      assert Reconcile.next(spec(state: :destroyed, revision: 3), state, nil) ==
                {:blocked, {:inspection, failure}}
     end
 
@@ -315,15 +297,18 @@ defmodule Biot.Node.ReconcileInvariantsTest do
       stale = %{
         settled(e1())
         | container: {:unknown, inspection(:container)},
-          prepared: {:present, %{e1() => artifact(e1()), e2() => artifact(e2())}}
+          prepared: %{
+            e1() => {:present, artifact(e1())},
+            e2() => {:present, artifact(e2())}
+          }
       }
 
       # An unknown container could still be using e2, so nothing is given back. Execution reports
       # the same unknown fact first.
-      assert Reconcile.next(spec(), stale, nil, :ready) ==
+      assert Reconcile.next(spec(), stale, nil) ==
                {:blocked, {:inspection, inspection(:container)}}
 
-      assert Reconcile.next(spec(state: :destroyed, revision: 3), stale, nil, :ready) ==
+      assert Reconcile.next(spec(state: :destroyed, revision: 3), stale, nil) ==
                {:blocked, {:inspection, inspection(:container)}}
     end
   end
@@ -404,7 +389,10 @@ defmodule Biot.Node.ReconcileInvariantsTest do
        do: true
 
   defp unknown?(%NodeState{container: {:unknown, _failure}}, _spec, :container), do: true
-  defp unknown?(%NodeState{prepared: {:unknown, _failure}}, _spec, :prepared), do: true
+
+  defp unknown?(%NodeState{prepared: prepared}, spec, :prepared) do
+    match?({:unknown, _failure}, Map.get(prepared, spec.desired.environment_id))
+  end
 
   defp unknown?(%NodeState{resolutions: resolutions}, spec, :resolution) do
     match?({:unknown, _resolution, _failure}, Map.get(resolutions, spec.desired.environment_id))

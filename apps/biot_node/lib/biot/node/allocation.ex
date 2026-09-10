@@ -5,7 +5,6 @@ defmodule Biot.Node.Allocation do
   environment and container.
   """
 
-  alias Biot.Node.MarkerId
   alias Biot.Node.NetworkId
   alias Biot.Node.NodePrivatePath
   alias Biot.Protocol.BiotId
@@ -14,7 +13,9 @@ defmodule Biot.Node.Allocation do
   defstruct [:biot_id, :uid_range, :data_root, :network_id, :initialization]
 
   @type uid_range :: %{start: non_neg_integer(), count: pos_integer()}
-  @type initialization :: :uninitialized | {:complete, MarkerId.t()}
+
+  @typedoc "Working data initialize once, so completion is one fact and needs no identity of its own."
+  @type initialization :: :uninitialized | :complete
   @type t :: %__MODULE__{
           biot_id: BiotId.t(),
           uid_range: uid_range(),

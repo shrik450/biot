@@ -10,13 +10,16 @@ defmodule Biot.Node.Journal do
   alias Biot.Node.Journal.Schema.Installation, as: InstallationRow
   alias Biot.Node.Journal.Schema.LocalIntent, as: LocalIntentRow
   alias Biot.Node.Journal.Schema.Resolution, as: ResolutionRow
+  alias Biot.Node.Journal.Schema.RetryState, as: RetryStateRow
   alias Biot.Node.LocalIntent
-  alias Biot.Node.MarkerId
   alias Biot.Node.Repo
   alias Biot.Node.Resolution
+  alias Biot.Node.RetryState
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.BiotSpec
   alias Biot.Protocol.EnvironmentId
+  alias Biot.Protocol.ExecutionReport
+  alias Biot.Protocol.Failure
   alias Biot.Protocol.Manifest
 
   @spec allocation(BiotId.t()) :: Allocation.t() | nil
@@ -60,45 +63,29 @@ defmodule Biot.Node.Journal do
     end
   end
 
-  @spec complete_initialization(Allocation.t(), MarkerId.t()) ::
-          {:ok, Allocation.t()} | {:error, term()}
-  def complete_initialization(%Allocation{} = allocation, %MarkerId{} = marker_id) do
-    Repo.transaction(
-      fn ->
-        row = current_allocation!(allocation)
-
-        case row.initialization_marker do
-          nil ->
-            row
-            |> Ecto.Changeset.change(initialization_marker: marker_id)
-            |> Repo.update!()
-            |> allocation_value()
-
-          ^marker_id ->
-            allocation_value(row)
-
-          _other ->
-            Repo.rollback(:stale)
-        end
-      end,
-      mode: :immediate
-    )
+  @spec complete_initialization(Allocation.t()) :: {:ok, Allocation.t()} | {:error, term()}
+  def complete_initialization(%Allocation{} = allocation) do
+    Repo.transaction(fn -> set_initialized(allocation, true) end, mode: :immediate)
   end
 
   @spec reset_initialization(Allocation.t()) :: :ok | {:error, term()}
   def reset_initialization(%Allocation{} = allocation) do
     Repo.transaction(
       fn ->
-        allocation
-        |> current_allocation!()
-        |> Ecto.Changeset.change(initialization_marker: nil)
-        |> Repo.update!()
-
+        _allocation = set_initialized(allocation, false)
         :ok
       end,
       mode: :immediate
     )
     |> transaction_value()
+  end
+
+  defp set_initialized(allocation, initialized) do
+    allocation
+    |> current_allocation!()
+    |> Ecto.Changeset.change(initialized: initialized)
+    |> Repo.update!()
+    |> allocation_value()
   end
 
   @spec installation(BiotId.t()) :: Installation.t() | nil
@@ -213,27 +200,35 @@ defmodule Biot.Node.Journal do
     end
   end
 
+  @doc """
+  Stores one biot's desired intent, and drops the retry record of the revision it replaces.
+  """
   @spec put_intent(BiotSpec.t()) :: {:ok, LocalIntent.t()} | {:error, :invalid_intent}
   def put_intent(%BiotSpec{} = spec) do
-    case upsert_intent(spec) do
+    Repo.transaction(fn -> accept_intent(spec) end, mode: :immediate)
+    |> case do
       {:ok, row} -> {:ok, intent_value(row)}
-      {:error, _changeset} -> {:error, :invalid_intent}
+      {:error, _reason} -> {:error, :invalid_intent}
     end
   end
 
   @doc """
   Replaces every local intent with the synchronized set. A biot the server no longer sends intent
   for loses its row, which stops its controller and leaves its allocation to be reported as an
-  orphan.
+  orphan. Its retry budget and any destruction receipt go with that row.
   """
   @spec replace_intents([BiotSpec.t()]) :: :ok | {:error, term()}
   def replace_intents(specs) when is_list(specs) do
     Repo.transaction(
       fn ->
-        Enum.each(specs, fn spec -> {:ok, _row} = upsert_intent(spec) end)
+        Enum.each(specs, fn spec -> _row = accept_intent(spec) end)
         synchronized = Enum.map(specs, & &1.execution.biot_id)
 
         LocalIntentRow
+        |> where([row], row.biot_id not in ^synchronized)
+        |> Repo.delete_all()
+
+        RetryStateRow
         |> where([row], row.biot_id not in ^synchronized)
         |> Repo.delete_all()
 
@@ -242,6 +237,35 @@ defmodule Biot.Node.Journal do
       mode: :immediate
     )
     |> transaction_value()
+  end
+
+  @doc """
+  Stores the final report of a destruction this node finished, and drops the biot's retry record.
+  The controller exits after this write, and the control connection replays the report until the
+  server stops sending intent.
+
+  The intent row stays behind as the receipt, so the retry record has to be deleted on its own.
+  """
+  @spec put_destruction_report(BiotId.t(), ExecutionReport.t()) ::
+          {:ok, LocalIntent.t()} | {:error, term()}
+  def put_destruction_report(%BiotId{} = biot_id, %ExecutionReport{} = report) do
+    Repo.transaction(
+      fn ->
+        case Repo.get(LocalIntentRow, biot_id) do
+          nil ->
+            Repo.rollback(:no_intent)
+
+          row ->
+            delete_retry_state(biot_id)
+
+            row
+            |> Ecto.Changeset.change(destruction_report: report)
+            |> Repo.update!()
+            |> intent_value()
+        end
+      end,
+      mode: :immediate
+    )
   end
 
   @spec intent(BiotId.t()) :: LocalIntent.t() | nil
@@ -257,6 +281,128 @@ defmodule Biot.Node.Journal do
     LocalIntentRow |> Repo.all() |> Enum.map(&intent_value/1)
   end
 
+  @doc "What one biot has already spent, for whichever desired revision the row records."
+  @spec retry_state(BiotId.t()) :: RetryState.t() | nil
+  def retry_state(%BiotId{} = biot_id) do
+    case Repo.get(RetryStateRow, biot_id) do
+      nil -> nil
+      row -> retry_state_value(row)
+    end
+  end
+
+  @typedoc """
+  The answer to every retry write. `:superseded` means the intent row no longer holds the revision
+  the caller asked to write for, so the write changed nothing.
+  """
+  @type retry_write :: {:ok, RetryState.t()} | :superseded
+
+  @doc """
+  Counts one more attempt at `stage` and clears the pending backoff. The controller calls this
+  before it starts the action, so an attempt that a crash interrupts still costs the budget.
+  """
+  @spec record_attempt(BiotId.t(), pos_integer(), Failure.stage()) :: retry_write()
+  def record_attempt(%BiotId{} = biot_id, revision, stage) do
+    update_retry_state(biot_id, revision, &RetryState.count_attempt(&1, stage))
+  end
+
+  @doc "Records the failure of the attempt just made, and when the next automatic attempt is due."
+  @spec record_failure(BiotId.t(), pos_integer(), Failure.t(), DateTime.t() | nil) ::
+          retry_write()
+  def record_failure(%BiotId{} = biot_id, revision, %Failure{} = failure, next_attempt_at) do
+    update_retry_state(
+      biot_id,
+      revision,
+      &%{&1 | failure: failure, next_attempt_at: next_attempt_at}
+    )
+  end
+
+  @doc """
+  Drops the recorded failure after an action succeeded. The attempts stay, so work that keeps
+  failing and recovering still runs out of budget.
+  """
+  @spec clear_failure(BiotId.t(), pos_integer()) :: retry_write()
+  def clear_failure(%BiotId{} = biot_id, revision) do
+    update_retry_state(biot_id, revision, &%{&1 | failure: nil, next_attempt_at: nil})
+  end
+
+  # Invariant: a retry row always describes the revision the intent row holds. Reading the intent
+  # row inside the write's own transaction is what keeps that true while a controller is still
+  # working on a revision the server has already replaced.
+  defp update_retry_state(biot_id, revision, change) do
+    Repo.transaction(
+      fn ->
+        if desired_revision(biot_id) == revision do
+          biot_id
+          |> retry_state()
+          |> RetryState.for_revision(biot_id, revision)
+          |> change.()
+          |> upsert_retry_state()
+        else
+          Repo.rollback(:superseded)
+        end
+      end,
+      mode: :immediate
+    )
+    |> case do
+      {:ok, %RetryState{} = state} -> {:ok, state}
+      {:error, :superseded} -> :superseded
+    end
+  end
+
+  defp desired_revision(biot_id) do
+    case Repo.get(LocalIntentRow, biot_id) do
+      nil -> nil
+      row -> row.biot_spec.execution.desired.revision
+    end
+  end
+
+  defp upsert_retry_state(%RetryState{} = state) do
+    now = DateTime.utc_now()
+
+    changes = [
+      target_revision: state.target_revision,
+      attempts: state.attempts,
+      next_attempt_at: state.next_attempt_at,
+      failure: state.failure
+    ]
+
+    %RetryStateRow{}
+    |> Ecto.Changeset.change([{:biot_id, state.biot_id} | changes])
+    |> Repo.insert!(
+      on_conflict: [set: [{:updated_at, now} | changes]],
+      conflict_target: :biot_id,
+      returning: true
+    )
+    |> retry_state_value()
+  end
+
+  defp drop_superseded_retry_state(biot_id, revision) do
+    RetryStateRow
+    |> where([row], row.biot_id == ^biot_id and row.target_revision != ^revision)
+    |> Repo.delete_all()
+
+    :ok
+  end
+
+  defp delete_retry_state(biot_id) do
+    RetryStateRow |> where([row], row.biot_id == ^biot_id) |> Repo.delete_all()
+    :ok
+  end
+
+  # A retry record describes one desired revision. Dropping the superseded record here, in the
+  # transaction that stores the new revision, is what keeps a crash before the controller reads the
+  # new intent from spending a budget the server already replaced.
+  defp accept_intent(%BiotSpec{} = spec) do
+    :ok = drop_superseded_retry_state(spec.execution.biot_id, spec.execution.desired.revision)
+
+    case upsert_intent(spec) do
+      {:ok, row} -> row
+      {:error, changeset} -> Repo.rollback(changeset)
+    end
+  end
+
+  # The conflict sets only the spec, so newer intent for a biot whose destruction the node already
+  # finished keeps the receipt the server has not acknowledged yet.
   defp upsert_intent(%BiotSpec{} = spec) do
     now = DateTime.utc_now()
 
@@ -269,7 +415,23 @@ defmodule Biot.Node.Journal do
     )
   end
 
-  defp intent_value(row), do: %LocalIntent{biot_id: row.biot_id, biot_spec: row.biot_spec}
+  defp intent_value(row) do
+    %LocalIntent{
+      biot_id: row.biot_id,
+      biot_spec: row.biot_spec,
+      destruction_report: row.destruction_report
+    }
+  end
+
+  defp retry_state_value(row) do
+    %RetryState{
+      biot_id: row.biot_id,
+      target_revision: row.target_revision,
+      attempts: row.attempts,
+      next_attempt_at: row.next_attempt_at,
+      failure: row.failure
+    }
+  end
 
   defp allocation_row(allocation) do
     %AllocationRow{
@@ -278,7 +440,7 @@ defmodule Biot.Node.Journal do
       uid_count: allocation.uid_range.count,
       data_root: allocation.data_root,
       network_id: allocation.network_id,
-      initialization_marker: initialization_marker(allocation.initialization)
+      initialized: initialized?(allocation.initialization)
     }
   end
 
@@ -288,7 +450,7 @@ defmodule Biot.Node.Journal do
       uid_range: %{start: row.uid_start, count: row.uid_count},
       data_root: row.data_root,
       network_id: row.network_id,
-      initialization: initialization(row.initialization_marker)
+      initialization: initialization(row.initialized)
     }
   end
 
@@ -373,10 +535,10 @@ defmodule Biot.Node.Journal do
       Repo.exists?(from(row in ResolutionRow, where: row.biot_id == ^biot_id))
   end
 
-  defp initialization_marker(:uninitialized), do: nil
-  defp initialization_marker({:complete, marker_id}), do: marker_id
-  defp initialization(nil), do: :uninitialized
-  defp initialization(marker_id), do: {:complete, marker_id}
+  defp initialized?(:uninitialized), do: false
+  defp initialized?(:complete), do: true
+  defp initialization(false), do: :uninitialized
+  defp initialization(true), do: :complete
 
   defp transaction_value({:ok, value}), do: value
   defp transaction_value({:error, reason}), do: {:error, reason}

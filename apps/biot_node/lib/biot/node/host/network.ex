@@ -44,8 +44,19 @@ defmodule Biot.Node.Host.Network do
     end
   end
 
+  # Rootless bridge networks share one host network namespace, so without `isolate` one biot's
+  # container can route to another biot's container.
   defp create(config, network_id) do
-    case Podman.run(config, ["network", "create", "--disable-dns", Names.network(network_id)]) do
+    arguments = [
+      "network",
+      "create",
+      "--disable-dns",
+      "--opt",
+      "isolate=true",
+      Names.network(network_id)
+    ]
+
+    case Podman.run(config, arguments) do
       {:ok, %Command.Result{status: 0}} ->
         :ok
 

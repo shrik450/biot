@@ -39,78 +39,37 @@ defmodule Biot.Node.Action do
     * `cancellable?` says whether a stop or a destruction may cancel it rather than wait for it.
       Preparation and a start have no value once execution is meant to end, and a preparation can
       take minutes.
-    * `requires_control?` says whether the node needs a live control link before it begins. These
-      four produce state the server must learn about; giving resources back needs no link.
-    * `environments` lists the environments whose resources the action needs, so reclamation never
-      releases one out from under a running action.
   """
-  @type metadata :: %{
-          stage: Failure.stage(),
-          cancellable?: boolean(),
-          requires_control?: boolean(),
-          environments: [EnvironmentId.t()]
-        }
+  @type metadata :: %{stage: Failure.stage(), cancellable?: boolean()}
 
   @doc "Every fact about one action, in one place: adding an action adds one clause here."
   @spec metadata(t()) :: metadata()
-  def metadata({:allocate, _biot_id}) do
-    %{stage: :allocate, cancellable?: false, requires_control?: false, environments: []}
+  def metadata({:allocate, _biot_id}), do: %{stage: :allocate, cancellable?: false}
+
+  def metadata({:initialize, _allocation, _repository}),
+    do: %{stage: :initialize, cancellable?: false}
+
+  def metadata({:resolve, _environment_id, _selection, _allocation}) do
+    %{stage: :resolve, cancellable?: true}
   end
 
-  def metadata({:initialize, _allocation, _repository}) do
-    %{stage: :initialize, cancellable?: false, requires_control?: false, environments: []}
+  def metadata({:prepare, _environment_id, _manifest}), do: %{stage: :prepare, cancellable?: true}
+  def metadata({:retire, _incarnation_id}), do: %{stage: :retire, cancellable?: false}
+
+  def metadata({:install, _allocation, _artifact_id, _environment_id}) do
+    %{stage: :install, cancellable?: false}
   end
 
-  def metadata({:resolve, environment_id, _selection, _allocation}) do
-    %{
-      stage: :resolve,
-      cancellable?: true,
-      requires_control?: true,
-      environments: [environment_id]
-    }
+  def metadata({:start, _allocation, _installation}), do: %{stage: :start, cancellable?: true}
+
+  def metadata({:release_environment, _environment_id}) do
+    %{stage: :release_environment, cancellable?: false}
   end
 
-  def metadata({:prepare, environment_id, _manifest}) do
-    %{
-      stage: :prepare,
-      cancellable?: true,
-      requires_control?: true,
-      environments: [environment_id]
-    }
-  end
-
-  def metadata({:retire, _incarnation_id}) do
-    %{stage: :retire, cancellable?: false, requires_control?: false, environments: []}
-  end
-
-  def metadata({:install, _allocation, _artifact_id, environment_id}) do
-    %{
-      stage: :install,
-      cancellable?: false,
-      requires_control?: true,
-      environments: [environment_id]
-    }
-  end
-
-  def metadata({:start, _allocation, %Installation{environment_id: environment_id}}) do
-    %{stage: :start, cancellable?: true, requires_control?: true, environments: [environment_id]}
-  end
-
-  def metadata({:release_environment, environment_id}) do
-    %{
-      stage: :release_environment,
-      cancellable?: false,
-      requires_control?: false,
-      environments: [environment_id]
-    }
-  end
-
-  def metadata({:remove_data, _allocation}) do
-    %{stage: :remove_data, cancellable?: false, requires_control?: false, environments: []}
-  end
+  def metadata({:remove_data, _allocation}), do: %{stage: :remove_data, cancellable?: false}
 
   def metadata({:release_allocation, _allocation}) do
-    %{stage: :release_allocation, cancellable?: false, requires_control?: false, environments: []}
+    %{stage: :release_allocation, cancellable?: false}
   end
 
   @spec stage(t()) :: Failure.stage()
@@ -118,10 +77,4 @@ defmodule Biot.Node.Action do
 
   @spec cancellable?(t()) :: boolean()
   def cancellable?(action), do: metadata(action).cancellable?
-
-  @spec requires_control?(t()) :: boolean()
-  def requires_control?(action), do: metadata(action).requires_control?
-
-  @spec environments(t()) :: [EnvironmentId.t()]
-  def environments(action), do: metadata(action).environments
 end

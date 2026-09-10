@@ -32,7 +32,7 @@ defmodule Biot.Node.Reconcile.Data do
     {:run, {:initialize, allocation, repository}}
   end
 
-  defp establish({:present, _allocation, _marker}, %ExecutionSpec{}), do: :ready
+  defp establish({:present, _allocation}, %ExecutionSpec{}), do: :ready
 
   # Initialized data are never silently replaced. A completed initialization whose data are gone is
   # a visible loss for the operator, not permission to clone again over the biot's identity.
@@ -41,7 +41,7 @@ defmodule Biot.Node.Reconcile.Data do
   end
 
   defp removal({:unknown, _allocation, failure}), do: {:blocked, {:inspection, failure}}
-  defp removal({:present, allocation, _marker}), do: {:run, {:remove_data, allocation}}
+  defp removal({:present, allocation}), do: {:run, {:remove_data, allocation}}
 
   # `remove_data` converges, so it also clears a completion marker whose data are already gone.
   defp removal({:lost, allocation}), do: {:run, {:remove_data, allocation}}

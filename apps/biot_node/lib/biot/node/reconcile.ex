@@ -25,9 +25,6 @@ defmodule Biot.Node.Reconcile do
   @typedoc "The action the controller is running right now, if any."
   @type current_action :: nil | Action.t()
 
-  @typedoc "Whether the node currently holds a control link to the server."
-  @type control_state :: :ready | :offline
-
   @typedoc "What one step of the decision returns. `:ready` means the step's resources need nothing."
   @type step :: :ready | {:run, Action.t()} | {:blocked, BlockReason.t()} | {:failed, Failure.t()}
 
@@ -38,16 +35,17 @@ defmodule Biot.Node.Reconcile do
           | {:blocked, BlockReason.t()}
           | {:failed, Failure.t()}
 
-  @spec next(ExecutionSpec.t(), NodeState.t(), current_action(), control_state()) :: t()
-  def next(%ExecutionSpec{} = spec, %NodeState{} = state, current, control) do
+  @spec next(ExecutionSpec.t(), NodeState.t(), current_action()) :: t()
+  def next(%ExecutionSpec{} = spec, %NodeState{} = state, current) do
     with :ready <- current_action(spec, current),
          :ready <- recorded_failure(state, spec.desired.revision) do
-      spec
-      |> converge(state)
-      |> offline_gate(control)
+      converge(spec, state)
     end
   end
 
+  # Invariant: release never runs while an action is in flight, because every other answer here
+  # wins over `converge/2`. The resources an in-flight action needs are therefore retained by
+  # construction, and no action has to declare which environments it holds.
   defp current_action(%ExecutionSpec{}, nil), do: :ready
 
   defp current_action(%ExecutionSpec{desired: %Desired{state: desired}}, action)
@@ -90,13 +88,4 @@ defmodule Biot.Node.Reconcile do
       :settled
     end
   end
-
-  defp offline_gate(decision, :ready), do: decision
-
-  defp offline_gate({:run, action} = decision, :offline) do
-    if Action.requires_control?(action), do: {:blocked, :control_offline}, else: decision
-  end
-
-  # An offline node still finishes an accepted stop or destruction, and still blocks or fails.
-  defp offline_gate(decision, :offline), do: decision
 end

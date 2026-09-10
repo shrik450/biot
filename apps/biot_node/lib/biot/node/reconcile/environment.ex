@@ -49,7 +49,7 @@ defmodule Biot.Node.Reconcile.Environment do
 
   defp desired_installation(
          %ExecutionSpec{} = spec,
-         %NodeState{data: {:present, allocation, _marker}} = state
+         %NodeState{data: {:present, allocation}} = state
        ) do
     installation_step(state.installation, spec, state, allocation)
   end
@@ -100,22 +100,18 @@ defmodule Biot.Node.Reconcile.Environment do
   defp install_desired(%ExecutionSpec{} = spec, %NodeState{} = state, allocation) do
     environment_id = spec.desired.environment_id
 
-    case artifact(state.prepared, environment_id) do
+    case prepared(state, environment_id) do
       {:present, artifact_id} -> install_step(state.container, spec, allocation, artifact_id)
       :absent -> resolution_step(Map.fetch(state.resolutions, environment_id), spec, allocation)
       {:unknown, failure} -> {:blocked, {:inspection, failure}}
     end
   end
 
-  defp artifact({:present, artifacts}, environment_id) do
-    case Map.fetch(artifacts, environment_id) do
-      {:ok, artifact_id} -> {:present, artifact_id}
-      :error -> :absent
-    end
+  # An environment with no entry has no prepared artifact, which is the same fact as an inspected
+  # absent one.
+  defp prepared(%NodeState{prepared: prepared}, environment_id) do
+    Map.get(prepared, environment_id, :absent)
   end
-
-  defp artifact(:absent, _environment_id), do: :absent
-  defp artifact({:unknown, failure}, _environment_id), do: {:unknown, failure}
 
   # At most one container uses a biot's writable data, so the previous container must be inspected
   # absent before the allocation selects a different artifact.
@@ -192,12 +188,18 @@ defmodule Biot.Node.Reconcile.Environment do
     prepared_environments(state.prepared) ++ snapshot_environments(state.resolutions)
   end
 
-  defp prepared_environments({:present, artifacts}), do: Map.keys(artifacts)
-  defp prepared_environments(:absent), do: []
+  defp prepared_environments(prepared) do
+    Enum.flat_map(prepared, fn {environment_id, artifact} ->
+      prepared_environment(environment_id, artifact)
+    end)
+  end
 
-  # An unreadable prepared set contributes no candidates; a recorded resolution can still safely
-  # release an unretained environment because no resource is retained for it.
-  defp prepared_environments({:unknown, _failure}), do: []
+  defp prepared_environment(environment_id, {:present, _artifact_id}), do: [environment_id]
+  defp prepared_environment(_environment_id, :absent), do: []
+
+  # An unreadable root contributes no candidate; its recorded resolution still offers the
+  # environment for release, because nothing this biot needs is retained behind it.
+  defp prepared_environment(_environment_id, {:unknown, _failure}), do: []
 
   defp snapshot_environments(resolutions) do
     Enum.flat_map(resolutions, fn {environment_id, resolution} ->

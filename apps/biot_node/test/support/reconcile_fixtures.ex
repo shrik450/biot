@@ -9,7 +9,6 @@ defmodule Biot.Node.ReconcileFixtures do
   alias Biot.Node.ArtifactId
   alias Biot.Node.InspectionFailure
   alias Biot.Node.Installation
-  alias Biot.Node.MarkerId
   alias Biot.Node.NetworkId
   alias Biot.Node.NodePrivatePath
   alias Biot.Node.NodeState
@@ -36,7 +35,6 @@ defmodule Biot.Node.ReconcileFixtures do
 
   def incarnation, do: parse!(IncarnationId, @uuid <> "c1")
   def next_incarnation, do: parse!(IncarnationId, @uuid <> "c2")
-  def marker, do: parse!(MarkerId, @uuid <> "a1")
   def network, do: parse!(NetworkId, @uuid <> "f1")
 
   def data_root, do: parse!(NodePrivatePath, "/var/lib/biot/allocations/b1")
@@ -62,14 +60,14 @@ defmodule Biot.Node.ReconcileFixtures do
     Manifest.build(pinned, [], nil)
   end
 
-  @doc "An allocation whose initialization completed, which is what `{:present, _, _}` data means."
+  @doc "An allocation whose initialization completed, which is what `{:present, _}` data means."
   def allocation do
     %Allocation{
       biot_id: biot_id(),
       uid_range: %{start: 500_000, count: 65_536},
       data_root: data_root(),
       network_id: network(),
-      initialization: {:complete, marker()}
+      initialization: :complete
     }
   end
 
@@ -117,7 +115,7 @@ defmodule Biot.Node.ReconcileFixtures do
 
   @doc """
   The derived state of a biot that owns nothing yet. Overrides name the facts under test, such as
-  `state(data: {:present, allocation(), marker()}, container: running(e1()))`.
+  `state(data: {:present, allocation()}, container: running(e1()))`.
   """
   def state(overrides \\ []) do
     struct!(
@@ -126,7 +124,7 @@ defmodule Biot.Node.ReconcileFixtures do
         resolutions: %{},
         installation: nil,
         container: :absent,
-        prepared: :absent,
+        prepared: %{},
         pending_exit: nil,
         failure: nil
       },
@@ -158,11 +156,11 @@ defmodule Biot.Node.ReconcileFixtures do
   @doc "The state of a biot running `environment_id` with everything settled behind it."
   def settled(environment_id) do
     state(
-      data: {:present, allocation(), marker()},
+      data: {:present, allocation()},
       resolutions: %{environment_id => {:present, resolution(environment_id)}},
       installation: {:present, installation(environment_id)},
       container: running(environment_id),
-      prepared: {:present, %{environment_id => artifact(environment_id)}}
+      prepared: %{environment_id => {:present, artifact(environment_id)}}
     )
   end
 

@@ -14,22 +14,22 @@ defmodule Biot.Node.HostPureTest do
   alias Biot.Node.Host.Outcome
   alias Biot.Node.Host.Paths
   alias Biot.Node.InspectionFailure
+  alias Biot.Node.Journal.Ecto.Attempts
   alias Biot.Protocol.Platform
 
   describe "data inspection" do
     test "covers every data state from host facts" do
       fresh = fresh_allocation()
       complete = allocation()
-      expected_marker = marker()
       present_mounts = List.duplicate({:present, :directory}, 3)
 
       assert {:uninitialized, ^fresh} =
                DataInspection.state(fresh, facts(:absent, [], :absent))
 
-      assert {:present, ^complete, ^expected_marker} =
+      assert {:present, ^complete} =
                DataInspection.state(
                  complete,
-                 facts({:present, :directory}, present_mounts, {:present, to_string(marker())})
+                 facts({:present, :directory}, present_mounts, {:present, to_string(biot_id())})
                )
 
       assert {:lost, ^complete} =
@@ -40,7 +40,7 @@ defmodule Biot.Node.HostPureTest do
                  complete,
                  facts({:present, :directory}, [:absent | present_mounts], {
                    :present,
-                   to_string(marker())
+                   to_string(biot_id())
                  })
                )
 
@@ -50,7 +50,7 @@ defmodule Biot.Node.HostPureTest do
                  facts(
                    {:present, :directory},
                    present_mounts,
-                   {:present, to_string(marker()) <> "x"}
+                   {:present, "not-a-biot-id"}
                  )
                )
 
@@ -59,7 +59,7 @@ defmodule Biot.Node.HostPureTest do
             {:mounts,
              facts({:present, :directory}, [{:error, :eperm} | present_mounts], {
                :present,
-               to_string(marker())
+               to_string(biot_id())
              })},
             {:marker, facts({:present, :directory}, present_mounts, {:error, :eio})}
           ] do
@@ -74,6 +74,20 @@ defmodule Biot.Node.HostPureTest do
 
       assert {:unknown, ^fresh, %InspectionFailure{reason: :denied}} =
                DataInspection.state(fresh, facts({:error, :eacces}, [], :absent))
+    end
+
+    test "a marker for another biot is lost" do
+      complete = allocation()
+      present_mounts = List.duplicate({:present, :directory}, 3)
+
+      assert DataInspection.state(
+               complete,
+               facts(
+                 {:present, :directory},
+                 present_mounts,
+                 {:present, to_string(other_biot_id())}
+               )
+             ) == {:lost, complete}
     end
   end
 
@@ -96,12 +110,17 @@ defmodule Biot.Node.HostPureTest do
     end
 
     test "covers absent, present, and unknown prepared resources" do
-      assert EnvironmentInspection.prepared([{e1(), :absent}]) == {:present, %{}}
+      assert EnvironmentInspection.prepared([{e1(), :absent}]) == %{e1() => :absent}
 
       assert EnvironmentInspection.prepared([{e1(), {:present, artifact(e1())}}]) ==
-               {:present, %{e1() => artifact(e1())}}
+               %{e1() => {:present, artifact(e1())}}
 
-      assert {:unknown, %InspectionFailure{resource: :prepared, reason: :unreadable}} =
+      environment_id = e1()
+
+      assert %{
+               ^environment_id =>
+                 {:unknown, %InspectionFailure{resource: :prepared, reason: :unreadable}}
+             } =
                EnvironmentInspection.prepared([
                  {e1(), {:error, {:unreadable, "the bundle is invalid"}}}
                ])
@@ -114,16 +133,21 @@ defmodule Biot.Node.HostPureTest do
 
       assert EnvironmentInspection.installation(
                installation,
-               {:present, %{e1() => artifact(e1())}}
+               %{e1() => {:present, artifact(e1())}}
              ) == {:present, installation}
 
-      assert EnvironmentInspection.installation(installation, {:present, %{}}) ==
+      assert EnvironmentInspection.installation(installation, %{}) ==
                {:lost, installation}
 
       failure = inspection(:prepared, :timed_out)
 
-      assert EnvironmentInspection.installation(installation, {:unknown, failure}) ==
+      assert EnvironmentInspection.installation(installation, %{e1() => {:unknown, failure}}) ==
                {:unknown, installation, failure}
+
+      assert EnvironmentInspection.installation(
+               installation,
+               %{e1() => {:present, artifact(e2())}, e2() => {:present, artifact(e1())}}
+             ) == {:lost, installation}
     end
   end
 
@@ -211,6 +235,59 @@ defmodule Biot.Node.HostPureTest do
     assert label_value(labels, Names.environment_label()) == to_string(e1())
     assert Names.network(allocation().network_id) == "biot-network-#{allocation().network_id}"
     assert Names.container(incarnation()) == "biot-#{incarnation()}"
+  end
+
+  test "names parse the owner label" do
+    assert Names.owner(%{Names.biot_label() => to_string(biot_id())}) == {:ok, biot_id()}
+
+    assert Names.owner(%{Names.biot_label() => "not-a-biot-id"}) ==
+             {:error, :invalid_format}
+
+    assert Names.owner(%{}) == {:error, :invalid_format}
+  end
+
+  describe "journal attempt counts" do
+    test "cast and dump accept stage maps with positive counts" do
+      attempts = %{allocate: 1, prepare: 3}
+
+      assert Attempts.cast(attempts) == {:ok, attempts}
+      assert Attempts.cast(%{"allocate" => 1, "prepare" => 3}) == {:ok, attempts}
+      assert Attempts.dump(attempts) == {:ok, %{"allocate" => 1, "prepare" => 3}}
+      assert Attempts.load(%{"allocate" => 1, "prepare" => 3}) == {:ok, attempts}
+    end
+
+    test "cast and dump reject invalid maps and non-maps" do
+      invalid = [
+        %{:not_a_stage => 1},
+        %{"not_a_stage" => 1},
+        %{allocate: 0},
+        %{allocate: -1},
+        %{allocate: 1.5},
+        %{allocate: "1"},
+        nil,
+        [],
+        :attempts,
+        1
+      ]
+
+      for value <- invalid do
+        assert Attempts.cast(value) == :error, "cast accepted #{inspect(value)}"
+        assert Attempts.dump(value) == :error, "dump accepted #{inspect(value)}"
+      end
+    end
+
+    test "load raises for corrupt stored values" do
+      for value <- [
+            %{"not_a_stage" => 1},
+            %{"allocate" => 0},
+            %{"allocate" => -1},
+            %{"allocate" => 1.5},
+            nil,
+            []
+          ] do
+        assert_raise ArgumentError, fn -> Attempts.load(value) end
+      end
+    end
   end
 
   test "the subordinate range starts after Podman's root mapping" do

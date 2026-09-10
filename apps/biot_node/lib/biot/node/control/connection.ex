@@ -4,6 +4,10 @@ defmodule Biot.Node.Control.Connection do
 
   It also owns `Biot.Node.Control.Outbox` and drains it while the link is ready, so a controller's
   report never waits for the socket.
+
+  A finished destruction leaves its report in the journal rather than in a controller, so this
+  connection replays it: once when a link becomes ready, and again each time the server repeats
+  the intent for that biot.
   """
 
   use GenServer
@@ -16,6 +20,7 @@ defmodule Biot.Node.Control.Connection do
   alias Biot.Node.Controllers
   alias Biot.Node.Diagnostics
   alias Biot.Node.Journal
+  alias Biot.Node.LocalIntent
   alias Biot.Node.Orphans
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.Frame
@@ -70,20 +75,10 @@ defmodule Biot.Node.Control.Connection do
   @spec wake() :: :ok
   def wake, do: GenServer.cast(__MODULE__, :drain)
 
-  @doc "Whether the node holds a synchronized control link right now."
-  @spec status() :: :ready | :offline
-  def status do
-    case :ets.whereis(__MODULE__) do
-      :undefined -> :offline
-      table -> published_status(table)
-    end
-  end
-
   @impl true
   def init(options) do
-    __MODULE__ = :ets.new(__MODULE__, [:named_table, :set, :protected, read_concurrency: true])
     :ok = Outbox.open()
-    state = publish(build_state(options))
+    state = build_state(options)
 
     case Platform.current() do
       {:ok, platform} ->
@@ -133,8 +128,9 @@ defmodule Biot.Node.Control.Connection do
   def handle_info({:reconnect, _token}, state), do: {:noreply, state}
 
   def handle_info({:announce, _biot_ids}, %State{status: :ready} = state) do
-    :ok =
-      Control.report_node_observation(Orphans.detect(Journal.allocations(), Journal.intents()))
+    intents = Journal.intents()
+    Enum.each(intents, &replay_destruction_report/1)
+    :ok = Control.report_node_observation(Orphans.detect(Journal.allocations(), intents))
 
     {:noreply, drain(state)}
   end
@@ -312,8 +308,12 @@ defmodule Biot.Node.Control.Connection do
 
   defp handle_message(%Message.Desired{biot_spec: spec}, %State{status: :ready} = state) do
     case Journal.put_intent(spec) do
-      {:ok, _intent} -> acknowledge_desired(spec, state)
-      {:error, reason} -> disconnect(state, reason)
+      {:ok, intent} ->
+        replay_destruction_report(intent)
+        acknowledge_desired(spec, state)
+
+      {:error, reason} ->
+        disconnect(state, reason)
     end
   end
 
@@ -384,13 +384,7 @@ defmodule Biot.Node.Control.Connection do
          ) do
       :ok ->
         send(self(), {:announce, biot_ids})
-
-        publish(%{
-          state
-          | status: :ready,
-            staging: nil,
-            backoff_ms: state.backoff_min_ms
-        })
+        %{state | status: :ready, staging: nil, backoff_ms: state.backoff_min_ms}
 
       {:error, reason} ->
         disconnect(state, reason)
@@ -442,7 +436,7 @@ defmodule Biot.Node.Control.Connection do
     token = make_ref()
     Process.send_after(self(), {:reconnect, token}, state.backoff_ms)
 
-    publish(%{
+    %{
       state
       | status: :disconnected,
         socket: nil,
@@ -453,26 +447,15 @@ defmodule Biot.Node.Control.Connection do
         heartbeat_challenge: nil,
         reconnect_token: token,
         backoff_ms: min(state.backoff_ms * 2, state.backoff_max_ms)
-    })
+    }
   end
 
-  # The link's own status is the one fact reconciliation needs about control, so the connection
-  # publishes it where any controller can read it without waiting for this process.
-  defp publish(%State{status: :ready} = state) do
-    true = :ets.insert(__MODULE__, {:status, :ready})
-    state
-  end
+  # The server keeps sending intent for a destroyed biot until it acknowledges the report, so the
+  # node repeats the receipt on every link that becomes ready and on every repeat of the intent.
+  defp replay_destruction_report(%LocalIntent{destruction_report: nil}), do: :ok
 
-  defp publish(%State{} = state) do
-    true = :ets.insert(__MODULE__, {:status, :offline})
-    state
-  end
-
-  defp published_status(table) do
-    case :ets.lookup(table, :status) do
-      [{:status, status}] -> status
-      [] -> :offline
-    end
+  defp replay_destruction_report(%LocalIntent{} = intent) do
+    Control.report_observation(intent.biot_id, intent.destruction_report)
   end
 
   defp build_state(options) do

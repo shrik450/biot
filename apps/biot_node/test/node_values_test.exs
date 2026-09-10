@@ -4,12 +4,10 @@ defmodule Biot.Node.NodeValuesTest do
   use ExUnitProperties
 
   alias Biot.Node.ArtifactId
-  alias Biot.Node.MarkerId
   alias Biot.Node.NetworkId
   alias Biot.Node.NodePrivatePath
 
-  @uuid_modules [MarkerId, NetworkId]
-  @modules [NodePrivatePath, ArtifactId, MarkerId, NetworkId]
+  @modules [NodePrivatePath, ArtifactId, NetworkId]
 
   describe "NodePrivatePath" do
     test "accepts an absolute path in its canonical spelling" do
@@ -80,18 +78,17 @@ defmodule Biot.Node.NodeValuesTest do
     end
   end
 
-  describe "MarkerId and NetworkId" do
+  describe "NetworkId" do
     test "accept a canonical random UUID" do
-      for module <- @uuid_modules, value <- ["00000000-0000-4000-8000-0000000000a1", uuid()] do
-        assert {:ok, id} = module.parse(value)
-        assert module.to_string(id) == value
+      for value <- ["00000000-0000-4000-8000-0000000000a1", uuid()] do
+        assert {:ok, id} = NetworkId.parse(value)
+        assert NetworkId.to_string(id) == value
         assert to_string(id) == value
       end
     end
 
     test "reject anything that is not a canonical random UUID" do
-      for module <- @uuid_modules,
-          value <- [
+      for value <- [
             "",
             "00000000-0000-4000-8000-0000000000A1",
             "00000000-0000-1000-8000-0000000000a1",
@@ -105,8 +102,8 @@ defmodule Biot.Node.NodeValuesTest do
             :atom,
             %{}
           ] do
-        assert module.parse(value) == {:error, :invalid_format},
-               "#{inspect(module)} accepted #{inspect(value)}"
+        assert NetworkId.parse(value) == {:error, :invalid_format},
+               "NetworkId accepted #{inspect(value)}"
       end
     end
   end

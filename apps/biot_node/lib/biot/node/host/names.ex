@@ -27,6 +27,11 @@ defmodule Biot.Node.Host.Names do
     |> Enum.flat_map(fn {key, value} -> ["--label", "#{key}=#{value}"] end)
   end
 
+  @doc "The biot a set of container labels says owns the container."
+  @spec owner(term()) :: {:ok, BiotId.t()} | {:error, :invalid_format}
+  def owner(%{@biot_label => value}), do: BiotId.parse(value)
+  def owner(_labels), do: {:error, :invalid_format}
+
   @spec biot_label() :: String.t()
   def biot_label, do: @biot_label
 

@@ -62,11 +62,15 @@ defmodule Biot.Protocol.Failure do
     }
   end
 
+  @doc "The lifecycle stage one encoded stage name describes."
+  @spec parse_stage(term()) :: {:ok, stage()} | {:error, :invalid_format}
+  def parse_stage(value), do: parse_enum(value, @stages)
+
   @spec parse(term()) :: {:ok, t()} | {:error, atom()}
   def parse(value) when is_map(value) do
     with {:ok, value} <- StrictMap.fetch_exact(value, @fields),
          {:ok, stage} <- Map.fetch(value, "stage"),
-         {:ok, stage} <- parse_enum(stage, @stages),
+         {:ok, stage} <- parse_stage(stage),
          {:ok, code} <- Map.fetch(value, "code"),
          {:ok, code} <- parse_enum(code, @codes),
          {:ok, retry_policy} <- Map.fetch(value, "retry"),

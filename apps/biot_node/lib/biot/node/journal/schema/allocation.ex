@@ -4,7 +4,6 @@ defmodule Biot.Node.Journal.Schema.Allocation do
   use Ecto.Schema
 
   alias Biot.Node.Journal.Ecto.ParsedValue
-  alias Biot.Node.MarkerId
   alias Biot.Node.NetworkId
   alias Biot.Node.NodePrivatePath
   alias Biot.Protocol.BiotId
@@ -16,7 +15,7 @@ defmodule Biot.Node.Journal.Schema.Allocation do
     field(:uid_count, :integer)
     field(:data_root, ParsedValue, module: NodePrivatePath)
     field(:network_id, ParsedValue, module: NetworkId)
-    field(:initialization_marker, ParsedValue, module: MarkerId)
+    field(:initialized, :boolean)
 
     timestamps(type: :utc_datetime_usec)
   end

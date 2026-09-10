@@ -9,10 +9,15 @@ defmodule Biot.Node.HostJournalIntegrationTest do
   alias Biot.Node.Host.Context
   alias Biot.Node.Journal
   alias Biot.Node.Journal.Schema.Allocation, as: AllocationRow
+  alias Biot.Node.Journal.Schema.LocalIntent, as: LocalIntentRow
+  alias Biot.Node.Journal.Schema.RetryState, as: RetryStateRow
   alias Biot.Node.NetworkId
   alias Biot.Node.NodePrivatePath
   alias Biot.Node.Repo
   alias Biot.Protocol.BiotId
+  alias Biot.Protocol.BiotSpec
+  alias Biot.Protocol.ExecutionReport
+  alias Biot.Protocol.Failure
   alias Biot.Protocol.Platform
 
   setup_all do
@@ -39,7 +44,80 @@ defmodule Biot.Node.HostJournalIntegrationTest do
     Repo.delete_all(Biot.Node.Journal.Schema.Installation)
     Repo.delete_all(Biot.Node.Journal.Schema.Resolution)
     Repo.delete_all(AllocationRow)
+    Repo.delete_all(RetryStateRow)
+    Repo.delete_all(LocalIntentRow)
     :ok
+  end
+
+  describe "retry journal" do
+    test "retry writes use the stored desired revision" do
+      biot = biot_spec(1)
+      failure = failure()
+      wake = DateTime.add(DateTime.utc_now(), 30, :second)
+
+      assert Journal.retry_state(biot_id()) == nil
+      assert Journal.record_attempt(biot_id(), 1, :prepare) == :superseded
+      assert Journal.record_failure(biot_id(), 1, failure, wake) == :superseded
+      assert Journal.clear_failure(biot_id(), 1) == :superseded
+
+      assert {:ok, _intent} = Journal.put_intent(biot)
+      assert Journal.record_attempt(biot_id(), 2, :prepare) == :superseded
+
+      assert {:ok, attempted} = Journal.record_attempt(biot_id(), 1, :prepare)
+      assert attempted.target_revision == 1
+      assert attempted.attempts == %{prepare: 1}
+
+      assert {:ok, failed} = Journal.record_failure(biot_id(), 1, failure, wake)
+      assert failed.failure == failure
+      assert failed.next_attempt_at == wake
+
+      assert {:ok, cleared} = Journal.clear_failure(biot_id(), 1)
+      assert cleared.attempts == %{prepare: 1}
+      assert cleared.failure == nil
+      assert cleared.next_attempt_at == nil
+      assert Journal.retry_state(biot_id()) == cleared
+    end
+
+    test "put_intent keeps retry state for the same revision and drops it for a new revision" do
+      assert {:ok, _intent} = Journal.put_intent(biot_spec(1))
+      assert {:ok, retry} = Journal.record_attempt(biot_id(), 1, :resolve)
+      assert {:ok, _intent} = Journal.put_intent(biot_spec(1))
+      assert Journal.retry_state(biot_id()) == retry
+
+      assert {:ok, _intent} = Journal.put_intent(biot_spec(2))
+      assert Journal.retry_state(biot_id()) == nil
+      assert Journal.intent(biot_id()).biot_spec.execution.desired.revision == 2
+    end
+
+    test "replace_intents deletes omitted intent and retry rows together" do
+      assert {:ok, _intent} = Journal.put_intent(biot_spec(1))
+      assert {:ok, _retry} = Journal.record_attempt(biot_id(), 1, :resolve)
+
+      assert Journal.replace_intents([]) == :ok
+      assert Journal.intent(biot_id()) == nil
+      assert Journal.retry_state(biot_id()) == nil
+    end
+
+    test "put_destruction_report keeps the intent and deletes retry state" do
+      report = destruction_report(1)
+      assert {:ok, _intent} = Journal.put_intent(biot_spec(1))
+      assert {:ok, _retry} = Journal.record_attempt(biot_id(), 1, :remove_data)
+
+      assert {:ok, intent} = Journal.put_destruction_report(biot_id(), report)
+      assert intent.destruction_report == report
+      assert Journal.intent(biot_id()) == intent
+      assert Journal.retry_state(biot_id()) == nil
+    end
+
+    test "put_intent keeps a stored destruction report" do
+      report = destruction_report(1)
+      assert {:ok, _intent} = Journal.put_intent(biot_spec(1))
+      assert {:ok, _intent} = Journal.put_destruction_report(biot_id(), report)
+
+      assert {:ok, intent} = Journal.put_intent(biot_spec(2))
+      assert intent.biot_spec == biot_spec(2)
+      assert intent.destruction_report == report
+    end
   end
 
   test "the first unused UID range fills a gap before extending the journal", context do
@@ -109,6 +187,30 @@ defmodule Biot.Node.HostJournalIntegrationTest do
       data_root: private_path,
       network_id: NetworkId.from_biot_id(biot_id),
       initialization: :uninitialized
+    }
+  end
+
+  defp biot_spec(revision) do
+    %BiotSpec{execution: spec(revision: revision), access_revision: revision}
+  end
+
+  defp destruction_report(revision) do
+    %ExecutionReport{
+      accepted_revision: revision,
+      installed_environment_id: nil,
+      container: :absent,
+      data: :no_allocation,
+      failure: nil
+    }
+  end
+
+  defp failure do
+    %Failure{
+      stage: :prepare,
+      code: :preparation_failed,
+      retry: :automatic,
+      message: "the environment could not be built",
+      diagnostic_ref: nil
     }
   end
 

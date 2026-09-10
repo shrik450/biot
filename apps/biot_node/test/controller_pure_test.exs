@@ -11,6 +11,7 @@ defmodule Biot.Node.ControllerPureTest do
   alias Biot.Node.Observation
   alias Biot.Node.Orphans
   alias Biot.Node.Retry
+  alias Biot.Node.RetryState
   alias Biot.Protocol.BiotSpec
   alias Biot.Protocol.Desired
   alias Biot.Protocol.Failure
@@ -80,7 +81,7 @@ defmodule Biot.Node.ControllerPureTest do
         {:no_allocation, :no_allocation},
         {{:unknown, allocation(), inspection(:data)}, :unknown},
         {{:uninitialized, fresh_allocation()}, :uninitialized},
-        {{:present, allocation(), marker()}, :present},
+        {{:present, allocation()}, :present},
         {{:lost, allocation()}, :lost}
       ]
 
@@ -178,13 +179,61 @@ defmodule Biot.Node.ControllerPureTest do
     end
   end
 
+  describe "RetryState" do
+    test "new/2 starts an empty row for one revision" do
+      assert RetryState.new(biot_id(), 3) == %RetryState{
+               biot_id: biot_id(),
+               target_revision: 3,
+               attempts: %{},
+               next_attempt_at: nil,
+               failure: nil
+             }
+    end
+
+    test "for_revision/3 keeps the matching row and replaces a stale row" do
+      row = %RetryState{
+        RetryState.new(biot_id(), 2)
+        | attempts: %{prepare: 3},
+          failure: failure(:automatic)
+      }
+
+      assert RetryState.for_revision(row, biot_id(), 2) == row
+      assert RetryState.for_revision(row, biot_id(), 3) == RetryState.new(biot_id(), 3)
+      assert RetryState.for_revision(nil, biot_id(), 3) == RetryState.new(biot_id(), 3)
+    end
+
+    test "attempts/2 reads zero or the count for one stage" do
+      row = %{RetryState.new(biot_id(), 1) | attempts: %{prepare: 2}}
+
+      assert RetryState.attempts(row, :prepare) == 2
+      assert RetryState.attempts(row, :start) == 0
+    end
+
+    test "count_attempt/2 increments only one stage and clears the pending wake" do
+      wake = DateTime.add(DateTime.utc_now(), 60, :second)
+      row = %{RetryState.new(biot_id(), 1) | attempts: %{prepare: 2}, next_attempt_at: wake}
+
+      assert RetryState.count_attempt(row, :prepare) == %{
+               row
+               | attempts: %{prepare: 3},
+                 next_attempt_at: nil
+             }
+
+      assert RetryState.count_attempt(row, :start) == %{
+               row
+               | attempts: %{prepare: 2, start: 1},
+                 next_attempt_at: nil
+             }
+    end
+  end
+
   defp host_inspection(overrides) do
     defaults = %Inspection{
-      data: {:present, allocation(), marker()},
+      data: {:present, allocation()},
       resolutions: %{e1() => {:present, resolution(e1())}},
       installation: {:present, installation(e1())},
       container: :absent,
-      prepared: {:present, %{e1() => artifact(e1())}}
+      prepared: %{e1() => {:present, artifact(e1())}}
     }
 
     struct!(defaults, overrides)
@@ -207,7 +256,8 @@ defmodule Biot.Node.ControllerPureTest do
   defp intent(id) do
     %LocalIntent{
       biot_id: id,
-      biot_spec: %BiotSpec{execution: spec(biot_id: id), access_revision: 1}
+      biot_spec: %BiotSpec{execution: spec(biot_id: id), access_revision: 1},
+      destruction_report: nil
     }
   end
 end

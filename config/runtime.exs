@@ -158,6 +158,8 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
         cancel_grace_ms: node_integer_env.("BIOT_NODE_CANCEL_GRACE_MS", 10_000, 1),
         controller_start_retry_ms:
           node_integer_env.("BIOT_NODE_CONTROLLER_START_RETRY_MS", 5_000, 1),
+        container_events_retry_ms:
+          node_integer_env.("BIOT_NODE_CONTAINER_EVENTS_RETRY_MS", 5_000, 1),
         diagnostic_max_entries_per_biot:
           node_integer_env.("BIOT_NODE_DIAGNOSTIC_MAX_ENTRIES_PER_BIOT", 5, 1),
         diagnostic_max_entry_bytes:

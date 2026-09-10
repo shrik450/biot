@@ -15,6 +15,7 @@ defmodule Biot.Node.Host.Environment do
   alias Biot.Node.Installation
   alias Biot.Node.Journal
   alias Biot.Node.NodePrivatePath
+  alias Biot.Node.NodeState
   alias Biot.Node.Resolution
   alias Biot.Node.StorePath
   alias Biot.Protocol.EnvironmentId
@@ -23,7 +24,7 @@ defmodule Biot.Node.Host.Environment do
   alias Biot.Protocol.Platform
 
   @spec resolutions(Config.t(), [Resolution.t()]) :: %{
-          EnvironmentId.t() => Biot.Node.NodeState.resolution_state()
+          EnvironmentId.t() => NodeState.resolution_state()
         }
   def resolutions(_config, rows) do
     rows
@@ -31,15 +32,15 @@ defmodule Biot.Node.Host.Environment do
     |> EnvironmentInspection.resolutions()
   end
 
-  @spec prepared(Config.t(), [Resolution.t()]) :: Biot.Node.NodeState.resource(map())
+  @spec prepared(Config.t(), [Resolution.t()]) :: NodeState.prepared()
   def prepared(config, rows) do
     rows
     |> Enum.map(&{&1.environment_id, artifact(config, &1.environment_id)})
     |> EnvironmentInspection.prepared()
   end
 
-  @spec installation(Installation.t() | nil, Biot.Node.NodeState.resource(map())) ::
-          Biot.Node.NodeState.installation_state()
+  @spec installation(Installation.t() | nil, NodeState.prepared()) ::
+          NodeState.installation_state()
   defdelegate installation(installation, prepared), to: EnvironmentInspection
 
   @spec resolve(

@@ -12,6 +12,6 @@ defmodule Biot.Node.Host.Inspection do
           resolutions: %{EnvironmentId.t() => NodeState.resolution_state()},
           installation: NodeState.installation_state(),
           container: NodeState.resource(NodeState.container()),
-          prepared: NodeState.resource(map())
+          prepared: NodeState.prepared()
         }
 end

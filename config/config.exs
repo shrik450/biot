@@ -52,6 +52,7 @@ config :biot_node,
   inspection_retry_ms: 15_000,
   cancel_grace_ms: 10_000,
   controller_start_retry_ms: 5_000,
+  container_events_retry_ms: 5_000,
   diagnostic_max_entries_per_biot: 5,
   diagnostic_max_entry_bytes: 65_536
 

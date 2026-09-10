@@ -2,7 +2,6 @@ defmodule Biot.Node.Host.ContainerInspection do
   @moduledoc "Parses Podman JSON once into the container resource reconciliation reads."
 
   alias Biot.Node.Host.Names
-  alias Biot.Protocol.BiotId
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.IncarnationId
 
@@ -11,7 +10,7 @@ defmodule Biot.Node.Host.ContainerInspection do
   @spec parse(term()) :: {:ok, container()} | {:error, :invalid_format}
   def parse(%{"Config" => %{"Labels" => labels}, "State" => state})
       when is_map(labels) and is_map(state) do
-    with {:ok, biot_id} <- parse_label(labels, Names.biot_label(), BiotId),
+    with {:ok, biot_id} <- Names.owner(labels),
          {:ok, incarnation_id} <-
            parse_label(labels, Names.incarnation_label(), IncarnationId),
          {:ok, environment_id} <-

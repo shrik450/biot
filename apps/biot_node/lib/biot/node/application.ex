@@ -31,7 +31,8 @@ defmodule Biot.Node.Application do
         Biot.Node.Host.Setup,
         Biot.Node.Repo,
         Biot.Node.Journal.Migrator,
-        Biot.Node.Controllers
+        Biot.Node.Controllers,
+        Biot.Node.Host.ContainerEvents
       ] ++ control_connection_child()
     else
       Logger.info("node host disabled because the data root is not configured")

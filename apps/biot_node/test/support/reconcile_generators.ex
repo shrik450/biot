@@ -1,7 +1,7 @@
 defmodule Biot.Node.ReconcileGenerators do
   @moduledoc """
   Generators over every variant of the reconciliation inputs, and validators for the result shapes
-  `Biot.Node.Reconcile.next/4` declares. The generators keep each derived state well formed: an
+  `Biot.Node.Reconcile.next/3` declares. The generators keep each derived state well formed: an
   uninitialized allocation never carries a completion marker, and a resolution entry always
   describes its own environment.
   """
@@ -60,7 +60,7 @@ defmodule Biot.Node.ReconcileGenerators do
       constant(:no_allocation),
       constant({:unknown, Fixtures.allocation(), Fixtures.inspection(:allocation)}),
       constant({:uninitialized, Fixtures.fresh_allocation()}),
-      constant({:present, Fixtures.allocation(), Fixtures.marker()}),
+      constant({:present, Fixtures.allocation()}),
       constant({:lost, Fixtures.allocation()})
     ])
   end
@@ -113,13 +113,21 @@ defmodule Biot.Node.ReconcileGenerators do
   end
 
   def prepared do
-    one_of([
-      constant(:absent),
-      constant({:unknown, Fixtures.inspection(:prepared)}),
-      map(environment_subset(), fn environment_ids ->
-        {:present, Map.new(environment_ids, &{&1, Fixtures.artifact(&1)})}
+    bind(environment_subset(), fn environment_ids ->
+      environment_ids
+      |> Enum.map(fn id ->
+        map(
+          member_of([
+            :absent,
+            {:unknown, Fixtures.inspection(:prepared)},
+            {:present, Fixtures.artifact(id)}
+          ]),
+          &{id, &1}
+        )
       end)
-    ])
+      |> fixed_list()
+      |> map(&Map.new/1)
+    end)
   end
 
   def pending_exit do
@@ -212,9 +220,7 @@ defmodule Biot.Node.ReconcileGenerators do
 
   def current_action, do: one_of([constant(nil), action()])
 
-  def control_state, do: member_of([:ready, :offline])
-
-  @doc "Whether a result is one of the five shapes `Reconcile.next/4` declares."
+  @doc "Whether a result is one of the five shapes `Reconcile.next/3` declares."
   def valid_result?(:settled), do: true
   def valid_result?(:cancel_current), do: true
   def valid_result?({:run, action}), do: valid_action?(action)
@@ -240,11 +246,10 @@ defmodule Biot.Node.ReconcileGenerators do
   def valid_action?({:release_allocation, %Allocation{}}), do: true
   def valid_action?(_other), do: false
 
-  @doc "Whether a term is one of the four block reasons `#{inspect(BlockReason)}` declares."
+  @doc "Whether a term is one of the three block reasons `#{inspect(BlockReason)}` declares."
   @spec valid_block_reason?(term()) :: boolean()
   def valid_block_reason?({:inspection, %InspectionFailure{}}), do: true
   def valid_block_reason?({:current_action, action}), do: valid_action?(action)
   def valid_block_reason?({:recorded_failure, %Failure{}}), do: true
-  def valid_block_reason?(:control_offline), do: true
   def valid_block_reason?(_other), do: false
 end

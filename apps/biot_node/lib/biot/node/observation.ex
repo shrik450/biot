@@ -79,6 +79,6 @@ defmodule Biot.Node.Observation do
   defp data(:no_allocation), do: :no_allocation
   defp data({:unknown, _allocation, _failure}), do: :unknown
   defp data({:uninitialized, _allocation}), do: :uninitialized
-  defp data({:present, _allocation, _marker}), do: :present
+  defp data({:present, _allocation}), do: :present
   defp data({:lost, _allocation}), do: :lost
 end

@@ -5,10 +5,12 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
 
   alias Biot.Node.Control, as: NodeControl
   alias Biot.Node.Control.Connection, as: NodeConnection
+  alias Biot.Node.Controllers
   alias Biot.Node.Diagnostics, as: NodeDiagnostics
   alias Biot.Node.Journal, as: NodeJournal
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.Certificates
+  alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Frame
   alias Biot.Protocol.Message
   alias Biot.Protocol.OrphanedAllocation
@@ -994,6 +996,107 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     end
   end
 
+  test "a real node replays a destruction report and removes it when a snapshot omits the biot",
+       context do
+    case Platform.current() do
+      {:ok, _platform} ->
+        owner = TestFixtures.principal(71)
+        node = node_for_certificate(71, context.certificates, 0)
+
+        {biot, _environment} =
+          TestFixtures.biot(owner, node, 8_071, desired_state: :destroyed)
+
+        {:ok, spec} = Biots.spec(biot.id)
+
+        report = %ExecutionReport{
+          accepted_revision: spec.execution.desired.revision,
+          installed_environment_id: nil,
+          container: :absent,
+          data: :no_allocation,
+          failure: nil
+        }
+
+        start_node_journal()
+        assert {:ok, _intent} = NodeJournal.put_intent(spec)
+        assert {:ok, _intent} = NodeJournal.put_destruction_report(biot.id, report)
+        {listener, port} = raw_server(context.certificates)
+        first_connection = TestFixtures.connection_id(71)
+        second_connection = TestFixtures.connection_id(72)
+        parent = self()
+
+        server =
+          Task.async(fn ->
+            first = accept_raw_server(listener)
+            complete_node_hello(first, first_connection)
+
+            send_message(
+              first,
+              %Message.SynchronizeBegin{connection_id: first_connection, count: 1},
+              1
+            )
+
+            send_message(first, %Message.SynchronizeItem{biot_spec: spec}, 1)
+            send_message(first, %Message.SynchronizeEnd{connection_id: first_connection}, 1)
+
+            assert %Message.AccessApplied{biot_id: biot_id} =
+                     await_message(first, 1, Message.AccessApplied)
+
+            assert biot_id == biot.id
+
+            assert %Message.Synchronized{connection_id: ^first_connection} =
+                     await_message(first, 1, Message.Synchronized)
+
+            assert %Message.Observation{biot_id: biot_id, execution_report: ^report} =
+                     await_observation(first, 1)
+
+            assert biot_id == biot.id
+            send_message(first, %Message.Desired{biot_spec: spec}, 1)
+
+            assert %Message.Observation{biot_id: biot_id, execution_report: ^report} =
+                     await_observation(first, 1)
+
+            assert biot_id == biot.id
+            :ssl.close(first)
+
+            second = accept_raw_server(listener)
+            complete_node_hello(second, second_connection)
+
+            send_message(
+              second,
+              %Message.SynchronizeBegin{connection_id: second_connection, count: 0},
+              1
+            )
+
+            send_message(second, %Message.SynchronizeEnd{connection_id: second_connection}, 1)
+
+            assert %Message.Synchronized{connection_id: ^second_connection} =
+                     await_message(second, 1, Message.Synchronized)
+
+            send(parent, :empty_snapshot_complete)
+            :ssl.close(second)
+          end)
+
+        _connection =
+          start_node(port, context.certificates, node,
+            reconnect_backoff_min_ms: 20,
+            reconnect_backoff_max_ms: 40
+          )
+
+        assert_receive :empty_snapshot_complete, @eventually_timeout
+        Task.await(server, @eventually_timeout)
+        assert NodeJournal.intent(biot.id) == nil
+
+        assert Enum.all?(Controllers.running(), fn {biot_id, _pid} ->
+                 biot_id != biot.id
+               end)
+
+        :ssl.close(listener)
+
+      {:error, :unsupported_platform} ->
+        assert Platform.current() == {:error, :unsupported_platform}
+    end
+  end
+
   test "a real node rejects every invalid snapshot without changing accepted intent", context do
     case Platform.current() do
       {:ok, _platform} ->
@@ -1185,8 +1288,10 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         environment_id = spec.execution.environment.id
 
         [{handler, _connection_id}] = Registry.lookup(Biot.Server.Control.Registry, node.id)
+        monitor = Process.monitor(handler)
         Process.exit(handler, :kill)
-        eventually(fn -> NodeControl.status() == :offline end)
+        assert_receive {:DOWN, ^monitor, :process, ^handler, :killed}, @eventually_timeout
+        eventually(fn -> :sys.get_state(connection).status == :disconnected end)
         :sys.suspend(connection)
 
         first =
@@ -1395,6 +1500,39 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
   defp await_message(socket, context, message_module) do
     deadline = System.monotonic_time(:millisecond) + @receive_timeout
     await_message_until(socket, context, message_module, deadline)
+  end
+
+  defp await_observation(socket, context) do
+    deadline = System.monotonic_time(:millisecond) + @receive_timeout
+    await_observation_until(socket, context, deadline)
+  end
+
+  defp await_observation_until(socket, context, deadline) do
+    case receive_message(socket, context, deadline) do
+      %Message.Observation{} = observation ->
+        observation
+
+      %Message.NodeObservation{} ->
+        await_observation_until(socket, context, deadline)
+
+      %Message.AccessApplied{} ->
+        await_observation_until(socket, context, deadline)
+
+      %Message.Heartbeat{} = heartbeat ->
+        send_message(
+          socket,
+          %Message.HeartbeatResponse{challenge: heartbeat.challenge},
+          context
+        )
+
+        await_observation_until(socket, context, deadline)
+
+      %Message.HeartbeatResponse{} ->
+        await_observation_until(socket, context, deadline)
+
+      message ->
+        flunk("expected #{inspect(Message.Observation)}, received: #{inspect(message)}")
+    end
   end
 
   defp await_message_until(socket, context, message_module, deadline) do
@@ -1624,7 +1762,6 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
 
         Task.await(server, @eventually_timeout)
         :ssl.close(listener)
-        eventually(fn -> NodeControl.status() == :offline end)
 
         receive do
         after

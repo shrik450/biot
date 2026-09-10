@@ -19,6 +19,18 @@ defmodule Biot.Node.Host.Podman do
     )
   end
 
+  @doc "Starts a Podman command the caller reads itself, such as the container event stream."
+  @spec open(Config.t(), [String.t()]) ::
+          {:ok, Command.Stream.t()} | {:error, :executable_not_found | :setsid_not_found | term()}
+  def open(config, arguments) do
+    Command.open(
+      config.setsid_executable,
+      config.podman_executable,
+      ["--module", Paths.podman_config(config) | arguments],
+      timeout_ms: config.command_timeout_ms
+    )
+  end
+
   @spec absent?(resource(), Command.Result.t()) :: boolean()
   def absent?(resource, result) do
     diagnostic = result |> Command.diagnostic() |> String.downcase()

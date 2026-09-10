@@ -1,9 +1,10 @@
 defmodule Biot.Node.Journal.Schema.LocalIntent do
-  @moduledoc "The journal row for the last accepted BiotSpec."
+  @moduledoc "The journal row for the last accepted BiotSpec and any final destruction report."
 
   use Ecto.Schema
 
   alias Biot.Node.Journal.Ecto.BiotSpec
+  alias Biot.Node.Journal.Ecto.ExecutionReport
   alias Biot.Node.Journal.Ecto.ParsedValue
   alias Biot.Protocol.BiotId
 
@@ -11,6 +12,7 @@ defmodule Biot.Node.Journal.Schema.LocalIntent do
   schema "local_intents" do
     field(:biot_id, ParsedValue, module: BiotId, primary_key: true)
     field(:biot_spec, BiotSpec)
+    field(:destruction_report, ExecutionReport)
 
     timestamps(type: :utc_datetime_usec)
   end

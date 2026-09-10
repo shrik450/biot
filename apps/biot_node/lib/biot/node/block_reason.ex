@@ -9,5 +9,4 @@ defmodule Biot.Node.BlockReason do
           {:inspection, InspectionFailure.t()}
           | {:current_action, Action.t()}
           | {:recorded_failure, Failure.t()}
-          | :control_offline
 end

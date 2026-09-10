@@ -2,9 +2,12 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   use ExUnit.Case, async: false
 
   alias Biot.Node.Allocation
+  alias Biot.Node.Controllers
   alias Biot.Node.DataRootLock
   alias Biot.Node.Host
   alias Biot.Node.Host.Command
+  alias Biot.Node.Host.Command.Reaper
+  alias Biot.Node.Host.ContainerEvents
   alias Biot.Node.Host.Environment, as: HostEnvironment
   alias Biot.Node.Host.Inspection
   alias Biot.Node.Host.Names
@@ -17,8 +20,10 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   alias Biot.Node.NodeState
   alias Biot.Node.Reconcile
   alias Biot.Node.Repo
+  alias Biot.Node.RetryState
   alias Biot.Node.StorePath
   alias Biot.Protocol.BiotId
+  alias Biot.Protocol.BiotSpec
   alias Biot.Protocol.Desired
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.EnvironmentSelection
@@ -142,11 +147,36 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     assert File.read!(Path.join(Paths.checkout(host.config, biot_id), "README")) ==
              "checkout data\n"
 
-    assert Path.wildcard(Paths.checkout_staging(host.config, biot_id, "*")) == []
+    refute File.exists?(Paths.checkout_staging(host.config, biot_id))
 
     {settled, create_actions} = converge(running, host)
     assert create_actions == [:resolve, :prepare, :install, :start]
     assert decision(running, host) == :settled
+    assert {:present, first_container} = settled.container
+
+    assert {:ok, _intent} =
+             Journal.put_intent(%BiotSpec{execution: running, access_revision: 1})
+
+    start_supervised!(Controllers)
+    start_supervised!(ContainerEvents)
+    assert eventually(fn -> controller_running?(biot_id) end)
+    started = System.monotonic_time(:millisecond)
+
+    assert {:ok, %Command.Result{status: 0}} =
+             Podman.run(host.config, ["kill", Names.container(first_container.incarnation_id)])
+
+    assert eventually(fn ->
+             match?(
+               %RetryState{failure: %{code: :container_failed}},
+               Journal.retry_state(biot_id)
+             )
+           end)
+
+    assert System.monotonic_time(:millisecond) - started < 30_000
+    stop_supervised!(ContainerEvents)
+    stop_supervised!(Controllers)
+    assert :ok = Journal.replace_intents([])
+    {settled, _recovery_actions} = converge(running, host)
     assert {:present, first_container} = settled.container
 
     assert :ok = Host.run({:start, allocation, installed(settled)}, host)
@@ -193,6 +223,40 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     assert {:present, old_container} = running_again.container
     old_data = running_again.data
 
+    second_id = id(BiotId, 804)
+    second_environment = id(EnvironmentId, 810)
+    {:ok, second_host} = Host.context(second_id)
+
+    second_running =
+      execution(
+        second_id,
+        second_environment,
+        context.checkout_repository,
+        selection,
+        :running,
+        1
+      )
+
+    {second_state, _second_actions} = converge(second_running, second_host)
+    second_allocation = Journal.allocation(second_id)
+    refute second_allocation.uid_range.start == allocation.uid_range.start
+    assert {:present, second_container} = second_state.container
+
+    first_address = container_address(host, old_container)
+    second_address = container_address(second_host, second_container)
+
+    assert eventually(fn -> container_reaches(host, old_container, curl, "127.0.0.1") end)
+
+    assert eventually(fn ->
+             container_reaches(second_host, second_container, curl, "127.0.0.1")
+           end)
+
+    refute container_reaches(host, old_container, curl, second_address)
+    refute container_reaches(second_host, second_container, curl, first_address)
+
+    assert :ok = Host.run({:retire, second_container.incarnation_id}, second_host)
+    assert :ok = Host.run({:release_environment, second_environment}, second_host)
+
     broken_environment = id(EnvironmentId, 803)
 
     broken_selection = %EnvironmentSelection{
@@ -236,12 +300,6 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
     assert :ok = Host.run({:release_allocation, allocation}, host)
     assert Allocation.resources(Journal.allocation(biot_id)) == Allocation.resources(allocation)
-
-    second_id = id(BiotId, 804)
-    {:ok, second_host} = Host.context(second_id)
-    assert :ok = Host.run({:allocate, second_id}, second_host)
-    second_allocation = Journal.allocation(second_id)
-    refute second_allocation.uid_range.start == allocation.uid_range.start
 
     assert :ok = Host.run({:release_environment, broken_environment}, host)
     assert :ok = Host.run({:release_environment, environment_id}, host)
@@ -298,6 +356,27 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     assert allocated_twice == allocated_once
   end
 
+  test "the container event reader releases commands that exit at once", context do
+    executable = Path.join(context.data_root, "exiting-podman")
+    File.write!(executable, "#!/bin/sh\nexit 1\n")
+    File.chmod!(executable, 0o700)
+    previous = Application.fetch_env!(:biot_node, :podman_executable)
+    before = MapSet.new(Path.wildcard(Path.join(System.tmp_dir!(), "biot-command-*")))
+    Application.put_env(:biot_node, :podman_executable, executable)
+
+    on_exit(fn -> Application.put_env(:biot_node, :podman_executable, previous) end)
+
+    reader = start_supervised!(ContainerEvents)
+    Process.sleep(1_500)
+
+    assert Process.alive?(reader)
+    assert Process.whereis(ContainerEvents) == reader
+    assert :sys.get_state(Reaper) == %{}
+
+    after_files = MapSet.new(Path.wildcard(Path.join(System.tmp_dir!(), "biot-command-*")))
+    assert MapSet.difference(after_files, before) == MapSet.new()
+  end
+
   defp prove_second_process_lock(data_root) do
     lock_root = Path.join(data_root, "lock-proof")
     name = Module.concat(__MODULE__, "Lock#{System.unique_integer([:positive])}")
@@ -345,7 +424,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
   defp decision(spec, host) do
     spec
-    |> then(&Reconcile.next(&1, node_state(Host.inspect_state(spec.biot_id, host)), nil, :ready))
+    |> then(&Reconcile.next(&1, node_state(Host.inspect_state(spec.biot_id, host)), nil))
   end
 
   defp converge(spec, host, actions \\ [])
@@ -353,7 +432,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   defp converge(spec, host, actions) when length(actions) < 20 do
     inspection = Host.inspect_state(spec.biot_id, host)
 
-    case Reconcile.next(spec, node_state(inspection), nil, :ready) do
+    case Reconcile.next(spec, node_state(inspection), nil) do
       :settled ->
         {inspection, Enum.reverse(actions)}
 
@@ -419,6 +498,35 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
       {:ok, %Command.Result{status: status, stdout: output}} -> {output, status}
       {:error, _reason} -> {"", 1}
     end
+  end
+
+  defp container_address(host, container) do
+    assert {:ok, %Command.Result{status: 0, stdout: output}} =
+             Podman.run(host.config, [
+               "inspect",
+               "--format",
+               "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+               Names.container(container.incarnation_id)
+             ])
+
+    String.trim(output)
+  end
+
+  defp container_reaches(host, container, curl, address) do
+    match?(
+      {:ok, %Command.Result{status: 0}},
+      Podman.run(host.config, [
+        "exec",
+        Names.container(container.incarnation_id),
+        curl,
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        "2",
+        "http://#{address}:8080/"
+      ])
+    )
   end
 
   defp start_foreign_container(host, allocation, installation, bundle, incarnation_id) do
@@ -638,6 +746,10 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
   defp eventually(_fun, 0), do: false
 
+  defp controller_running?(biot_id) do
+    Enum.any?(Controllers.running(), fn {running_id, _pid} -> running_id == biot_id end)
+  end
+
   defp host_settings(data_root, project_root) do
     [
       data_root: data_root,
@@ -656,7 +768,13 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
       nixpkgs_repository: "https://github.com/NixOS/nixpkgs",
       nixpkgs_ref: "nixos-unstable",
       host_command_timeout_ms: 1_200_000,
-      host_command_max_output_bytes: 256_000
+      host_command_max_output_bytes: 256_000,
+      observation_interval_ms: 600_000,
+      inspection_retry_ms: 600_000,
+      retry_backoff_min_ms: 2_000,
+      retry_backoff_max_ms: 8_000,
+      controller_start_retry_ms: 1_000,
+      container_events_retry_ms: 200
     ]
   end
 

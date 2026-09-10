@@ -55,7 +55,6 @@ defmodule Biot.Node.Controllers do
       {:ok, _pid} ->
         :ok
 
-      # The biot has no local intent, so this node owns nothing for it.
       :ignore ->
         :ok
 
@@ -84,6 +83,19 @@ defmodule Biot.Node.Controllers do
     biot_ids
     |> Enum.map(&intent_changed/1)
     |> Enum.find(:ok, &match?({:error, _biot}, &1))
+  end
+
+  @doc """
+  Tells the controller that owns `biot_id` that one of its containers stopped. A biot with no
+  controller here has nothing to wake: the event is a hint, and only inspection decides what is
+  true.
+  """
+  @spec container_exited(BiotId.t()) :: :ok
+  def container_exited(%BiotId{} = biot_id) do
+    case Registry.lookup(@registry, biot_id) do
+      [{controller, _value}] -> BiotController.container_exited(controller)
+      [] -> :ok
+    end
   end
 
   @doc "Every controller running right now, with the biot it owns."

@@ -101,7 +101,7 @@ A new status cannot compile until all six functions answer it.
 
 ### Application modules
 
-- `Biots` handles `create`, `start`, `stop`, `update_environment`, `destroy`, and `spec`. Its old `get` and `list` functions are gone. `spec/1` remains the node-facing intent query.
+- `Biots` handles `create`, `start`, `stop`, `update_environment`, `destroy`, and `spec`. `spec/1` is the node-facing intent query.
 - `Biots.Create`, `Biots.SelectEnvironment`, `Biots.Accepted`, `Biots.Unchanged`, and `Biots.CreationFingerprint` define lifecycle inputs, results, and fingerprints. `Create.initial_state` defaults to `:running`, and the fingerprint uses `:biot_creation_v2`.
 - `Biots.Capacity.room?/2` admits creation, and `counts/2` projects capacity held on assigned nodes. Together they define which Biots still hold capacity.
 - `Operations` owns operation queries.
@@ -204,7 +204,7 @@ transaction.
   `desired` for those Biots.
 - `Reports.observation/4` and `Reports.access_applied/4` require the assigned node
   and the current connection through `NodeConnections.current?/2`. Equal or lower
-  access revisions return `{:ignored, :revision_ahead}`. Reports from an old
+  access revisions return `{:ignored, :revision_ahead}`. Reports from another
   connection return `{:ignored, :stale_connection}`. The connection logs ignored
   reports at debug level.
 - `AccessApplied` is accepted during synchronization because the node sends it
@@ -240,7 +240,7 @@ SQLite needs their composite foreign keys inline.
 `test/support/fixtures.ex` builds rows.
 Integration tests hit the real SQLite test database.
 
-Step 10 adds focused server evidence:
+Focused server evidence includes:
 
 - `policy/enforcement_test.exs` proves current-connection checks and access
   enforcement for missing, stale, and caught-up access observations.
@@ -258,7 +258,7 @@ Step 10 adds focused server evidence:
 - `authorization_test.exs` proves owner, policy-change, grant-read, and role
   predicates.
 
-Step 11 adds node enrollment and abandonment evidence:
+Node enrollment and abandonment evidence includes:
 
 - `test/nodes/status_test.exs` is new. It covers the complete status table.
 - `nodes/registration_test.exs` covers all four registration status values.
@@ -268,7 +268,7 @@ Step 11 adds node enrollment and abandonment evidence:
 - `control_protocol_test.exs` and `failure_test.exs` cover the new `Reject` and
   `Failure` values.
 
-Step 12 adds lifecycle, access, query, publication, and redelivery evidence:
+Lifecycle, access, query, publication, and redelivery evidence includes:
 
 - `authorization_test.exs` covers owner-only commands and the owner and collaborator roles.
 - `biots/create_test.exs` covers running and stopped creation, capacity, fingerprints, exposure, and retries.
@@ -298,36 +298,37 @@ The node owns host reconciliation and reports inspected state to the server.
 
 ### Node state and reconciliation
 
-- `Biot.Node.NodeState` is the derived view for one Biot. It holds `data`, a `resolutions`
-  map keyed by environment ID, `installation`, and a `container` with its
-  `biot_id`.
+- `Biot.Node.NodeState` is the derived view for one Biot. It holds `data`, `resolutions`,
+  `installation`, `container`, and `NodeState.prepared`. `NodeState.prepared` is a per-environment
+  resource map keyed by environment ID.
 - `Biot.Node.Host.inspect_state/2` returns the five host facts in `Host.Inspection`.
-  The controller owns `pending_exit` and `failure`, then builds `NodeState` from all
-  seven values.
-- `Biot.Node.Reconcile.next/4` returns `:settled`, `{:run, action}`, `:cancel_current`,
-  `{:blocked, reason}`, or `{:failed, failure}`.
-- Its gates run in order: current action, recorded failure, convergence, and the
-  offline control gate. `Reconcile.Data`, `Reconcile.Environment`, and
-  `Reconcile.Execution` compose the decisions.
-- `Reconcile.Environment.release/2` releases unretained environment resources.
+  The controller adds `pending_exit` and `failure`, then builds `NodeState`.
+- `Biot.Node.Reconcile.next/3` takes an `ExecutionSpec`, a `NodeState`, and the current action.
+  It returns `:settled`, `{:run, action}`, `:cancel_current`, `{:blocked, reason}`, or
+  `{:failed, failure}`.
+- `Reconcile.Data`, `Reconcile.Environment`, and `Reconcile.Execution` compose the decisions.
   Ordinary convergence runs data, environment, execution, then release.
   Destruction runs execution, release, then data.
-- `Biot.Node.Action.metadata/1` centralizes each action's stage, cancellation rule, control
-  requirement, and environment use. `requires_control?/1` identifies the four
-  actions that need a live control link.
-- `BlockReason` describes inspection, an in-flight action, a recorded failure, or
-  offline control. `Retry.classify/4` maps host outcomes to bounded failures and
-  retry policies; `Retry.failure/2` builds failures found without an action.
+- `BlockReason` has three values: `{:inspection, failure}`, `{:current_action, action}`, and
+  `{:recorded_failure, failure}`. `Retry.classify/4` maps host outcomes to bounded failures and
+  retry policies.
+  `Retry.failure/2` builds failures found without an action.
+- `Action.metadata/1` holds only an action's stage and `cancellable?` flag.
+  Release never runs while an action is in flight.
 - `InspectionFailure` keeps an unreadable resource distinct from an absent one.
 
 #### BiotController
 
 `Biot.Node.BiotController` owns one Biot. It loads the current `LocalIntent` from
 `Biot.Node.Journal`, inspects the host, reports the inspection, asks
-`Reconcile.next/4` for one action, and runs that action in one linked effect task.
-After the task returns, it records the outcome and inspects again before making
-another decision. It reports every inspection, including a settled one, so the
-server can learn about a container that exits on its own.
+`Reconcile.next/3` for one action, and runs that action in one linked effect task.
+The controller records an attempt before it starts the action. It records an effect result only
+when the effect started under the current desired revision.
+
+The controller resumes saved backoff from `next_attempt_at` and clamps the wait to
+`retry_backoff_max_ms`. A refused retry write discards its diagnostic with
+`Diagnostics.discard/2` and reloads the current intent. The controller also reloads after a refused
+write without a diagnostic.
 
 The controller's `phase` makes its waiting state explicit:
 
@@ -346,14 +347,17 @@ effect that did not stop. `:backing_off` waits for an automatic retry.
 `:waiting` retries an inspection block. `:settled` re-inspects on the observation
 interval.
 
-A new desired revision clears the recorded failure, attempt counts, pending
-container exit, and stale backoff, inspection, or settled wake. It never clears
-a running effect or its cancellation wake. A changed intent therefore cancels
-obsolete work, then lets inspection determine what that work left behind.
+A destroyed Biot writes its final report to the journal, hands it to the outbox, and exits normally.
+`Biot.Node.BiotController` uses `restart: :transient`. `init/1` ignores an intent with a stored
+destruction report.
 
 The controller and its effect task share a failure group. A task crash takes down
 the controller, and the supervisor restarts it. Restart loads durable intent and
 inspects owned resources before it asks reconciliation to issue any action.
+The controller reports every inspection, including a settled one, so the server
+can learn about a container that exits on its own. A new desired revision clears
+its stale backoff, inspection, or settled wake and pending container exit.
+It keeps a running effect and its cancellation wake until that effect stops.
 
 #### Controllers
 
@@ -363,10 +367,11 @@ opaque `BiotId` as each controller's key, and its `DynamicSupervisor` runs one
 process. It starts a controller for every durable journal intent at boot and
 retries a failed start with one bounded timer per Biot.
 
-The public API is `intent_changed/1` and `synchronized/1`. The first starts or
-pokes one controller and schedules a starter retry when it cannot start. The
-second receives the complete synchronized Biot ID set, starts or pokes every
-announced controller, and pokes controllers absent from that set so they stop.
+The public API is `intent_changed/1`, `synchronized/1`, and `container_exited/1`.
+The first starts or pokes one controller and schedules a starter retry when it cannot start.
+The second receives the complete synchronized Biot ID set, starts or pokes every announced
+controller, and pokes controllers absent from that set so they stop.
+`container_exited/1` wakes the controller for an owned container.
 The controller tree uses `:rest_for_one`: the Registry starts first, the
 DynamicSupervisor second, and the Starter last.
 
@@ -385,17 +390,20 @@ policies stay unchanged.
 
 ### Node records and values
 
-- `Allocation` records a Biot's UID/GID range, private data root, network, and
-  initialization marker.
+- `Allocation` records a Biot's UID/GID range, private data root, network, and initialization.
+  `Allocation.initialization` is `:uninitialized` or `:complete`.
+- A `data_state` of `{:present, allocation}` carries only the allocation.
+  The completion marker file holds the Biot ID.
+  `Host.DataInspection` marks data `:lost` when that ID belongs to another Biot or does not parse.
 - `Installation` selects the prepared artifact used by an allocation.
   `Resolution` records one environment's manifest and snapshot path.
-  `LocalIntent` stores the last accepted `BiotSpec` for one Biot.
-- `NodePrivatePath`, `MarkerId`, `NetworkId`, and `ArtifactId` are node-owned
-  parsed values for private paths, initialization markers, networks, and artifacts.
+  `LocalIntent` stores the last accepted `BiotSpec` and any destruction report.
+- `NodePrivatePath`, `NetworkId`, and `ArtifactId` are node-owned parsed values for private paths,
+  networks, and artifacts.
 - `Biot.Node.StorePath` parses one canonical path at or inside a Nix store object.
-- `Biot.Node.EnvironmentBundle` parses the format 1 gate and its four store
-  paths. It returns `:invalid_format` for a malformed shape or path and
-  `:unsupported_format` for another numeric format.
+- `Biot.Node.EnvironmentBundle` parses the format 1 gate and its four store paths.
+  It returns `:invalid_format` for a malformed shape or path and `:unsupported_format` for another
+  numeric format.
 
 ### Host layer
 
@@ -422,8 +430,8 @@ Pure derivations keep host facts separate from effects:
 
 - `Host.DataInspection` derives allocation data state from journal ownership and
   filesystem facts.
-- `Host.EnvironmentInspection` derives resolution, prepared-artifact, and
-  installation states.
+- `Host.EnvironmentInspection` derives resolution and installation states.
+  `EnvironmentInspection.prepared/1` returns one resource entry per environment.
 - `Host.ContainerInspection` parses Podman JSON into the owned container value.
 - `Host.Outcome` maps expected effect failures and bounded command diagnostics to
   retry reasons.
@@ -434,11 +442,19 @@ Support modules provide the smaller boundaries:
   stdout and stderr. Its handshake announces the process group, registers that
   group with `Host.Command.Reaper`, sends the go line, and then lets the shell
   `exec` the command. No command runs before the reaper owns its group.
-  `Host.Podman` adds the configured Podman module and recognizes absent resources.
+  `open/4` returns a `Command.Stream` for a long-running command, and `close/1`
+  releases its reaper record and stderr file. `Host.Podman` adds the configured
+  Podman module and recognizes absent resources.
+- `Host.ContainerEvents` reads Podman's `events` stream through `Command.open/4` and
+  `Command.Stream`. It calls `Command.close/1` when a stream ends and reopens it after
+  `container_events_retry_ms`. `Names.owner/1` parses the owning Biot ID from a container label.
 - `Host.Paths` owns every node-private path. Its moduledoc is the authority for
-  the data-root layout. In one line: the root holds node-wide coordination and
-  configuration plus per-Biot writable data and per-environment build state.
+  the data-root layout. `Paths.checkout_staging/2` names the per-Biot staging path.
+  The root holds node-wide coordination and configuration plus per-Biot writable
+  data and per-environment build state.
 - `Host.Names` derives stable network and container names and ownership labels.
+  `Host.Names.owner/1` parses the owning Biot ID from those labels.
+  `Host.Network` creates isolated networks with Podman's `--opt isolate=true` option.
   `Host.FileSystem` provides tri-state inspection, atomic writes, and tree removal.
 - `Host.Config` parses and validates operator settings. `Host.Context` binds that
   configuration to one Biot ID, and `Host.Setup` creates the node-wide directories
@@ -455,9 +471,11 @@ running without an owner.
 
 `Biot.Node.Repo` is the Ecto SQLite repository, and `Biot.Node.Journal` is the
 node-local domain API. The journal schemas are
-`Journal.Schema.Allocation`, `Installation`, `Resolution`, and `LocalIntent`.
-`Journal.Ecto.ParsedValue` stores canonical parsed values as strings, while
-`Journal.Ecto.Manifest` and `Journal.Ecto.BiotSpec` store validated JSON values.
+`Journal.Schema.Allocation`, `Installation`, `Resolution`, `LocalIntent`, and
+`RetryState`. `local_intents` has a `destruction_report` column, and `retry_states`
+holds one retry row per Biot. `Journal.Ecto.ParsedValue` stores canonical parsed
+values as strings. `Journal.Ecto.Manifest`, `Journal.Ecto.BiotSpec`, `Journal.Ecto.Attempts`,
+`Journal.Ecto.Failure`, and `Journal.Ecto.ExecutionReport` store validated JSON values.
 `Journal.Migrator` runs `priv/repo/migrations/20260909000100_create_node_journal.exs`.
 
 Journal queries scope resolution and installation reads and writes by Biot ID,
@@ -468,19 +486,24 @@ that no such records remain before release. `next_uid_start/3` finds the first
 unused configured range, while the unique `allocation_uid_start` index closes the
 concurrent-insert race.
 
-`Journal.put_intent/1` upserts one durable `LocalIntent` for a Biot. The control
-connection sends `access_applied` after that write because the durable write is the
-honest acknowledgement until step 20. `Journal.replace_intents/1` upserts the
-complete staged snapshot in one transaction and deletes local intents that the
-server no longer sends. The connection sends `access_applied` after this write too.
-That deletion stops the controller, leaving any allocation for orphan reporting.
+`Journal.put_intent/1` and `Journal.replace_intents/1` accept intent and drop a
+superseded retry row in the same transaction. `replace_intents/1` also deletes
+local intents and retry rows for Biots omitted from the snapshot. That deletion
+stops the controller, leaving any allocation for orphan reporting.
+`Journal.put_destruction_report/2` keeps the intent row as a receipt and removes
+its retry row. A later `put_intent/1` keeps that report.
+
+`RetryState` stores the target revision, attempts by lifecycle stage, failure, and
+`next_attempt_at`. A retry row always describes the revision in its intent row.
+`Journal.retry_state/1` reads the row. `record_attempt/3`, `record_failure/4`, and
+`clear_failure/2` return `{:ok, state}` or `:superseded`.
 
 `Biot.Node.DataRootLock` owns a long-lived `flock` port on the data-root lock file.
 `application.ex` always starts `Diagnostics` and `Host.Command.Reaper` first.
 When host configuration exists, it then starts `DataRootLock`, `Host.Setup`,
-`Repo`, journal migration, `Controllers`, and finally the configured control
-connection. The lock exists before setup or journal access, and the connection
-starts after the journal and controller tree are ready. Without host
+`Repo`, journal migration, `Controllers`, `Host.ContainerEvents`, and finally the
+configured control connection. The lock exists before setup or journal access,
+and the connection starts after the journal and controller tree are ready. Without host
 configuration, the node starts neither controllers nor a control connection.
 
 ### Environment artifact
@@ -538,6 +561,7 @@ settings are:
 | `inspection_retry_ms` | `15_000` | `BIOT_NODE_INSPECTION_RETRY_MS` |
 | `cancel_grace_ms` | `10_000` | `BIOT_NODE_CANCEL_GRACE_MS` |
 | `controller_start_retry_ms` | `5_000` | `BIOT_NODE_CONTROLLER_START_RETRY_MS` |
+| `container_events_retry_ms` | `5_000` | `BIOT_NODE_CONTAINER_EVENTS_RETRY_MS` |
 | `diagnostic_max_entries_per_biot` | `5` | `BIOT_NODE_DIAGNOSTIC_MAX_ENTRIES_PER_BIOT` |
 | `diagnostic_max_entry_bytes` | `65_536` | `BIOT_NODE_DIAGNOSTIC_MAX_ENTRY_BYTES` |
 | `max_staged_specs` | `1_000` | `BIOT_NODE_MAX_STAGED_SPECS` |
@@ -554,7 +578,7 @@ resulting settings before host setup or effects use them.
 `Biot.Node.Diagnostics` keeps a bounded in-memory log for failed revisions. One
 writer process owns the per-Biot revision index and writes diagnostic entries to
 protected ETS. It keeps the latest failed attempt for a revision, limits each
-entry by `diagnostic_max_entry_bytes`, and evicts old revisions after
+entry by `diagnostic_max_entry_bytes`, and evicts superseded revisions after
 `diagnostic_max_entries_per_biot`. `fetch/2` reads ETS directly, applies the
 caller's byte limit, and returns whether content was truncated. `forget/1`
 drops every entry for a Biot that loses local intent.
@@ -564,8 +588,7 @@ Biot, resolutions by environment, and the node observation as one node-wide
 entry. A single wakeup marker prevents duplicate connection wakeups. The
 connection drains the outbox after it acknowledges `synchronized` and whenever
 a report wakes it. `Control` sends observations, resolutions, and orphaned
-allocation reports to the outbox; `Control.status/0` returns `:ready` or
-`:offline` from the connection's published status.
+allocation reports to the outbox.
 
 `Control.Connection` owns the reconnecting mutually authenticated TLS client,
 synchronization, heartbeats, and report delivery. It has one `:synchronizing`
@@ -575,60 +598,41 @@ status with a `Staging` value. `Control.Staging` is pure: `begin/3`, `add/2`, an
 `:synchronize_connection_mismatch`, and `:synchronize_count_mismatch`.
 A desired message during staging also closes the connection with
 `:desired_during_snapshot`. Any snapshot error clears staging before reconnecting.
-The node does not call `Journal.replace_intents/1`, so accepted intent stays
-untouched.
 
 An individual desired message uses `Journal.put_intent/1`; a complete snapshot
 uses `Journal.replace_intents/1`. The node sends `access_applied` after either
 durable write, then hands controller starts to `Controllers` before it sends
 `synchronized`. After that acknowledgement, the connection compares journal
 allocations with synchronized intents and puts orphan reports in the outbox.
-The application starts this connection only after host configuration, the journal,
-and the controller tree are ready. Linux is required for the node control path.
+The connection replays stored destruction reports when it becomes ready and after
+each repeated `desired` message. The application starts this connection only after
+host configuration, the journal, and the controller tree are ready. Linux is
+required for the node control path.
 
 ### Tests
 
 `test/test_helper.exs` excludes `:linux` tests outside Linux and `:nix` tests when
-`nix` is unavailable. The existing host tests cover host derivations, journal
-ownership, and real Linux effects. Step 9 adds focused evidence for the node
-imperative shell:
+`nix` is unavailable. The node tests cover host derivations, journal ownership,
+real Linux effects, and the controller shell:
 
-- `controller_pure_test.exs` proves the `Observation`, `Backoff`, `Orphans`, and
-  `Retry.with_budget/3` projections and retry rules.
-- `diagnostics_integration_test.exs` uses the real diagnostics process and ETS to
-  prove byte bounds, same-revision replacement, per-Biot eviction, and
-  `forget/1`.
-- `host_command_ownership_test.exs` uses real Linux processes to prove that a
-  caller killed during the handshake starts no command, and that cancellation
-  removes the whole process group promptly.
-- `biot_controller_linux_integration_test.exs` runs a real server and node. Its
-  `step9_controller_runner.exs` support runner proves lost-response recovery,
-  controller startup and retry, cancellation, reconnect behavior, and orphan
-  reporting against real resources.
+- `action_test.exs` covers action stages and cancellation rules.
+- `controller_pure_test.exs` covers pure controller projections, retry rules, and `RetryState`.
+- `host_journal_integration_test.exs` covers retry rows, intent replacement, and destruction reports.
+- `host_linux_integration_test.exs` covers stream cleanup with real Linux commands.
+- `host_pure_test.exs` covers data markers, per-environment prepared resources, owner labels, and retry map types.
+- `node_values_test.exs` covers node-owned parsed values, including `NetworkId`.
+- `reconcile_important_cases_test.exs` covers unknown desired and sibling environments.
+- `reconcile_invariants_test.exs` covers `Reconcile.next/3` result shapes and safety invariants.
+- `reconcile_release_test.exs` covers release eligibility and ordering.
+- `reconcile_sequences_test.exs` covers running, stopped, and destroyed convergence sequences.
+- `support/reconcile_fixtures.ex` and `support/reconcile_generators.ex` define the current state shapes and property generators.
 
-Step 13 adds synchronization, access acknowledgement, size-limit, and snapshot
-staging evidence:
-
-- `control_staging_test.exs` is new. It covers pure snapshot staging success and all five staging reasons.
-- `controller_pure_test.exs` removes access progress from execution-report projections.
-- `control_protocol_test.exs` covers the four new version 1 messages, strict wire errors, and phase and version dispatch.
-- `execution_records_test.exs` covers `ExecutionReport` without `applied_access_revision` and rejects that removed field.
-- `limits_test.exs` is new. It covers parser bounds, exact limit reasons, spec size checks, envelope sizing, and boot frame checks.
-- `parse_robustness_test.exs` covers the new bounded-parser error reasons without parser exceptions.
-- `test_helper.exs` adds generators for maximal execution and Biot specs.
-- `control_protocol_integration_test.exs` covers begin/item/end snapshots, access-only sweeps, access reports during synchronization, and three Linux-only node TLS cases for staging, rejection, and reconnect.
-- `control/synchronization_behind_test.exs` covers execution and access progress for one current connection.
-- `reports_test.exs` covers current-connection checks, access revision monotonicity, stale reports, and separation of execution and access progress.
-- `policy/enforcement_test.exs` covers `AccessObservation` and live-connection enforcement across missing, stale, synchronizing, and caught-up states.
-- `policy_records_test.exs` covers access progress in policy transactions and Biot views.
-- `node_connections_test.exs` covers current connection identity checks.
-- `queries/biot_view_test.exs` covers access observations and live connection state in the Biot view.
-- `queries/biots_test.exs` covers current and stale report connections in Biot reads.
-- `queries/nodes_test.exs` covers report ingestion with the current connection.
-- `biots/capacity_test.exs` covers capacity evidence with current execution reports.
-- `biots/create_test.exs` covers destroyed-Biot capacity release with current reports.
-- `operations/completion_test.exs` updates completion fixtures for the execution-only report.
-- `support/fixtures.ex` separates execution-report and access-observation fixtures.
+The server's Linux controller test is self-contained under `test/support` and is Linux-only.
+`support/step9_full_proof.exs` covers lost responses, controller startup and retry, cancellation, reconnects, and orphan reporting.
+`support/step14_controller_proof.exs` covers durable attempts, backoff, revision races, destruction, event wakeups, and network isolation.
+`support/step9_controller_runner.exs` starts both controller proofs in the Linux test process.
+`biot_controller_linux_integration_test.exs` runs that server and node proof with real resources.
+`control_protocol_integration_test.exs` covers destruction report replay on ready and repeated `desired`, then snapshot omission.
 
 `docker/linux-host/run-tests.sh` builds or reuses the privileged Linux test image
 and runs the full Mix test suite inside it.

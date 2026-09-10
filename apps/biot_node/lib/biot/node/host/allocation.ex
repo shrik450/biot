@@ -12,9 +12,9 @@ defmodule Biot.Node.Host.Allocation do
   alias Biot.Node.Host.Outcome
   alias Biot.Node.Host.Paths
   alias Biot.Node.Journal
-  alias Biot.Node.MarkerId
   alias Biot.Node.NetworkId
   alias Biot.Node.NodePrivatePath
+  alias Biot.Protocol.BiotId
   alias Biot.Protocol.RepositorySource
 
   @spec allocate(Context.t()) :: :ok | {:error, Outcome.t()}
@@ -44,11 +44,10 @@ defmodule Biot.Node.Host.Allocation do
         repository
       ) do
     with {:ok, _network} <- ensure_network(config, allocation),
-         {:ok, marker_id} <- initialization_identity(config, biot_id),
-         {:ok, _checkout} <- ensure_checkout(config, biot_id, repository, marker_id),
+         {:ok, _checkout} <- ensure_checkout(config, biot_id, repository),
          {:ok, _mounts} <- ensure_mounts(config, allocation),
-         {:ok, _marker} <- write_marker(config, biot_id, marker_id),
-         {:ok, _record} <- complete_initialization(allocation, marker_id) do
+         {:ok, _marker} <- write_marker(config, biot_id),
+         {:ok, _record} <- complete_initialization(allocation) do
       :ok
     end
   end
@@ -225,48 +224,18 @@ defmodule Biot.Node.Host.Allocation do
     FileSystem.read(Paths.marker(config, allocation.biot_id))
   end
 
-  defp initialization_identity(config, biot_id) do
-    path = Paths.initialization_identity(config, biot_id)
-
-    case FileSystem.read(path) do
-      {:present, value} -> parse_marker_identity(value)
-      :absent -> write_marker_identity(path)
-      {:error, reason} -> {:error, Outcome.from_reason(reason)}
-    end
-  end
-
-  defp parse_marker_identity(value) do
-    case MarkerId.parse(String.trim(value)) do
-      {:ok, marker_id} ->
-        {:ok, marker_id}
-
-      {:error, _reason} ->
-        {:error, Outcome.new(:host_unavailable, "the initialization identity is invalid")}
-    end
-  end
-
-  defp write_marker_identity(path) do
-    marker_id = MarkerId.generate()
-
-    # The file keeps the marker identity stable if the effect task dies after cloning.
-    case FileSystem.write_atomic(path, [MarkerId.to_string(marker_id), "\n"]) do
-      :ok -> {:ok, marker_id}
-      {:error, reason} -> {:error, Outcome.from_reason(reason)}
-    end
-  end
-
-  defp ensure_checkout(config, biot_id, repository, marker_id) do
+  defp ensure_checkout(config, biot_id, repository) do
     checkout = Paths.checkout(config, biot_id)
 
     case FileSystem.directory(checkout) do
       {:present, :directory} -> {:ok, :checkout}
-      :absent -> clone_checkout(config, repository, checkout, biot_id, marker_id)
+      :absent -> clone_checkout(config, repository, checkout, biot_id)
       {:error, reason} -> {:error, Outcome.from_reason(reason)}
     end
   end
 
-  defp clone_checkout(config, repository, checkout, biot_id, marker_id) do
-    staging = Paths.checkout_staging(config, biot_id, MarkerId.to_string(marker_id))
+  defp clone_checkout(config, repository, checkout, biot_id) do
+    staging = Paths.checkout_staging(config, biot_id)
 
     with {:ok, _removed} <- remove_tree(staging),
          {:ok, _cloned} <- clone(config, repository, staging),
@@ -383,29 +352,19 @@ defmodule Biot.Node.Host.Allocation do
     end
   end
 
-  defp write_marker(config, biot_id, marker_id) do
-    path = Paths.marker(config, biot_id)
-    content = [MarkerId.to_string(marker_id), "\n"]
+  # The marker says which biot owns the promoted data, so writing it again writes the same bytes
+  # and a repeated initialization converges.
+  defp write_marker(config, biot_id) do
+    content = [BiotId.to_string(biot_id), "\n"]
 
-    case FileSystem.read(path) do
-      :absent ->
-        case FileSystem.write_atomic(path, content) do
-          :ok -> {:ok, :written}
-          {:error, reason} -> {:error, Outcome.from_reason(reason)}
-        end
-
-      {:present, existing} ->
-        if existing == IO.iodata_to_binary(content),
-          do: {:ok, :present},
-          else: {:error, Outcome.new(:host_unavailable, "the initialization marker changed")}
-
-      {:error, reason} ->
-        {:error, Outcome.from_reason(reason)}
+    case FileSystem.write_atomic(Paths.marker(config, biot_id), content) do
+      :ok -> {:ok, :written}
+      {:error, reason} -> {:error, Outcome.from_reason(reason)}
     end
   end
 
-  defp complete_initialization(allocation, marker_id) do
-    case Journal.complete_initialization(allocation, marker_id) do
+  defp complete_initialization(allocation) do
+    case Journal.complete_initialization(allocation) do
       {:ok, record} -> {:ok, record}
       {:error, :stale} -> {:ok, :stale}
       {:error, reason} -> {:error, Outcome.from_reason(reason)}

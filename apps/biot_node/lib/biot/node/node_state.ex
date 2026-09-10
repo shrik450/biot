@@ -4,6 +4,10 @@ defmodule Biot.Node.NodeState do
   inspection, so the pure core sees product states such as `lost` instead of two copies of one
   resource.
 
+  `resolutions` and `prepared` hold one entry per environment this biot owns, and each entry is
+  inspected on its own. An environment whose root the node could not read is `unknown` for that
+  environment alone, so an unreadable obsolete root cannot hide a healthy desired artifact.
+
   `pending_exit` holds the exit of a container the biot still wants running. The controller sets it
   when inspection first sees that exit, and clears it only after it records the failure
   reconciliation returns for it. That invariant is what lets the core retire the exited container
@@ -14,7 +18,6 @@ defmodule Biot.Node.NodeState do
   alias Biot.Node.ArtifactId
   alias Biot.Node.InspectionFailure
   alias Biot.Node.Installation
-  alias Biot.Node.MarkerId
   alias Biot.Node.Resolution
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.ContainerState
@@ -41,7 +44,7 @@ defmodule Biot.Node.NodeState do
           :no_allocation
           | {:unknown, Allocation.t(), InspectionFailure.t()}
           | {:uninitialized, Allocation.t()}
-          | {:present, Allocation.t(), MarkerId.t()}
+          | {:present, Allocation.t()}
           | {:lost, Allocation.t()}
 
   @type installation_state ::
@@ -55,6 +58,9 @@ defmodule Biot.Node.NodeState do
           {:unknown, Resolution.t(), InspectionFailure.t()}
           | {:present, Resolution.t()}
           | {:lost, Resolution.t()}
+
+  @typedoc "One prepared artifact per environment. An environment with no entry has none prepared."
+  @type prepared :: %{EnvironmentId.t() => resource(ArtifactId.t())}
 
   @typedoc "The exit of a container the biot still wants running, until the controller records it."
   @type pending_exit :: nil | %{incarnation_id: IncarnationId.t(), exit_status: non_neg_integer()}
@@ -79,7 +85,7 @@ defmodule Biot.Node.NodeState do
           resolutions: %{EnvironmentId.t() => resolution_state()},
           installation: installation_state(),
           container: resource(container()),
-          prepared: resource(%{EnvironmentId.t() => ArtifactId.t()}),
+          prepared: prepared(),
           pending_exit: pending_exit(),
           failure: recorded_failure()
         }

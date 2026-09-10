@@ -2,10 +2,9 @@ defmodule Biot.Node.Host.Paths do
   @moduledoc """
   Owns the node-private layout below the configured data root.
 
-  Each Biot has `checkout`, `home`, and `service-data` writable mounts. Its completion marker,
-  initialization identity, and container identity sit beside those mounts. Each environment has a
-  derived build manifest and a `root` symlink into the Nix store. Inspection reads `bundle.json`
-  through that root. The SQLite journal and `flock` file sit directly below the data root. A Podman
+  Each Biot has `checkout`, `home`, and `service-data` writable mounts. Its completion marker and
+  container identity sit beside those mounts. Each environment has a derived build manifest and a
+  `root` symlink into the Nix store. Inspection reads `bundle.json` through that root. The SQLite journal and `flock` file sit directly below the data root. A Podman
   module selects the configured rootless network helper. Each Biot also has an empty root
   filesystem owned by its UID range.
   """
@@ -56,14 +55,11 @@ defmodule Biot.Node.Host.Paths do
   @spec marker(Config.t(), BiotId.t()) :: String.t()
   def marker(config, biot_id), do: Path.join(biot(config, biot_id), "marker")
 
-  @spec initialization_identity(Config.t(), BiotId.t()) :: String.t()
-  def initialization_identity(config, biot_id) do
-    Path.join(biot(config, biot_id), "initialization-id")
-  end
-
-  @spec checkout_staging(Config.t(), BiotId.t(), String.t()) :: String.t()
-  def checkout_staging(config, biot_id, marker_id) do
-    Path.join(biot(config, biot_id), ".checkout-#{marker_id}.staging")
+  # Working data initialize once, and this directory sits inside the Biot's own root, so one
+  # staging path per Biot is all a repeated clone can need.
+  @spec checkout_staging(Config.t(), BiotId.t()) :: String.t()
+  def checkout_staging(config, biot_id) do
+    Path.join(biot(config, biot_id), ".checkout.staging")
   end
 
   @spec container_identity(Config.t(), BiotId.t()) :: String.t()

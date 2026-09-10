@@ -55,6 +55,12 @@ defmodule Biot.Node.Diagnostics do
     end
   end
 
+  @doc "Removes one stored diagnostic of a biot, for a failure the node will never report."
+  @spec discard(BiotId.t(), PrivateDiagnosticId.t()) :: :ok
+  def discard(%BiotId{} = biot_id, %PrivateDiagnosticId{} = diagnostic_id) do
+    GenServer.call(__MODULE__, {:discard, biot_id, diagnostic_id})
+  end
+
   @doc "Drops every diagnostic of a biot this node no longer owns."
   @spec forget(BiotId.t()) :: :ok
   def forget(%BiotId{} = biot_id), do: GenServer.call(__MODULE__, {:forget, biot_id})
@@ -86,6 +92,16 @@ defmodule Biot.Node.Diagnostics do
 
     delete(replaced ++ evicted)
     {:reply, diagnostic_id, %{state | biots: Map.put(state.biots, biot_id, kept)}}
+  end
+
+  def handle_call({:discard, biot_id, diagnostic_id}, _from, state) do
+    {dropped, kept} =
+      state.biots
+      |> Map.get(biot_id, [])
+      |> Enum.split_with(&match?({_revision, ^diagnostic_id}, &1))
+
+    delete(dropped)
+    {:reply, :ok, %{state | biots: Map.put(state.biots, biot_id, kept)}}
   end
 
   def handle_call({:forget, biot_id}, _from, state) do

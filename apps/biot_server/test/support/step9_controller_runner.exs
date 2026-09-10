@@ -39,7 +39,7 @@ defmodule Biot.Server.Step9ControllerRunner do
     allocation =
       eventually_value(fn ->
         case Journal.allocation(biot_id) do
-          %{initialization: {:complete, _marker}} = allocation -> allocation
+          %{initialization: :complete} = allocation -> allocation
           _allocation -> nil
         end
       end)
@@ -47,7 +47,7 @@ defmodule Biot.Server.Step9ControllerRunner do
     {:ok, config} = Config.from_application()
     checkout = Paths.checkout(config, biot_id)
     "step 9 project checkout\n" = File.read!(Path.join(checkout, "README.md"))
-    [] = Path.wildcard(Paths.checkout_staging(config, biot_id, "*"))
+    false = File.exists?(Paths.checkout_staging(config, biot_id))
 
     receive do
     after
@@ -177,7 +177,9 @@ repo_options = Application.fetch_env!(:biot_server, Biot.Server.Repo)
 Application.put_env(
   :biot_server,
   Biot.Server.Repo,
-  Keyword.put(repo_options, :database, database)
+  repo_options
+  |> Keyword.put(:database, database)
+  |> Keyword.put(:ownership_timeout, 900_000)
 )
 
 {:ok, _applications} = Application.ensure_all_started(:ecto_sqlite3)
@@ -189,6 +191,6 @@ migrations = Application.app_dir(:biot_server, "priv/repo/migrations")
   end)
 
 {:ok, _applications} = Application.ensure_all_started(:biot_server)
-project_root = Path.expand("../../../..", __DIR__)
-Code.require_file(Path.join(project_root, ".work/step9-run.exs"))
-Biot.Server.Step9ControllerRunner.run()
+Code.require_file(Path.join(__DIR__, "step9_full_proof.exs"))
+Application.stop(:biot_node)
+Code.require_file(Path.join(__DIR__, "step14_controller_proof.exs"))

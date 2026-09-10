@@ -13,7 +13,7 @@ defmodule Biot.Node.Repo.Migrations.CreateNodeJournal do
 
       add(:data_root, :string, null: false)
       add(:network_id, :string, null: false)
-      add(:initialization_marker, :string)
+      add(:initialized, :boolean, null: false)
 
       timestamps(type: :utc_datetime_usec)
     end
@@ -55,6 +55,24 @@ defmodule Biot.Node.Repo.Migrations.CreateNodeJournal do
     create table(:local_intents, primary_key: false) do
       add(:biot_id, :string, primary_key: true, null: false)
       add(:biot_spec, :map, null: false)
+      add(:destruction_report, :map)
+
+      timestamps(type: :utc_datetime_usec)
+    end
+
+    # A retry row outlives its allocation while a destruction runs, and it goes with the local
+    # intent rather than with any resource, so the biot ID is the whole key.
+    create table(:retry_states, primary_key: false) do
+      add(:biot_id, :string, primary_key: true, null: false)
+
+      add(:target_revision, :integer,
+        null: false,
+        check: %{name: "retry_states_target_revision_positive", expr: "target_revision > 0"}
+      )
+
+      add(:attempts, :map, null: false)
+      add(:next_attempt_at, :utc_datetime_usec)
+      add(:failure, :map)
 
       timestamps(type: :utc_datetime_usec)
     end

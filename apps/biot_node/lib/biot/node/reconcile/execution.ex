@@ -88,7 +88,7 @@ defmodule Biot.Node.Reconcile.Execution do
          %ExecutionSpec{desired: %Desired{environment_id: environment_id}},
          %NodeState{
            installation: {:present, %Installation{environment_id: environment_id} = installation},
-           data: {:present, allocation, _marker}
+           data: {:present, allocation}
          }
        ),
        do: {:run, {:start, allocation, installation}}

@@ -12,6 +12,10 @@ defmodule Biot.Node.Host.Command do
   group and waits for a go line over the port; this module gives the group to the reaper and only
   then sends that line. A caller that dies during the handshake closes the port, so the shell reads
   the end of its input and exits without running the command.
+
+  `run/4` waits for a command that ends. `open/4` hands a `Stream` to a caller that reads a command
+  which does not, such as an event stream, and that caller ends its ownership with `close/1`. Both
+  start the command the same way, so both leave the group with the reaper.
   """
 
   alias Biot.Node.Host.Command.Reaper
@@ -40,8 +44,13 @@ defmodule Biot.Node.Host.Command do
           }
   end
 
-  defmodule Running do
-    @moduledoc false
+  defmodule Stream do
+    @moduledoc """
+    One running host command the caller owns: the port that carries its output and exit status, the
+    file its stderr goes to, and the reaper ticket that holds its process group.
+
+    The caller owns the command until it ends that ownership through `Biot.Node.Host.Command`.
+    """
 
     @enforce_keys [:port, :stderr_path, :ticket]
     defstruct [:port, :stderr_path, :ticket]
@@ -65,16 +74,40 @@ defmodule Biot.Node.Host.Command do
              | :start_failed
              | term()}
   def run(setsid_executable, executable, arguments, options \\ []) do
-    with {:ok, path} <- executable_path(executable, :executable_not_found),
-         {:ok, setsid_path} <- executable_path(setsid_executable, :setsid_not_found) do
-      deadline = deadline(Keyword.get(options, :timeout_ms, 60_000))
-      max_bytes = Keyword.get(options, :max_output_bytes, 256_000)
+    max_bytes = Keyword.get(options, :max_output_bytes, 256_000)
 
-      with {:ok, running, stdout} <- start(setsid_path, path, arguments, options, deadline) do
-        collect(running, deadline, max_bytes, append(<<>>, stdout, max_bytes))
-      end
+    with {:ok, stream, stdout, deadline} <-
+           launch(setsid_executable, executable, arguments, options) do
+      collect(stream, deadline, max_bytes, append(<<>>, stdout, max_bytes))
     end
   end
+
+  @doc """
+  Starts a command whose output the caller reads itself, and gives the caller the command.
+
+  The caller receives `{stream.port, {:data, data}}` for output and
+  `{stream.port, {:exit_status, status}}` when the command ends. The reaper ends the command's
+  group when the caller dies, so a command that never ends on its own still belongs to one live
+  process. A caller that stays alive across commands calls `close/1` for each one that ends.
+  """
+  @spec open(String.t(), String.t(), [String.t()], [option()]) ::
+          {:ok, Stream.t()}
+          | {:error,
+             :executable_not_found | :setsid_not_found | :timed_out | :cancelled | :start_failed}
+  def open(setsid_executable, executable, arguments, options \\ []) do
+    with {:ok, stream, _stdout, _deadline} <-
+           launch(setsid_executable, executable, arguments, options) do
+      {:ok, stream}
+    end
+  end
+
+  @doc """
+  Ends the caller's ownership of a command that has stopped: the reaper forgets its process group
+  and removes its stderr file. A caller that outlives its commands would otherwise grow one reaper
+  record and one file per command.
+  """
+  @spec close(Stream.t()) :: :ok
+  def close(%Stream{} = stream), do: Reaper.release(stream.ticket)
 
   @doc """
   Stops the command running in another process, along with its process group. The command returns
@@ -91,6 +124,19 @@ defmodule Biot.Node.Host.Command do
     if stderr == "", do: stdout, else: stderr
   end
 
+  # The command starts only after the go line, so nothing has written output yet and the handshake
+  # leftover is empty. `run/4` still folds it in, because the port protocol allows it.
+  defp launch(setsid_executable, executable, arguments, options) do
+    with {:ok, path} <- executable_path(executable, :executable_not_found),
+         {:ok, setsid_path} <- executable_path(setsid_executable, :setsid_not_found) do
+      deadline = deadline(Keyword.get(options, :timeout_ms, 60_000))
+
+      with {:ok, stream, stdout} <- start(setsid_path, path, arguments, options, deadline) do
+        {:ok, stream, stdout, deadline}
+      end
+    end
+  end
+
   defp executable_path(executable, missing) do
     case System.find_executable(executable) do
       nil -> {:error, missing}
@@ -99,7 +145,7 @@ defmodule Biot.Node.Host.Command do
   end
 
   @spec start(Path.t(), Path.t(), [String.t()], [option()], integer()) ::
-          {:ok, Running.t(), binary()} | {:error, :timed_out | :cancelled | :start_failed}
+          {:ok, Stream.t(), binary()} | {:error, :timed_out | :cancelled | :start_failed}
   defp start(setsid_path, path, arguments, options, deadline) do
     stderr_path = Path.join(System.tmp_dir!(), "biot-command-#{CanonicalUuid.generate()}")
 
@@ -112,7 +158,7 @@ defmodule Biot.Node.Host.Command do
     with {:ok, process_group, stdout} <- handshake(port, <<>>, deadline) do
       ticket = Reaper.watch(process_group, stderr_path)
       go(port)
-      {:ok, %Running{port: port, stderr_path: stderr_path, ticket: ticket}, stdout}
+      {:ok, %Stream{port: port, stderr_path: stderr_path, ticket: ticket}, stdout}
     end
   end
 
@@ -170,41 +216,42 @@ defmodule Biot.Node.Host.Command do
   end
 
   defp give_up(port, reason) do
-    close(port)
+    close_port(port)
     {:error, reason}
   end
 
-  defp collect(%Running{port: port} = running, deadline, max_bytes, stdout) do
+  defp collect(%Stream{port: port} = stream, deadline, max_bytes, stdout) do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     if remaining <= 0 do
-      abandon(running, :timed_out)
+      abandon(stream, :timed_out)
     else
       receive do
         @cancel ->
-          abandon(running, :cancelled)
+          abandon(stream, :cancelled)
 
         {^port, {:data, data}} ->
-          collect(running, deadline, max_bytes, append(stdout, data, max_bytes))
+          collect(stream, deadline, max_bytes, append(stdout, data, max_bytes))
 
         {^port, {:exit_status, status}} ->
-          finish(running, status, stdout, max_bytes)
+          finish(stream, status, stdout, max_bytes)
       after
         remaining ->
-          abandon(running, :timed_out)
+          abandon(stream, :timed_out)
       end
     end
   end
 
-  defp abandon(%Running{} = running, reason) do
-    :ok = Reaper.cancel(running.ticket)
-    close(running.port)
+  defp abandon(%Stream{} = stream, reason) do
+    :ok = Reaper.cancel(stream.ticket)
+    close_port(stream.port)
     {:error, reason}
   end
 
-  defp finish(%Running{} = running, status, stdout, max_bytes) do
-    stderr = read_tail(running.stderr_path, max_bytes)
-    :ok = Reaper.release(running.ticket)
+  # The stderr file is read before ownership ends, because ending it removes the file.
+  defp finish(%Stream{} = stream, status, stdout, max_bytes) do
+    stderr = read_tail(stream.stderr_path, max_bytes)
+    :ok = close(stream)
 
     {:ok, %Result{status: status, stdout: stdout, stderr: stderr}}
   end
@@ -229,7 +276,7 @@ defmodule Biot.Node.Host.Command do
     end
   end
 
-  defp close(port) do
+  defp close_port(port) do
     if Port.info(port), do: Port.close(port)
     :ok
   end

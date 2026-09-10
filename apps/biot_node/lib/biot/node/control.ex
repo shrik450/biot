@@ -1,7 +1,6 @@
 defmodule Biot.Node.Control do
   @moduledoc """
-  Sends node reports through the current control connection, and answers whether the node holds
-  one.
+  Sends node reports through the current control connection.
 
   A report never waits for the link. It goes into `Biot.Node.Control.Outbox`, which keeps only the
   latest report of its kind and which the connection drains when it is ready. A node without a
@@ -9,16 +8,12 @@ defmodule Biot.Node.Control do
   every controller, and each one reports what it inspected then.
   """
 
-  alias Biot.Node.Control.Connection
   alias Biot.Node.Control.Outbox
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.OrphanedAllocation
-
-  @spec status() :: :ready | :offline
-  defdelegate status, to: Connection
 
   @spec report_observation(BiotId.t(), ExecutionReport.t()) :: :ok
   def report_observation(%BiotId{} = biot_id, %ExecutionReport{} = report) do
