@@ -1,5 +1,34 @@
 defmodule Biot.Node.Host.Config do
-  @moduledoc "The parsed operator settings used by host inspection and effects."
+  @moduledoc """
+  The parsed operator settings used by host inspection and effects.
+
+  Most settings are paths, executables, and bounds an operator can read from their names. Two are
+  not, and this is the deployment-facing description of them.
+
+  ## `BIOT_NODE_FETCH_CA_BUNDLE`
+
+  Optional. The absolute path to the certificate authorities the trusted fetch phase trusts, for an
+  operator who runs a Git host the builder image's own roots do not cover.
+
+  It **replaces** that trust store; it does not add to it, the way `SSL_CERT_FILE` does not add to
+  it for any other tool. A file holding only a private authority therefore makes public fetches
+  fail, including the base package set. The file must hold every authority a fetch needs. Build a
+  complete one by putting the image's own roots first:
+
+      podman run --rm --network none "$BIOT_NODE_BUILDER_IMAGE" \
+        cat /nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt > roots.pem
+      cat roots.pem private-authority.pem > /etc/biot/fetch-ca-bundle.pem
+
+  Leave it unset unless a fetch actually needs it. It reaches the fetch phase alone: no user build
+  and no runtime trusts an operator's authority, and the node's own checkout clone trusts whatever
+  the node host trusts, so an authority needed for a private checkout belongs in the host's own
+  store as well.
+
+  ## `BIOT_NODE_BUILDER_IMAGE`
+
+  Required, and must name a digest rather than a tag. "The current release's pinned image" is a
+  trust statement, and a tag is not a pin.
+  """
 
   alias Biot.Node.Host.Command
   alias Biot.Protocol.Platform
@@ -19,6 +48,7 @@ defmodule Biot.Node.Host.Config do
     :podman_network_command,
     :builder_image,
     :build_support_dir,
+    :fetch_ca_bundle,
     :binary_cache_urls,
     :binary_cache_keys,
     :nixpkgs_repository,
@@ -47,6 +77,7 @@ defmodule Biot.Node.Host.Config do
           podman_network_command: String.t(),
           builder_image: String.t(),
           build_support_dir: String.t(),
+          fetch_ca_bundle: String.t() | nil,
           binary_cache_urls: [String.t()],
           binary_cache_keys: [String.t()],
           nixpkgs_repository: String.t(),
@@ -68,6 +99,7 @@ defmodule Biot.Node.Host.Config do
          {:ok, uid_range_limit} <- positive_integer(:uid_range_limit),
          :ok <- uid_range(uid_range_base, uid_range_count, uid_range_limit),
          {:ok, build_support_dir} <- absolute_path(:build_support_dir),
+         {:ok, fetch_ca_bundle} <- fetch_ca_bundle(),
          {:ok, builder_image} <- builder_image(),
          {:ok, binary_cache_urls} <- cache_setting(:binary_cache_urls),
          {:ok, binary_cache_keys} <- cache_setting(:binary_cache_keys),
@@ -99,6 +131,7 @@ defmodule Biot.Node.Host.Config do
          podman_network_command: podman_network_command,
          builder_image: builder_image,
          build_support_dir: build_support_dir,
+         fetch_ca_bundle: fetch_ca_bundle,
          binary_cache_urls: binary_cache_urls,
          binary_cache_keys: binary_cache_keys,
          nixpkgs_repository: setting(:nixpkgs_repository, "https://github.com/NixOS/nixpkgs"),
@@ -130,6 +163,14 @@ defmodule Biot.Node.Host.Config do
       cat: config.cat_executable,
       sleep: config.sleep_executable
     }
+  end
+
+  # The moduledoc above is the operator-facing description of this setting.
+  defp fetch_ca_bundle do
+    case Application.get_env(:biot_node, :fetch_ca_bundle) do
+      nil -> {:ok, nil}
+      _value -> absolute_path(:fetch_ca_bundle)
+    end
   end
 
   defp absolute_path(key) do

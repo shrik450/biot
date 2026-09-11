@@ -251,12 +251,25 @@ defmodule Biot.Node.HostPureTest do
 
     assert Paths.runtime_mounts(config, biot) == [
              {"/var/lib/biot/biots/#{biot}/checkout", "/biot/checkout", :rw},
-             {"/var/lib/biot/biots/#{biot}/store/nix/store", "/nix/store", :ro},
              {"/var/lib/biot/biots/#{biot}/home", "/biot/home", :rw},
              {"/var/lib/biot/biots/#{biot}/service-data", "/biot/service-data", :rw},
              {"/var/lib/biot/biots/#{biot}/run", "/biot/run", :rw},
-             {"/var/lib/biot/biots/#{biot}/secrets", "/biot/secrets", :ro}
+             {"/var/lib/biot/biots/#{biot}/secrets", "/biot/secrets", :ro},
+             {"/var/lib/biot/biots/#{biot}/store/nix/store", "/nix/store", :ro}
            ]
+
+    assert Paths.required_directories(config, biot) ==
+             Enum.map(Paths.allocation_directories(config, biot), & &1.path)
+
+    credentials =
+      Enum.find(
+        Paths.allocation_directories(config, biot),
+        &(&1.path == Paths.fetch_credentials(config, biot))
+      )
+
+    assert credentials.owner == :node
+    assert credentials.mount == nil
+    assert credentials.path in Paths.required_directories(config, biot)
 
     root = Paths.biot(config, biot)
 
@@ -366,7 +379,8 @@ defmodule Biot.Node.HostPureTest do
 
     assert Layout.mounts(config, biot, {:fetch, env}) == [
              {Paths.environment(config, biot, env), Layout.environment(env), :rw},
-             {Paths.build_support(config, biot), Layout.build_support(), :ro}
+             {Paths.build_support(config, biot), Layout.build_support(), :ro},
+             {Paths.fetch_credentials(config, biot), "/biot/fetch-credentials", :ro}
              | common
            ]
 
@@ -383,12 +397,27 @@ defmodule Biot.Node.HostPureTest do
   end
 
   test "worker layout fixes the environment, tmpfs, and logical store" do
-    assert Layout.variables() == [
+    config = config("/var/lib/biot")
+
+    assert Layout.variables(config, :collect) == [
              {"NIX_PATH", ""},
              {"TMPDIR", "/build"},
              {"HOME", "/build/home"},
-             {"XDG_CACHE_HOME", "/build/cache"}
+             {"XDG_CACHE_HOME", "/build/cache"},
+             {"GIT_CONFIG_GLOBAL", "/dev/null"},
+             {"GIT_ALLOW_PROTOCOL", "https"},
+             {"GIT_CONFIG_NOSYSTEM", "1"},
+             {"GIT_TERMINAL_PROMPT", "0"},
+             {"GIT_ASKPASS", ""},
+             {"SSH_ASKPASS", ""}
            ]
+
+    assert {"GIT_CONFIG_GLOBAL", "/biot/fetch-credentials/include.config"} in Layout.variables(
+             config,
+             {:fetch, e1()}
+           )
+
+    assert {"GIT_CONFIG_GLOBAL", "/dev/null"} in Layout.variables(config, {:build, e1(), []})
 
     assert Layout.image_tmpfs() == ["/tmp", "/root", "/var", "/nix/var"]
     assert Layout.store_arguments() == ["--store", "/biot/store"]
@@ -406,14 +435,18 @@ defmodule Biot.Node.HostPureTest do
     config = config("/var/lib/biot")
     {:ok, repository} = RepositorySource.parse("https://example.com/project.git")
 
-    assert Git.environment() == [
+    assert Git.environment(:no_credentials) == [
+             {"GIT_CONFIG_GLOBAL", "/dev/null"},
              {"GIT_ALLOW_PROTOCOL", "https"},
              {"GIT_CONFIG_NOSYSTEM", "1"},
-             {"GIT_CONFIG_GLOBAL", "/dev/null"},
              {"GIT_TERMINAL_PROMPT", "0"},
              {"GIT_ASKPASS", ""},
              {"SSH_ASKPASS", ""}
            ]
+
+    assert {"GIT_CONFIG_GLOBAL", "/credentials/include.config"} in Git.environment(
+             {:credentials, "/credentials/include.config"}
+           )
 
     assert Git.clone_arguments(config, repository, "/checkout") == [
              "-c",
@@ -537,6 +570,7 @@ defmodule Biot.Node.HostPureTest do
 
     struct!(Config,
       data_root: data_root,
+      fetch_ca_bundle: nil,
       uid_range_base: 100_000,
       uid_range_count: 1_024,
       uid_range_limit: 165_536,

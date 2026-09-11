@@ -23,6 +23,7 @@ defmodule Biot.Node.Journal do
   alias Biot.Protocol.Failure
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.PrivateDiagnosticId
+  alias Biot.Protocol.RepositorySource
 
   @spec allocation(BiotId.t()) :: Allocation.t() | nil
   def allocation(%BiotId{} = biot_id) do
@@ -396,6 +397,26 @@ defmodule Biot.Node.Journal do
     update_retry_state(biot_id, revision, &%{&1 | failure: nil, next_attempt_at: nil})
   end
 
+  @doc """
+  Records that this revision is waiting for a credential for `source`, and gives back the attempt
+  the action that found this out had already spent on `stage`.
+
+  Giving the attempt back is one half of the model's "waiting consumes no retry budget"; the other
+  half is `Biot.Node.Reconcile`, which runs no action while the wait stands. Those are the only two
+  places that know it.
+  """
+  @spec record_waiting_for(BiotId.t(), pos_integer(), Failure.stage(), RepositorySource.t()) ::
+          retry_write()
+  def record_waiting_for(%BiotId{} = biot_id, revision, stage, %RepositorySource{} = source) do
+    update_retry_state(biot_id, revision, &RetryState.wait_for_credential(&1, stage, source))
+  end
+
+  @doc "Ends the wait once the credential arrives, so the next convergence runs the fetch again."
+  @spec clear_waiting_for(BiotId.t(), pos_integer()) :: retry_write()
+  def clear_waiting_for(%BiotId{} = biot_id, revision) do
+    update_retry_state(biot_id, revision, &%{&1 | waiting_for: nil})
+  end
+
   # Invariant: a retry row always describes the revision the intent row holds. Reading the intent
   # row inside the write's own transaction is what keeps that true while a controller is still
   # working on a revision the server has already replaced.
@@ -434,6 +455,7 @@ defmodule Biot.Node.Journal do
       target_revision: state.target_revision,
       attempts: state.attempts,
       next_attempt_at: state.next_attempt_at,
+      waiting_for: state.waiting_for,
       failure: state.failure
     ]
 
@@ -556,6 +578,7 @@ defmodule Biot.Node.Journal do
       target_revision: row.target_revision,
       attempts: row.attempts,
       next_attempt_at: row.next_attempt_at,
+      waiting_for: row.waiting_for,
       failure: row.failure
     }
   end

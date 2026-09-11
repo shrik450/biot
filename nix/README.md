@@ -137,3 +137,22 @@ value below the service data mount. Its layer selects zsh for shells. The
 service serves the declared file at `/message`.
 Add `nix/examples/conflicting-layer` as a third source to see both source
 locations in the module system conflict error.
+
+## Trusting a private Git host
+
+`BIOT_NODE_FETCH_CA_BUNDLE` is an optional absolute path to the certificate authorities the
+node's trusted fetch phase trusts. Set it when a repository or layer lives on a Git host the
+builder image's own roots do not cover. It **replaces** that trust store rather than adding to it,
+the way `SSL_CERT_FILE` does not add to it for any other tool, so a file holding only a private
+authority makes public fetches fail, including the base package set. Build a complete bundle by
+putting the image's own roots first:
+
+```sh
+podman run --rm --network none "$BIOT_NODE_BUILDER_IMAGE" \
+  cat /nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt > roots.pem
+cat roots.pem private-authority.pem > /etc/biot/fetch-ca-bundle.pem
+```
+
+Leave it unset unless a fetch needs it. Only the fetch phase reads it: no user build and no
+runtime trusts an operator's authority, and the node's own checkout clone trusts whatever the node
+host trusts, so an authority needed for a private checkout belongs in the host's own store as well.

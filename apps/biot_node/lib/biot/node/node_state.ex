@@ -22,6 +22,7 @@ defmodule Biot.Node.NodeState do
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.ContainerState
   alias Biot.Protocol.EnvironmentId
+  alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Failure
   alias Biot.Protocol.IncarnationId
 
@@ -75,9 +76,19 @@ defmodule Biot.Node.NodeState do
     :container,
     :prepared,
     :pending_exit,
+    :waiting_for,
     :failure
   ]
-  defstruct [:data, :resolutions, :installation, :container, :prepared, :pending_exit, :failure]
+  defstruct [
+    :data,
+    :resolutions,
+    :installation,
+    :container,
+    :prepared,
+    :pending_exit,
+    :waiting_for,
+    :failure
+  ]
 
   @typedoc "`resolutions` and `prepared` hold only this biot's environments, keyed by environment."
   @type t :: %__MODULE__{
@@ -87,6 +98,7 @@ defmodule Biot.Node.NodeState do
           container: resource(container()),
           prepared: prepared(),
           pending_exit: pending_exit(),
+          waiting_for: ExecutionReport.waiting_for(),
           failure: recorded_failure()
         }
 end

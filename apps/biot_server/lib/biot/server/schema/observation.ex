@@ -9,6 +9,7 @@ defmodule Biot.Server.Schema.Observation do
   alias Biot.Protocol.ExecutionReport
   alias Biot.Server.Ecto.ObservationContainer
   alias Biot.Server.Ecto.ObservationFailure
+  alias Biot.Server.Ecto.ObservationWaitingFor
   alias Biot.Server.Ecto.ProtocolValue
 
   @primary_key false
@@ -22,6 +23,7 @@ defmodule Biot.Server.Schema.Observation do
 
     field(:data, Ecto.Enum, values: ExecutionReport.data_states())
 
+    field(:waiting_for, ObservationWaitingFor)
     field(:failure, ObservationFailure)
 
     timestamps(type: :utc_datetime_usec)

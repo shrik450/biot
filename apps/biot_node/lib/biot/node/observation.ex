@@ -19,9 +19,16 @@ defmodule Biot.Node.Observation do
           Inspection.t(),
           Desired.t(),
           NodeState.pending_exit(),
+          ExecutionReport.waiting_for(),
           NodeState.recorded_failure()
         ) :: NodeState.t()
-  def node_state(%Inspection{} = inspection, %Desired{} = desired, pending_exit, failure) do
+  def node_state(
+        %Inspection{} = inspection,
+        %Desired{} = desired,
+        pending_exit,
+        waiting_for,
+        failure
+      ) do
     %NodeState{
       data: inspection.data,
       resolutions: inspection.resolutions,
@@ -29,6 +36,7 @@ defmodule Biot.Node.Observation do
       container: inspection.container,
       prepared: inspection.prepared,
       pending_exit: pending_exit(desired, inspection.container, pending_exit),
+      waiting_for: waiting_for,
       failure: failure
     }
   end
@@ -40,6 +48,7 @@ defmodule Biot.Node.Observation do
       installed_environment_id: installed_environment_id(state.installation),
       container: container(state.container),
       data: data(state.data),
+      waiting_for: state.waiting_for,
       failure: state.failure
     }
   end

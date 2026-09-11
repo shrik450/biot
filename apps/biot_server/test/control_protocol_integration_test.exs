@@ -1189,7 +1189,8 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
           installed_environment_id: nil,
           container: :absent,
           data: :no_allocation,
-          failure: nil
+          failure: nil,
+          waiting_for: nil
         }
 
         start_node_journal()

@@ -116,6 +116,22 @@ defmodule Biot.Node.Host.Podman do
     end
   end
 
+  @doc """
+  Gives a tree to one allocation's mapped user while the node keeps read access through the group.
+
+  A source credential is the one thing both have to read: the fetch worker runs as the allocation's
+  user, and the node's own checkout clone runs as the node. Ownership alone cannot say that, so the
+  group does, and the file's mode is what decides that the group may only read.
+
+  Inside `podman unshare` the invoking user's UID and primary GID map to zero, so naming group zero
+  here names the node's own primary group on the host without knowing what it is.
+  """
+  @spec share(Config.t(), Allocation.t(), [String.t()]) :: :ok | {:error, Outcome.t()}
+  def share(config, %Allocation{} = allocation, paths) do
+    mapped_start = Allocation.subordinate_start(allocation, config.uid_range_base)
+    chown(config, "#{mapped_start}:0", paths)
+  end
+
   defp chown(config, owner, paths), do: unshare(config, ["chown", "-R", owner | paths])
 
   defp unshare(config, arguments) do

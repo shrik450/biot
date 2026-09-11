@@ -257,7 +257,8 @@ defmodule Biot.Node.HostJournalIntegrationTest do
       installed_environment_id: nil,
       container: :absent,
       data: :no_allocation,
-      failure: nil
+      failure: nil,
+      waiting_for: nil
     }
   end
 
@@ -277,6 +278,7 @@ defmodule Biot.Node.HostJournalIntegrationTest do
 
     struct!(Config,
       data_root: data_root,
+      fetch_ca_bundle: nil,
       uid_range_base: 100_000,
       uid_range_count: 1_024,
       uid_range_limit: 165_536,

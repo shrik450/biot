@@ -35,6 +35,19 @@ defmodule Biot.Protocol.RepositorySource do
   @spec to_string(t()) :: String.t()
   def to_string(%__MODULE__{url: url}), do: url
 
+  @doc """
+  The scheme, host, and port this repository is served from, without its path.
+
+  A transport reports a failure against the origin it was talking to as often as against the whole
+  URL, so recognizing which source a message is about needs both forms.
+  """
+  @spec origin(t()) :: String.t()
+  def origin(%__MODULE__{url: url}) do
+    uri = URI.parse(url)
+    port = if uri.port in [nil, 443], do: "", else: ":#{uri.port}"
+    "https://" <> uri.host <> port
+  end
+
   defp parse_uri(value) do
     uri = URI.parse(value)
 

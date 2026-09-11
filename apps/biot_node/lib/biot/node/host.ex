@@ -2,17 +2,30 @@ defmodule Biot.Node.Host do
   @moduledoc "Inspects one Biot's host resources and runs one reconciliation action."
 
   alias Biot.Node.Action
+  alias Biot.Node.Allocation
   alias Biot.Node.Host.Allocation, as: HostAllocation
   alias Biot.Node.Host.Container
   alias Biot.Node.Host.Context
   alias Biot.Node.Host.Environment
+  alias Biot.Node.Host.FetchCredentials
   alias Biot.Node.Host.Inspection
   alias Biot.Node.Host.Outcome
+  alias Biot.Node.Host.Secrets
   alias Biot.Node.Host.Worker
   alias Biot.Node.Journal
+  alias Biot.Node.SecretRequest
   alias Biot.Protocol.BiotId
+  alias Biot.Protocol.RepositorySource
+  alias Biot.Protocol.SecretOutcome
 
-  @type result :: :ok | {:error, Outcome.t()}
+  @typedoc """
+  What one action answers.
+
+  `{:waiting_for, source}` is neither success nor failure: the action reached a source it cannot
+  read without a credential the node does not hold. Nothing is wrong and nothing can proceed, so
+  the controller records the wait rather than a failure and spends no retry budget on it.
+  """
+  @type result :: :ok | {:waiting_for, RepositorySource.t()} | {:error, Outcome.t()}
 
   @spec context(BiotId.t()) :: {:ok, Context.t()} | {:error, term()}
   def context(%BiotId{} = biot_id), do: Context.from_application(biot_id)
@@ -83,6 +96,42 @@ defmodule Biot.Node.Host do
 
   def run({:release_allocation, allocation}, %Context{} = context) do
     HostAllocation.release(context, allocation)
+  end
+
+  @doc """
+  Answers one secret or fetch credential request against this biot's allocation.
+
+  A request reads the allocation rather than establishing one, which is the difference between
+  this and `run/2`: an action converges on the resources the biot should have, while a request
+  only uses the ones it already has.
+  """
+  @spec serve(SecretRequest.operation(), Context.t()) ::
+          SecretOutcome.t() | SecretOutcome.listing()
+  def serve(operation, %Context{biot_id: biot_id, config: config}) do
+    case Journal.allocation(biot_id) do
+      nil -> :no_allocation
+      %Allocation{} = allocation -> serve_allocated(operation, config, allocation)
+    end
+  end
+
+  defp serve_allocated({:deliver_secret, name, value}, config, allocation) do
+    Secrets.write(config, allocation, name, value)
+  end
+
+  defp serve_allocated({:remove_secret, name}, config, allocation) do
+    Secrets.remove(config, allocation, name)
+  end
+
+  defp serve_allocated(:list_secrets, config, allocation) do
+    Secrets.list(config, allocation)
+  end
+
+  defp serve_allocated({:deliver_fetch_credential, source, value}, config, allocation) do
+    FetchCredentials.put(config, allocation, source, value)
+  end
+
+  defp serve_allocated({:remove_fetch_credential, source}, config, allocation) do
+    FetchCredentials.remove(config, allocation, source)
   end
 
   defp data(_config, nil), do: :no_allocation

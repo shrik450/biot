@@ -88,6 +88,17 @@ defmodule Biot.Node.Host.Paths do
   @spec secrets(Config.t(), BiotId.t()) :: String.t()
   def secrets(config, biot_id), do: Path.join(biot(config, biot_id), "secrets")
 
+  @doc """
+  The source credentials this biot's trusted fetching may use.
+
+  It is deliberately absent from `runtime_mounts/2` and from every build worker's mounts except
+  the fetch phase's, which is the whole of "outside runtime and user build mounts".
+  """
+  @spec fetch_credentials(Config.t(), BiotId.t()) :: String.t()
+  def fetch_credentials(config, biot_id) do
+    Path.join(biot(config, biot_id), "fetch-credentials")
+  end
+
   @doc "The root of the Biot's private Nix store and database, as a Nix store root."
   @spec store_root(Config.t(), BiotId.t()) :: String.t()
   def store_root(config, biot_id), do: Path.join(biot(config, biot_id), "store")
@@ -137,40 +148,66 @@ defmodule Biot.Node.Host.Paths do
   """
   @spec runtime_mounts(Config.t(), BiotId.t()) :: [mount()]
   def runtime_mounts(config, biot_id) do
-    [
-      {checkout(config, biot_id), "/biot/checkout", :rw},
-      {store(config, biot_id), "/nix/store", :ro}
-      | mounts_created_at_allocation(config, biot_id)
-    ]
+    mounted =
+      for %{path: path, mount: {target, mode}} <- allocation_directories(config, biot_id),
+          do: {path, target, mode}
+
+    [{checkout(config, biot_id), "/biot/checkout", :rw} | mounted]
   end
 
-  # The checkout is missing here because a present checkout directory is what marks the clone
-  # done: if `allocate` created it, every Biot would initialize with an empty checkout.
-  @spec mounts_created_at_allocation(Config.t(), BiotId.t()) :: [mount()]
-  def mounts_created_at_allocation(config, biot_id) do
-    [
-      {home(config, biot_id), "/biot/home", :rw},
-      {service_data(config, biot_id), "/biot/service-data", :rw},
-      {run(config, biot_id), "/biot/run", :rw},
-      {secrets(config, biot_id), "/biot/secrets", :ro}
-    ]
-  end
+  @typedoc """
+  One directory `allocate` establishes: where it is, whose it is, and where the runtime mounts it.
+
+  A directory the container may write is the allocation's to own; one it may only read stays the
+  node's, so the node can publish into it and the container can only read what it finds. The store
+  is the exception that rule needs stated: the runtime reads it, but the build worker writes it.
+  """
+  @type directory :: %{
+          path: String.t(),
+          owner: :node | :allocation,
+          mount: nil | {String.t(), mount_mode()}
+        }
 
   @doc """
-  Every private directory `allocate` creates and hands to the allocation's own user range.
+  Every directory `allocate` establishes, with who owns it and where it is mounted.
 
-  The store directory is listed as well as its root so a runtime's mount source exists before the
-  first build writes anything. `environments/` is not here: the node creates and removes one
-  directory per environment inside it, and hands each of those to the allocation on its own.
+  One list answers the three questions that used to be answered separately and could disagree:
+  what creation makes, what is handed to the allocation's user, and what has to be present for the
+  data to be. A directory listed here that goes missing therefore makes the data lost, whatever it
+  holds, which is what keeps an allocation from being called healthy while an API it owns is
+  permanently unavailable.
+
+  The checkout is not here: a present checkout directory is what marks the clone done, so creating
+  it would make every biot initialize with an empty one.
   """
+  @spec allocation_directories(Config.t(), BiotId.t()) :: [directory()]
+  def allocation_directories(config, biot_id) do
+    [
+      %{path: home(config, biot_id), owner: :allocation, mount: {"/biot/home", :rw}},
+      %{
+        path: service_data(config, biot_id),
+        owner: :allocation,
+        mount: {"/biot/service-data", :rw}
+      },
+      %{path: run(config, biot_id), owner: :allocation, mount: {"/biot/run", :rw}},
+      %{path: secrets(config, biot_id), owner: :node, mount: {"/biot/secrets", :ro}},
+      %{path: fetch_credentials(config, biot_id), owner: :node, mount: nil},
+      %{path: store_root(config, biot_id), owner: :allocation, mount: nil},
+      %{path: store(config, biot_id), owner: :allocation, mount: {"/nix/store", :ro}},
+      %{path: scratch(config, biot_id), owner: :allocation, mount: nil}
+    ]
+  end
+
+  @doc "Every directory `allocate` creates, whoever owns it."
+  @spec required_directories(Config.t(), BiotId.t()) :: [String.t()]
+  def required_directories(config, biot_id) do
+    config |> allocation_directories(biot_id) |> Enum.map(& &1.path)
+  end
+
+  @doc "The directories handed to the allocation's own user range."
   @spec allocation_owned_directories(Config.t(), BiotId.t()) :: [String.t()]
   def allocation_owned_directories(config, biot_id) do
-    Enum.map(mounts_created_at_allocation(config, biot_id), &elem(&1, 0)) ++
-      [
-        store_root(config, biot_id),
-        store(config, biot_id),
-        scratch(config, biot_id)
-      ]
+    for %{path: path, owner: :allocation} <- allocation_directories(config, biot_id), do: path
   end
 
   @spec marker(Config.t(), BiotId.t()) :: String.t()

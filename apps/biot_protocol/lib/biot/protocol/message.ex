@@ -114,6 +114,82 @@ defmodule Biot.Protocol.Message.RuntimeLogs do
   def type, do: "runtime_logs"
 end
 
+defmodule Biot.Protocol.Message.DeliverSecret do
+  @moduledoc "Delivers one runtime secret value to a biot's allocation."
+  @enforce_keys [:request_id, :biot_id, :name, :value, :timeout_ms]
+  defstruct [:request_id, :biot_id, :name, :value, :timeout_ms]
+
+  @type t :: %__MODULE__{
+          request_id: String.t(),
+          biot_id: Biot.Protocol.BiotId.t(),
+          name: Biot.Protocol.SecretName.t(),
+          value: Biot.Protocol.SecretValue.t(),
+          timeout_ms: pos_integer()
+        }
+
+  def type, do: "deliver_secret"
+end
+
+defmodule Biot.Protocol.Message.RemoveSecret do
+  @moduledoc "Removes one runtime secret from a biot's allocation."
+  @enforce_keys [:request_id, :biot_id, :name, :timeout_ms]
+  defstruct [:request_id, :biot_id, :name, :timeout_ms]
+
+  @type t :: %__MODULE__{
+          request_id: String.t(),
+          biot_id: Biot.Protocol.BiotId.t(),
+          name: Biot.Protocol.SecretName.t(),
+          timeout_ms: pos_integer()
+        }
+
+  def type, do: "remove_secret"
+end
+
+defmodule Biot.Protocol.Message.ListSecrets do
+  @moduledoc "Asks which runtime secrets a biot's allocation currently holds."
+  @enforce_keys [:request_id, :biot_id, :timeout_ms]
+  defstruct [:request_id, :biot_id, :timeout_ms]
+
+  @type t :: %__MODULE__{
+          request_id: String.t(),
+          biot_id: Biot.Protocol.BiotId.t(),
+          timeout_ms: pos_integer()
+        }
+
+  def type, do: "list_secrets"
+end
+
+defmodule Biot.Protocol.Message.DeliverFetchCredential do
+  @moduledoc "Delivers one source credential, scoped to one parsed HTTPS repository."
+  @enforce_keys [:request_id, :biot_id, :source, :value, :timeout_ms]
+  defstruct [:request_id, :biot_id, :source, :value, :timeout_ms]
+
+  @type t :: %__MODULE__{
+          request_id: String.t(),
+          biot_id: Biot.Protocol.BiotId.t(),
+          source: Biot.Protocol.RepositorySource.t(),
+          value: Biot.Protocol.AuthorizationValue.t(),
+          timeout_ms: pos_integer()
+        }
+
+  def type, do: "deliver_fetch_credential"
+end
+
+defmodule Biot.Protocol.Message.RemoveFetchCredential do
+  @moduledoc "Removes the source credential a biot holds for one repository."
+  @enforce_keys [:request_id, :biot_id, :source, :timeout_ms]
+  defstruct [:request_id, :biot_id, :source, :timeout_ms]
+
+  @type t :: %__MODULE__{
+          request_id: String.t(),
+          biot_id: Biot.Protocol.BiotId.t(),
+          source: Biot.Protocol.RepositorySource.t(),
+          timeout_ms: pos_integer()
+        }
+
+  def type, do: "remove_fetch_credential"
+end
+
 defmodule Biot.Protocol.Message.Synchronized do
   @moduledoc "Acknowledges the complete intent set for a connection."
   @enforce_keys [:connection_id]
@@ -187,6 +263,36 @@ defmodule Biot.Protocol.Message.RuntimeLogsResult do
   @type t :: %__MODULE__{request_id: String.t(), result: result()}
 
   def type, do: "runtime_logs_result"
+end
+
+defmodule Biot.Protocol.Message.SecretResult do
+  @moduledoc "Returns the outcome of one runtime secret delivery or removal."
+  @enforce_keys [:request_id, :result]
+  defstruct [:request_id, :result]
+
+  @type t :: %__MODULE__{request_id: String.t(), result: Biot.Protocol.SecretOutcome.t()}
+
+  def type, do: "secret_result"
+end
+
+defmodule Biot.Protocol.Message.SecretListResult do
+  @moduledoc "Returns the runtime secret names a biot's allocation holds."
+  @enforce_keys [:request_id, :result]
+  defstruct [:request_id, :result]
+
+  @type t :: %__MODULE__{request_id: String.t(), result: Biot.Protocol.SecretOutcome.listing()}
+
+  def type, do: "secret_list_result"
+end
+
+defmodule Biot.Protocol.Message.FetchCredentialResult do
+  @moduledoc "Returns the outcome of one source credential delivery or removal."
+  @enforce_keys [:request_id, :result]
+  defstruct [:request_id, :result]
+
+  @type t :: %__MODULE__{request_id: String.t(), result: Biot.Protocol.SecretOutcome.t()}
+
+  def type, do: "fetch_credential_result"
 end
 
 defmodule Biot.Protocol.Message.Heartbeat do

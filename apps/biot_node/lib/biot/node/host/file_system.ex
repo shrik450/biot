@@ -40,6 +40,43 @@ defmodule Biot.Node.Host.FileSystem do
     end
   end
 
+  @doc """
+  Publishes one file into a directory it shares with its own temporary name.
+
+  The content is written under a temporary name in the same directory, `prepare` gives the file
+  whatever permissions and ownership it needs, and the rename publishes it. A reader therefore sees
+  the previous file or a complete one that is already handed over, and never one the node is still
+  preparing. Staying in the same directory is what makes the rename atomic.
+
+  The caller owns what the file contains, what `prepare` does to it, and what a failure means; this
+  owns only the order those happen in.
+  """
+  @spec publish(String.t(), String.t(), iodata(), (String.t() -> :ok | {:error, term()})) ::
+          :ok | {:error, term()}
+  def publish(directory, name, content, prepare) when is_function(prepare, 1) do
+    temporary = Path.join(directory, ".#{CanonicalUuid.generate()}.tmp")
+
+    with :ok <- File.write(temporary, content, [:binary, :exclusive]),
+         :ok <- prepare.(temporary),
+         :ok <- File.rename(temporary, Path.join(directory, name)) do
+      :ok
+    else
+      {:error, reason} ->
+        File.rm(temporary)
+        {:error, reason}
+    end
+  end
+
+  @doc "Removes one file. A file that is already gone is the state the caller asked for."
+  @spec unlink(String.t()) :: :ok | {:error, term()}
+  def unlink(path) do
+    case File.rm(path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   @spec remove_tree(String.t()) :: :ok | {:error, term()}
   def remove_tree(path) do
     case File.rm_rf(path) do

@@ -164,7 +164,8 @@ defmodule Biot.Server.TestFixtures do
       installed_environment_id: Keyword.get(opts, :installed_environment_id),
       container: Keyword.get(opts, :container, :unknown),
       data: Keyword.get(opts, :data, :unknown),
-      failure: Keyword.get(opts, :failure)
+      failure: Keyword.get(opts, :failure),
+      waiting_for: nil
     }
   end
 

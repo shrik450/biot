@@ -43,7 +43,8 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     project_root = Path.expand("../../..", __DIR__)
     data_root = temporary_directory("biot-host-linux")
     repository_root = temporary_directory("biot-host-git")
-    settings = host_settings(data_root, project_root)
+    authority = certificate_authority(repository_root)
+    settings = host_settings(data_root, project_root, authority.bundle)
 
     previous =
       Map.new(settings, fn {key, _value} -> {key, Application.get_env(:biot_node, key)} end)
@@ -66,7 +67,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     broken_layer = git_repository(repository_root, "broken-layer", "{ this is not valid Nix; }\n")
 
     {repositories, server} =
-      served_repositories(repository_root, %{
+      served_repositories(repository_root, authority, %{
         checkout: checkout_source,
         base_layer: base_layer,
         service_layer: service_layer,
@@ -105,8 +106,11 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
      broken_layer: repositories.broken_layer}
   end
 
-  # The build worker trusts no operator CA, so this fixture's self-signed layer host cannot be
-  # fetched; it returns when step 18 adds fetch credentials and the trust that goes with them.
+  # The fetch phase this fixture waited on now passes: the layer host's authority reaches the fetch
+  # worker through the operator's `fetch_ca_bundle`, built below from the builder image's own roots
+  # plus that authority, and the worker produces its staged out-link. The build phase that follows
+  # then ends `:build_failed` immediately after Nix lists its binary-cache downloads, for a cause
+  # nobody has identified yet, so the fixture stays skipped on that failure rather than the old one.
   @tag :skip
   test "real host resources preserve ownership, data, and repeated effects", context do
     prove_second_process_lock(context.data_root)
@@ -131,12 +135,11 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     allocated_twice = Host.inspect_state(biot_id, host)
     assert {:uninitialized, allocation} = allocated_once.data
 
-    allocation_mounts = Paths.mounts_created_at_allocation(host.config, biot_id)
-    assert Enum.all?(allocation_mounts, fn {source, _target, _mode} -> File.dir?(source) end)
+    allocation_directories = Paths.allocation_directories(host.config, biot_id)
+    assert Enum.all?(allocation_directories, fn %{path: path} -> File.dir?(path) end)
 
-    assert Enum.all?(allocation_mounts, fn {source, _target, _mode} ->
-             match?({:ok, %File.Stat{uid: owner, gid: owner}}, File.stat(source)) and
-               File.stat!(source).uid == allocation.uid_range.start
+    assert Enum.all?(allocation_directories, fn %{path: path, owner: owner} ->
+             owns?(File.stat!(path), owner, allocation.uid_range.start)
            end)
 
     refute File.exists?(Paths.checkout(host.config, biot_id))
@@ -576,7 +579,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   defp node_state(%Inspection{} = inspection) do
     inspection
     |> Map.from_struct()
-    |> Map.merge(%{pending_exit: nil, failure: nil})
+    |> Map.merge(%{pending_exit: nil, waiting_for: nil, failure: nil})
     |> then(&struct!(NodeState, &1))
   end
 
@@ -760,7 +763,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     selector
   end
 
-  defp served_repositories(root, sources) do
+  defp served_repositories(root, authority, sources) do
     served = Path.join(root, "served")
     File.mkdir_p!(served)
 
@@ -772,28 +775,50 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
     cert = Path.join(root, "server.crt")
     key = Path.join(root, "server.key")
-    {addresses, 0} = System.cmd("hostname", ["-I"], stderr_to_stdout: true)
-    address = addresses |> String.split() |> hd()
+    request = Path.join(root, "server.csr")
+    extensions = Path.join(root, "server.ext")
+    address = host_address()
 
     assert {_, 0} =
              System.cmd(
                "openssl",
                [
                  "req",
-                 "-x509",
                  "-newkey",
                  "rsa:2048",
                  "-nodes",
                  "-keyout",
                  key,
                  "-out",
+                 request,
+                 "-subj",
+                 "/CN=#{address}"
+               ],
+               stderr_to_stdout: true
+             )
+
+    File.write!(extensions, "subjectAltName=IP:#{address}\nextendedKeyUsage=serverAuth\n")
+
+    assert {_, 0} =
+             System.cmd(
+               "openssl",
+               [
+                 "x509",
+                 "-req",
+                 "-in",
+                 request,
+                 "-CA",
+                 authority.certificate,
+                 "-CAkey",
+                 authority.key,
+                 "-CAcreateserial",
+                 "-out",
                  cert,
                  "-days",
                  "1",
-                 "-subj",
-                 "/CN=#{address}",
-                 "-addext",
-                 "subjectAltName=IP:#{address}"
+                 "-sha256",
+                 "-extfile",
+                 extensions
                ],
                stderr_to_stdout: true
              )
@@ -885,6 +910,68 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     {repositories, server}
   end
 
+  # The fetch worker's trust store is the disposable image's, so an operator who wants it to reach a
+  # private host names one complete bundle: the image's own public roots plus that authority. This
+  # is what `BIOT_NODE_FETCH_CA_BUNDLE` means, and building it here is what step 17 lacked.
+  defp certificate_authority(root) do
+    directory = Path.join(root, "tls")
+    File.mkdir_p!(directory)
+    certificate = Path.join(directory, "ca.pem")
+    key = Path.join(directory, "ca.key")
+    bundle = Path.join(directory, "fetch-bundle.pem")
+
+    assert {_, 0} =
+             System.cmd(
+               "openssl",
+               [
+                 "req",
+                 "-x509",
+                 "-newkey",
+                 "rsa:2048",
+                 "-sha256",
+                 "-days",
+                 "1",
+                 "-nodes",
+                 "-keyout",
+                 key,
+                 "-out",
+                 certificate,
+                 "-subj",
+                 "/CN=biot-test-ca",
+                 "-addext",
+                 "basicConstraints=critical,CA:TRUE"
+               ],
+               stderr_to_stdout: true
+             )
+
+    image = Keyword.fetch!(host_settings("/unused", "/unused", nil), :builder_image)
+
+    {roots, 0} =
+      System.cmd(
+        "podman",
+        [
+          "run",
+          "--rm",
+          "--network",
+          "none",
+          image,
+          "cat",
+          "/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt"
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert roots =~ "BEGIN CERTIFICATE"
+    File.write!(bundle, roots <> File.read!(certificate))
+
+    %{certificate: certificate, key: key, bundle: bundle}
+  end
+
+  defp host_address do
+    {addresses, 0} = System.cmd("hostname", ["-I"], stderr_to_stdout: true)
+    addresses |> String.split() |> hd()
+  end
+
   defp git_repository(root, name, content, filename \\ "default.nix") do
     path = Path.join(root, name)
     File.mkdir_p!(path)
@@ -915,6 +1002,12 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     port
   end
 
+  # A writable mount belongs to the allocation's user; a directory the node publishes into stays the
+  # node's, which is what lets it write a secret the container can only read.
+  defp owns?(%File.Stat{uid: owner, gid: owner}, :allocation, owner), do: true
+  defp owns?(%File.Stat{uid: uid}, :node, mapped), do: uid != mapped
+  defp owns?(%File.Stat{}, _owner, _mapped), do: false
+
   defp eventually(fun, attempts \\ 80)
 
   defp eventually(fun, attempts) when attempts > 0 do
@@ -932,9 +1025,10 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     Enum.any?(Controllers.running(), fn {running_id, _pid} -> running_id == biot_id end)
   end
 
-  defp host_settings(data_root, project_root) do
+  defp host_settings(data_root, project_root, fetch_ca_bundle) do
     [
       data_root: data_root,
+      fetch_ca_bundle: fetch_ca_bundle,
       uid_range_base: 100_000,
       uid_range_count: 1_024,
       uid_range_limit: 165_536,

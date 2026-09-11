@@ -11,8 +11,9 @@ defmodule Biot.Node.Host.SourceStaging do
   `Biot.Node.Host.StagedInputs` owns what that file means; this module owns getting it written and
   reading it back. Inspection, fetch completion, and preparation all take the same parsed value.
 
-  Step 18's source credentials belong to this phase alone. The fetch worker is where a credential
-  descriptor would be mounted, and the build phase never runs in the same container.
+  Source credentials belong to this phase alone. The include file is rewritten before every fetch,
+  so a credential delivered since the last one is in force and a removed one is not, and the build
+  phase never runs in the same container to inherit either.
   """
 
   alias Biot.Node.Allocation
@@ -21,7 +22,9 @@ defmodule Biot.Node.Host.SourceStaging do
   alias Biot.Node.Host.Config
   alias Biot.Node.Host.Context
   alias Biot.Node.Host.EnvironmentInspection
+  alias Biot.Node.Host.FetchCredentials
   alias Biot.Node.Host.FileSystem
+  alias Biot.Node.Host.Git
   alias Biot.Node.Host.Outcome
   alias Biot.Node.Host.Paths
   alias Biot.Node.Host.Podman
@@ -61,6 +64,7 @@ defmodule Biot.Node.Host.SourceStaging do
         selection
       ) do
     with :ok <- stage_build_support(config, biot_id),
+         :ok <- FetchCredentials.write_include(config, allocation),
          :ok <- ensure_environment_directory(config, allocation, environment_id),
          {:ok, result} <-
            Worker.run(
@@ -69,7 +73,7 @@ defmodule Biot.Node.Host.SourceStaging do
              {:fetch, environment_id},
              arguments(config, environment_id, selection)
            ),
-         :ok <- succeeded(result) do
+         :ok <- succeeded(result, config, selection) do
       read(config, biot_id, environment_id)
     end
   end
@@ -184,11 +188,33 @@ defmodule Biot.Node.Host.SourceStaging do
     %{"url" => RepositorySource.to_string(repository), "ref" => ref}
   end
 
-  defp succeeded(%Command.Result{status: 0}), do: :ok
+  defp succeeded(%Command.Result{status: 0}, _config, _selection), do: :ok
 
-  defp succeeded(%Command.Result{} = result) do
-    {:error, Outcome.from_command(:resolution_failed, result)}
+  # The worker prints one stream for the whole phase, so which source stopped it is only in the
+  # message. `Host.Git` owns reading that; a message about no source this selection named is an
+  # ordinary resolution failure.
+  defp succeeded(%Command.Result{} = result, config, selection) do
+    case Git.authentication_failure(result.stdout <> result.stderr, sources(config, selection)) do
+      {:credential_required, source} -> {:waiting_for, source}
+      :none -> {:error, Outcome.from_command(:resolution_failed, result)}
+    end
   end
+
+  # Every repository this fetch could have reached, as parsed values, including the base package
+  # set the operator configured rather than the selection named.
+  defp sources(config, %EnvironmentSelection{} = selection) do
+    [selection.base_nixpkgs | selection.layers]
+    |> Enum.flat_map(&source(config, &1))
+  end
+
+  defp source(config, %SourceSelector{source: :nixpkgs}) do
+    case RepositorySource.parse(config.nixpkgs_repository) do
+      {:ok, repository} -> [repository]
+      {:error, _reason} -> []
+    end
+  end
+
+  defp source(_config, %SourceSelector{source: {:git, repository, _ref}}), do: [repository]
 
   # The worker writes its out-link inside this directory, so the allocation owns it; the node keeps
   # the directory above it, which is what lets release remove one environment.

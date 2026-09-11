@@ -42,7 +42,6 @@ defmodule Biot.Node.Host.Worker do
   alias Biot.Node.Host.Config
   alias Biot.Node.Host.Context
   alias Biot.Node.Host.Diagnostic, as: HostDiagnostic
-  alias Biot.Node.Host.Git
   alias Biot.Node.Host.Names
   alias Biot.Node.Host.Network
   alias Biot.Node.Host.Outcome
@@ -66,7 +65,7 @@ defmodule Biot.Node.Host.Worker do
 
     alias Biot.Node.Host.Paths
 
-    @enforce_keys [:name, :labels, :uid_map, :network, :mounts, :tmpfs, :command]
+    @enforce_keys [:name, :labels, :uid_map, :network, :mounts, :tmpfs, :variables, :command]
     defstruct @enforce_keys
 
     @type t :: %__MODULE__{
@@ -76,6 +75,7 @@ defmodule Biot.Node.Host.Worker do
             network: String.t(),
             mounts: [Paths.mount()],
             tmpfs: [String.t()],
+            variables: [{String.t(), String.t()}],
             command: [String.t()]
           }
   end
@@ -134,6 +134,7 @@ defmodule Biot.Node.Host.Worker do
       network: Names.network(allocation.network_id),
       mounts: Layout.mounts(config, allocation.biot_id, phase),
       tmpfs: Layout.image_tmpfs(),
+      variables: Layout.variables(config, phase),
       command: command
     }
   end
@@ -174,6 +175,7 @@ defmodule Biot.Node.Host.Worker do
       network: "none",
       mounts: [{Paths.worker_nix_config(config), Layout.nix_config(), :ro}],
       tmpfs: [Layout.store_root() | Layout.image_tmpfs()],
+      variables: Layout.variables(config, :collect),
       command: command ++ Layout.store_arguments()
     }
   end
@@ -229,7 +231,7 @@ defmodule Biot.Node.Host.Worker do
       tmpfs_arguments(spec.tmpfs) ++
       uid_map_arguments(spec.uid_map) ++
       spec.labels ++
-      environment_arguments() ++
+      environment_arguments(spec.variables) ++
       volume_arguments(spec.mounts) ++
       [config.builder_image | spec.command]
   end
@@ -244,10 +246,8 @@ defmodule Biot.Node.Host.Worker do
     ["--uidmap", uid_map, "--gidmap", uid_map]
   end
 
-  defp environment_arguments do
-    Enum.flat_map(Layout.variables() ++ Git.environment(), fn {name, value} ->
-      ["--env", "#{name}=#{value}"]
-    end)
+  defp environment_arguments(variables) do
+    Enum.flat_map(variables, fn {name, value} -> ["--env", "#{name}=#{value}"] end)
   end
 
   defp volume_arguments(mounts) do

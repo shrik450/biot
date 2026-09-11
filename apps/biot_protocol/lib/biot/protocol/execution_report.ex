@@ -5,6 +5,7 @@ defmodule Biot.Protocol.ExecutionReport do
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.Failure
   alias Biot.Protocol.IncarnationId
+  alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.StrictMap
 
   @fields [
@@ -12,8 +13,10 @@ defmodule Biot.Protocol.ExecutionReport do
     "installed_environment_id",
     "container",
     "data",
+    "waiting_for",
     "failure"
   ]
+  @waiting_for_fields ["kind", "source"]
   @present_container_fields ["state", "incarnation_id", "container_state"]
   @reported_failure_fields ["target_revision", "failure"]
 
@@ -23,11 +26,21 @@ defmodule Biot.Protocol.ExecutionReport do
   @type container :: :unknown | :absent | {:present, IncarnationId.t(), ContainerState.t()}
   @type reported_failure :: nil | {pos_integer(), Failure.t()}
 
+  @typedoc """
+  What the node is waiting for that only a person can supply.
+
+  It is not a failure: the node has nothing left to try, the operation it belongs to is still
+  working, and no retry budget is spent while it waits. The node and the server share this type
+  because it is the same fact on both sides of the link.
+  """
+  @type waiting_for :: nil | {:fetch_credential, RepositorySource.t()}
+
   @enforce_keys [
     :accepted_revision,
     :installed_environment_id,
     :container,
     :data,
+    :waiting_for,
     :failure
   ]
   defstruct [
@@ -35,6 +48,7 @@ defmodule Biot.Protocol.ExecutionReport do
     :installed_environment_id,
     :container,
     :data,
+    :waiting_for,
     :failure
   ]
 
@@ -43,6 +57,7 @@ defmodule Biot.Protocol.ExecutionReport do
           installed_environment_id: EnvironmentId.t() | nil,
           container: container(),
           data: data_state(),
+          waiting_for: waiting_for(),
           failure: reported_failure()
         }
 
@@ -56,6 +71,7 @@ defmodule Biot.Protocol.ExecutionReport do
       "installed_environment_id" => encode_environment_id(report.installed_environment_id),
       "container" => encode_container(report.container),
       "data" => Atom.to_string(report.data),
+      "waiting_for" => encode_waiting_for(report.waiting_for),
       "failure" => encode_failure(report.failure)
     }
   end
@@ -68,12 +84,14 @@ defmodule Biot.Protocol.ExecutionReport do
             "installed_environment_id" => installed_environment_id,
             "container" => container,
             "data" => data,
+            "waiting_for" => waiting_for,
             "failure" => failure
           }} <- StrictMap.fetch_exact(value, @fields),
          true <- is_integer(accepted_revision) and accepted_revision > 0,
          {:ok, installed_environment_id} <- parse_environment_id(installed_environment_id),
          {:ok, container} <- parse_container(container),
          {:ok, data} <- parse_data(data),
+         {:ok, waiting_for} <- parse_waiting_for(waiting_for),
          {:ok, failure} <- parse_failure(failure) do
       {:ok,
        %__MODULE__{
@@ -81,6 +99,7 @@ defmodule Biot.Protocol.ExecutionReport do
          installed_environment_id: installed_environment_id,
          container: container,
          data: data,
+         waiting_for: waiting_for,
          failure: failure
        }}
     else
@@ -139,6 +158,27 @@ defmodule Biot.Protocol.ExecutionReport do
   end
 
   defp parse_data(_value), do: {:error, :invalid_format}
+
+  @spec encode_waiting_for(waiting_for()) :: map() | nil
+  def encode_waiting_for(nil), do: nil
+
+  def encode_waiting_for({:fetch_credential, source}) do
+    %{"kind" => "fetch_credential", "source" => RepositorySource.to_string(source)}
+  end
+
+  @spec parse_waiting_for(term()) :: {:ok, waiting_for()} | {:error, :invalid_format}
+  def parse_waiting_for(nil), do: {:ok, nil}
+
+  def parse_waiting_for(%{"kind" => "fetch_credential", "source" => source} = value) do
+    with {:ok, _value} <- StrictMap.fetch_exact(value, @waiting_for_fields),
+         {:ok, source} <- RepositorySource.parse(source) do
+      {:ok, {:fetch_credential, source}}
+    else
+      _error -> {:error, :invalid_format}
+    end
+  end
+
+  def parse_waiting_for(_value), do: {:error, :invalid_format}
 
   defp encode_failure(nil), do: nil
 

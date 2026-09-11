@@ -23,6 +23,7 @@ defmodule Biot.Node.Control.Connection do
   alias Biot.Node.LocalIntent
   alias Biot.Node.Orphans
   alias Biot.Node.RuntimeLogs
+  alias Biot.Node.SecretRequest
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.Frame
   alias Biot.Protocol.Liveness
@@ -30,6 +31,7 @@ defmodule Biot.Node.Control.Connection do
   alias Biot.Protocol.PeerIdentity
   alias Biot.Protocol.Platform
   alias Biot.Protocol.RegistrationId
+  alias Biot.Protocol.SecretOutcome
   alias Biot.Protocol.Version
   alias Biot.Protocol.Wire
 
@@ -76,6 +78,25 @@ defmodule Biot.Node.Control.Connection do
   @doc "Tells the connection that the outbox holds a report it has not seen."
   @spec wake() :: :ok
   def wake, do: GenServer.cast(__MODULE__, :drain)
+
+  @doc """
+  Answers one secret or fetch credential request on the link that asked for it.
+
+  A controller serves the request and this sends the result, so the two halves of that contract are
+  named in the module that owns the socket rather than left as a bare message between them. The
+  request carries the connection that issued it, because a result belongs to that request and to no
+  other link.
+  """
+  @spec reply(
+          pid(),
+          String.t(),
+          SecretRequest.result_kind(),
+          SecretOutcome.t() | SecretOutcome.listing()
+        ) :: :ok
+  def reply(connection, request_id, kind, outcome) when is_pid(connection) do
+    send(connection, {:secret_result, request_id, kind, outcome})
+    :ok
+  end
 
   @impl true
   def init(options) do
@@ -154,6 +175,10 @@ defmodule Biot.Node.Control.Connection do
         Process.cancel_timer(timer)
         {:noreply, %{state | pending_reads: pending}}
     end
+  end
+
+  def handle_info({:secret_result, request_id, kind, outcome}, %State{} = state) do
+    {:noreply, send_secret_result(state, request_id, kind, outcome)}
   end
 
   def handle_info({:read_timeout, reference}, %State{} = state) do
@@ -375,6 +400,32 @@ defmodule Biot.Node.Control.Connection do
     )
   end
 
+  defp handle_message(%Message.DeliverSecret{} = request, %State{status: :ready} = state) do
+    queue(state, request, {:deliver_secret, request.name, request.value})
+  end
+
+  defp handle_message(%Message.RemoveSecret{} = request, %State{status: :ready} = state) do
+    queue(state, request, {:remove_secret, request.name})
+  end
+
+  defp handle_message(%Message.ListSecrets{} = request, %State{status: :ready} = state) do
+    queue(state, request, :list_secrets)
+  end
+
+  defp handle_message(
+         %Message.DeliverFetchCredential{} = request,
+         %State{status: :ready} = state
+       ) do
+    queue(state, request, {:deliver_fetch_credential, request.source, request.value})
+  end
+
+  defp handle_message(
+         %Message.RemoveFetchCredential{} = request,
+         %State{status: :ready} = state
+       ) do
+    queue(state, request, {:remove_fetch_credential, request.source})
+  end
+
   defp handle_message(
          %Message.Heartbeat{challenge: challenge},
          %State{status: status} = state
@@ -564,6 +615,54 @@ defmodule Biot.Node.Control.Connection do
       :ok -> {:noreply, state}
       {:error, reason} -> {:noreply, disconnect(state, reason)}
     end
+  end
+
+  # The controller owns the queue and its deadline, so this hands the request over and answers only
+  # when it cannot: a biot with no controller has no allocation here. The deadline starts now,
+  # which is later than the deadline the server is already counting for its caller.
+  defp queue(state, request, operation) do
+    secret_request =
+      SecretRequest.new(request.request_id, operation, request.timeout_ms, self())
+
+    case Controllers.secret_request(request.biot_id, secret_request) do
+      :ok ->
+        state
+
+      outcome ->
+        send_secret_result(
+          state,
+          request.request_id,
+          SecretRequest.result_kind(operation),
+          outcome
+        )
+    end
+  end
+
+  defp send_secret_result(%State{status: :ready} = state, request_id, kind, outcome) do
+    case send_message(
+           state.socket,
+           secret_result_message(kind, request_id, outcome),
+           state.version
+         ) do
+      :ok -> state
+      {:error, reason} -> disconnect(state, reason)
+    end
+  end
+
+  # A result for a link that is no longer ready is dropped: the server released its caller when the
+  # connection closed, and it ignores a late reply on the next one.
+  defp send_secret_result(%State{} = state, _request_id, _kind, _outcome), do: state
+
+  defp secret_result_message(:secret, request_id, outcome) do
+    %Message.SecretResult{request_id: request_id, result: outcome}
+  end
+
+  defp secret_result_message(:secret_list, request_id, outcome) do
+    %Message.SecretListResult{request_id: request_id, result: outcome}
+  end
+
+  defp secret_result_message(:fetch_credential, request_id, outcome) do
+    %Message.FetchCredentialResult{request_id: request_id, result: outcome}
   end
 
   defp query_diagnostic(request) do

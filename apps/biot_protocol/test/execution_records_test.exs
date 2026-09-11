@@ -142,7 +142,8 @@ defmodule Biot.Protocol.ExecutionRecordsTest do
         installed_environment_id: installed_environment_id,
         container: container,
         data: data,
-        failure: failure
+        failure: failure,
+        waiting_for: nil
       }
     end
   end

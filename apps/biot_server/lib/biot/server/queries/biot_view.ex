@@ -138,6 +138,7 @@ defmodule Biot.Server.Queries.BiotView do
       installed_environment: observation.installed_environment_id,
       container: observation.container,
       data: observation.data,
+      waiting_for: observation.waiting_for,
       failure: observation.failure
     }
   end

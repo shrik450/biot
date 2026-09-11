@@ -38,9 +38,21 @@ defmodule Biot.Node.Reconcile do
   @spec next(ExecutionSpec.t(), NodeState.t(), current_action()) :: t()
   def next(%ExecutionSpec{} = spec, %NodeState{} = state, current) do
     with :ready <- current_action(spec, current),
+         :ready <- waiting_for(spec, state),
          :ready <- recorded_failure(state, spec.desired.revision) do
       converge(spec, state)
     end
+  end
+
+  # The one place the node's rule about waiting lives: a biot waiting for a credential has nothing
+  # to try until someone delivers it, so no action runs and no budget is spent. A destruction needs
+  # no source at all, which is why it is never held up by one.
+  defp waiting_for(%ExecutionSpec{desired: %Desired{state: :destroyed}}, %NodeState{}), do: :ready
+
+  defp waiting_for(%ExecutionSpec{}, %NodeState{waiting_for: nil}), do: :ready
+
+  defp waiting_for(%ExecutionSpec{}, %NodeState{waiting_for: {:fetch_credential, source}}) do
+    {:blocked, {:fetch_credential, source}}
   end
 
   # Invariant: release never runs while an action is in flight, because every other answer here

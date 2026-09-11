@@ -6,6 +6,7 @@ defmodule Biot.Node.Journal.Schema.RetryState do
   alias Biot.Node.Journal.Ecto.Attempts
   alias Biot.Node.Journal.Ecto.Failure
   alias Biot.Node.Journal.Ecto.ParsedValue
+  alias Biot.Node.Journal.Ecto.WaitingFor
   alias Biot.Protocol.BiotId
 
   @primary_key false
@@ -14,6 +15,7 @@ defmodule Biot.Node.Journal.Schema.RetryState do
     field(:target_revision, :integer)
     field(:attempts, Attempts)
     field(:next_attempt_at, :utc_datetime_usec)
+    field(:waiting_for, WaitingFor)
     field(:failure, Failure)
 
     timestamps(type: :utc_datetime_usec)

@@ -164,6 +164,7 @@ defmodule Biot.Server.Reports do
       installed_environment_id: report.installed_environment_id,
       container: report.container,
       data: report.data,
+      waiting_for: report.waiting_for,
       failure: report.failure
     }
 
@@ -228,6 +229,7 @@ defmodule Biot.Server.Reports do
       :installed_environment_id,
       :container,
       :data,
+      :waiting_for,
       :failure,
       :updated_at
     ]

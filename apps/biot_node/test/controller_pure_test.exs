@@ -16,12 +16,12 @@ defmodule Biot.Node.ControllerPureTest do
   alias Biot.Protocol.Desired
   alias Biot.Protocol.Failure
 
-  describe "Observation.node_state/4" do
+  describe "Observation.node_state/5" do
     test "copies every inspected fact and the controller-owned failure" do
       inspection = host_inspection(container: running(e1()))
       failure = {7, failure(:operator)}
 
-      result = Observation.node_state(inspection, desired(:running), nil, failure)
+      result = Observation.node_state(inspection, desired(:running), nil, nil, failure)
 
       assert result.data == inspection.data
       assert result.resolutions == inspection.resolutions
@@ -46,7 +46,7 @@ defmodule Biot.Node.ControllerPureTest do
           {container_state, container} <- containers do
         result =
           host_inspection(container: container)
-          |> Observation.node_state(desired(desired_state), carried, nil)
+          |> Observation.node_state(desired(desired_state), carried, nil, nil)
 
         expected =
           case {desired_state, container_state} do
@@ -186,6 +186,7 @@ defmodule Biot.Node.ControllerPureTest do
                target_revision: 3,
                attempts: %{},
                next_attempt_at: nil,
+               waiting_for: nil,
                failure: nil
              }
     end

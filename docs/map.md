@@ -41,9 +41,10 @@ This app owns shared parsed values and wire codecs.
 
 ### Protocol layer
 
-- `Message.*` defines the protocol message structs. Version 1 includes `RuntimeLogs(request_id, biot_id, max_bytes, timeout_ms)` and `RuntimeLogsResult(request_id, result)`. A found result carries an incarnation ID, content, and truncation flag.
-- `Wire` lists both runtime-log messages in the version 1 table. Their request pair follows the diagnostic pattern. The node returns the caller's request ID with bounded content or `:not_found`.
-- `Wire` provides a versioned, strict JSON codec with table-driven dispatch. It enforces the 256 KiB version 1 `BiotSpec` bound on encode and decode with `:biot_spec_too_large`. It measures the envelope of every spec-carrying message. It owns `min_frame_bytes/1` and `check_frame_limit!/1`. Both applications call the frame check at boot.
+- `Message.*` defines the protocol message structs. Version 1 includes the five secret and fetch-credential requests—`DeliverSecret`, `RemoveSecret`, `ListSecrets`, `DeliverFetchCredential`, and `RemoveFetchCredential`—and the three results `SecretResult`, `SecretListResult`, and `FetchCredentialResult`, alongside diagnostics and runtime logs.
+- `SecretName`, `SecretValue`, and `AuthorizationValue` are parsed boundary values. Secret and authorization values redact themselves and expose bytes only through `reveal/1`; a bare value exists only in `parse/1` and the single file write that publishes it.
+- `SecretOutcome` owns one union and codec for `:ok`, `:no_allocation`, and `{:failure, :write_failed | :unavailable}`. The listing result uses the same codec with `{:ok, [SecretName]}`.
+- `Wire` lists all eight secret messages in the version 1 table and keeps strict field and value decoding. It enforces the 256 KiB version 1 `BiotSpec` bound and the `Limits.max_secret_value_bytes/1` bound. `Wire.min_frame_bytes/1` includes the largest base64-encoded secret delivery envelope, and `check_frame_limit!/1` is checked at boot by both applications.
 - `Frame` encodes and incrementally decodes length-prefixed frames.
 - `Version` selects the highest protocol version shared by both peers.
 - `Liveness` matches heartbeat responses.
@@ -52,12 +53,12 @@ This app owns shared parsed values and wire codecs.
 - `Certificates` and `mix biot.gen.certs` write deployment certificates and keys.
   The task writes CA, server, and node certificates, keys with mode 0600, and `fingerprints.json`.
 - `OrphanedAllocation` represents node allocations absent from server intent.
-- `Limits` owns the versioned spec bound and the shared component limits. Version 1 allows a 256 KiB spec, a 2,048-byte repository URL, a 256-byte source ref, a 1,024-byte relative directory, and 16 layers.
+- `Limits` owns the versioned spec bound and the shared component limits. Version 1 allows a 256 KiB spec, a 64 KiB secret or authorization value, a 2,048-byte repository URL, a 256-byte source ref, a 1,024-byte relative directory, and 16 layers.
 
 ### Value modules
 
 - **Identifiers:** `CanonicalUuid` parses canonical UUID strings.
-- **Sources:** `RepositorySource` represents a credential-free Git repository URL.
+- **Sources:** `RepositorySource` represents a credential-free Git repository URL and derives its normalized `origin/1` for credential attribution.
 - **Sources:** `SourceSelector` represents an unpinned source and its ref.
 - **Sources:** `PinnedSource` represents a source with a commit revision and Nix NAR hash.
 - **Environment:** `EnvironmentSelection` represents the sources and project directory for an environment.
@@ -67,7 +68,7 @@ This app owns shared parsed values and wire codecs.
 - **Execution:** `Desired` represents execution intent and provides `transition/2`.
 - **Execution:** `BiotSpec` contains execution and access intent for an assigned node.
 - **Execution:** `ExecutionSpec` contains complete server-owned execution intent.
-- **Execution:** `ExecutionReport` contains node-supplied execution facts.
+- **Execution:** `ExecutionReport` contains node-supplied execution facts, including `waiting_for` when a fetch needs an operator credential.
 - **Execution:** `Failure` represents a bounded description of a failed lifecycle action.
   Its stages include `node` and `release_environment`; its codes include `node_abandoned`,
   `invalid_configuration`, and `ownership_mismatch`.
@@ -131,10 +132,12 @@ A new status cannot compile until all six functions answer it.
 - `Queries.Biots.get/2` and `list/2` build owner and collaborator `BiotView` values. `Access.readable/2` supplies their single read rule. `PublicationView.visible/2` limits collaborator publications to their view grants.
 - `Queries.Nodes.list/1` and `Queries.NodeView` build the node inventory with capacity counts, live connections, and latest orphan reports.
 - `Queries.Deployment.get/1` returns the publication and SSH settings in `DeploymentView`.
-- `Queries.BiotView`, `Queries.PublicationView`, and `Queries.OperationView` provide pure projections. `BiotView` includes the actor's `role` and the row's `direct_secret_exposure_possible` column. Creation sets that column to `false`.
+- `Queries.BiotView`, `Queries.PublicationView`, and `Queries.OperationView` provide pure projections. `BiotView` includes the actor's `role`, the row's `direct_secret_exposure_possible` column, and `waiting_for`. Creation sets the exposure column to `false`; observations supply the current wait.
 - `Authorization` owns the `grants` and `role` types and the pure role and policy predicates.
 - `NodeConnections` is a registry of current node connections written by the control link.
 - `NodeWake` provides one PubSub topic per node, plus `spec_changed/2` and `subscribe/1`.
+- `Delivery` owns the one delivery rule: the caller must own a non-destroyed Biot whose assigned node is ready, and it returns that node's live connection.
+- `Secrets` delivers, removes, and lists runtime secrets. Delivery commits `direct_secret_exposure_possible` before sending and that historical marker is never cleared. `FetchCredentials` uses the same delivery rule but does not set the marker or queue work. `Queries.SecretView` projects the names returned by `list/2`.
 
 #### `Biot.Server.Publications`
 
@@ -212,7 +215,9 @@ transaction.
 - `Control.Listener` accepts mutually authenticated TLS node connections.
 - `Control.Connection` owns one process per node connection.
   It handles hello, snapshot synchronization, ready, wake, desired sweeps, reports,
-  heartbeats, diagnostics, and runtime-log requests.
+  heartbeats, diagnostics, runtime-log requests, and the five secret and credential request calls.
+  Secret requests use the existing pending-request timers; the timer starts before the send. `:no_allocation`
+  and every node failure map to `:temporarily_unavailable`, while late replies are dropped.
   It sends `registration_abandoned` when an abandoned node attempts a connection.
   It sends one snapshot from one `Synchronization.specs/1` list as `SynchronizeBegin`,
   `SynchronizeItem` messages, and `SynchronizeEnd`. The connection schedules its first
@@ -259,7 +264,8 @@ Migrations live under `priv/repo/migrations`.
 `20260908000500` creates `Schema.AccessObservation`, which stores the latest
 access revision accepted for each Biot.
 Raw SQL is used only for `biots` and `view_grants`.
-SQLite needs their composite foreign keys inline.
+SQLite needs their composite foreign keys inline. Step 18 adds the retry-state and server observation
+migrations for `waiting_for`.
 
 ### Tests
 
@@ -336,9 +342,7 @@ The node owns host reconciliation and reports inspected state to the server.
 - `Reconcile.Data`, `Reconcile.Environment`, and `Reconcile.Execution` compose the decisions.
   Ordinary convergence runs data, environment, execution, then release.
   Destruction runs execution, release, then data.
-- `BlockReason` has three values: `{:inspection, failure}`, `{:current_action, action}`, and
-  `{:recorded_failure, failure}`. `Retry.classify/4` maps host outcomes to bounded failures and
-  retry policies.
+- `BlockReason` includes `{:inspection, failure}`, `{:current_action, action}`, `{:recorded_failure, failure}`, and `{:fetch_credential, source}`. `Retry.classify/4` maps host outcomes to bounded failures and retry policies; a credential wait is the one operator-owned block. `Reconcile.next/3` blocks running and stopped intent on that wait, but lets destruction proceed.
   `Retry.failure/2` builds failures found without an action.
 - `Action.metadata/1` holds only an action's stage and `cancellable?` flag.
   The environment actions are `{:prepare, env, manifest, allocation}` and
@@ -357,6 +361,8 @@ when the effect started under the current desired revision.
 The controller resumes saved backoff from `next_attempt_at` and clamps the wait to
 `retry_backoff_max_ms`. A refused retry write leaves its keyed diagnostic in the journal index and
 reloads the current intent. The controller also reloads after a refused write without a diagnostic.
+
+The controller's `phase` makes its waiting state explicit. It also owns a FIFO `requests` queue for `SecretRequest` values. `Controllers.secret_request/2` finds an existing controller and returns `:no_allocation` otherwise; it never starts a controller. `serves_requests?/1` is a closed decision over every phase, and `finish_action/3` is the one safe point that records the lifecycle result, drains eligible requests, and converges. The deferred `:converge` wake is sent only by the cast path that clears a credential wait; recovery and action completion use their existing convergence path.
 
 The controller's `phase` makes its waiting state explicit:
 
@@ -412,8 +418,8 @@ DynamicSupervisor second, and the Starter last.
 #### Pure controller support
 
 `Biot.Node.Observation.node_state/4` combines host inspection with the
-controller's pending container exit and recorded failure. `Observation.report/2`
-projects the inspected state into the server's `ExecutionReport`.
+controller's pending container exit, recorded failure, and `waiting_for`. `Observation.report/2`
+projects the inspected state into the server's `ExecutionReport`, preserving the wait for the server and `BiotView`.
 
 `Biot.Node.Backoff.delay/3` doubles the minimum delay per attempt and caps it at
 the configured maximum. `Biot.Node.Orphans.detect/2` compares journal
@@ -445,10 +451,12 @@ policies stay unchanged.
 `Biot.Node.Host` is the plain inspection and effect boundary called by reconciliation.
 `inspect_state/2` accepts a Biot ID and `Host.Context`, and returns `Host.Inspection` with five host
 facts: `data`, `resolutions`, `installation`, `container`, and `prepared`. The controller owns
-`pending_exit` and `failure`, and builds the `NodeState` that reconciliation consumes. `run/2`
-returns `:ok | {:error, Host.Outcome.t()}` and dispatches totally over every `Biot.Node.Action`
-variant. The pure core has no worker state: workers are never desired or adopted, and recovery is
-an imperative precondition.
+`pending_exit`, `failure`, and `waiting_for`, and builds the `NodeState` that reconciliation consumes.
+`run/2` returns `:ok | {:waiting_for, source} | {:error, Host.Outcome.t()}` and dispatches totally over
+every `Biot.Node.Action` variant. `SecretRequest` is the closed five-operation request set; `Host.serve/2`
+answers it against an existing allocation without creating one. `Control.Connection.reply/4` returns the
+result on the requesting link. The pure core has no worker state: workers are never desired or adopted,
+and recovery is an imperative precondition.
 
 The effect modules own host resources:
 
@@ -473,7 +481,10 @@ The effect modules own host resources:
   environment read-write, only its staged store inputs read-only, and the common store, scratch,
   and configuration. `:collect` mounts all environments read-only plus the common mounts.
   Its worker environment sets `NIX_PATH` empty, `TMPDIR=/build`, and scratch `HOME` and
-  `XDG_CACHE_HOME`. Its tmpfs set is `/tmp`, `/root`, `/var`, and `/nix/var`. The UID/GID map
+  `XDG_CACHE_HOME`. `Layout.variables/2` and `mounts/3` are the only phase-aware layout points:
+  fetch alone gets the credential include mount and `BIOT_NODE_FETCH_CA_BUNDLE` as
+  `GIT_SSL_CAINFO` and `NIX_SSL_CERT_FILE`; build and collect get neither. Its tmpfs set is `/tmp`,
+  `/root`, `/var`, and `/nix/var`. The UID/GID map
   confines files to the allocation's range; the isolated network confines traffic to the Biot;
   `--read-only` confines writes to explicit mounts and tmpfs; `unmask=/proc/*` lets Nix create its
   nested sandbox; `SYS_ADMIN` lets that sandbox mount its namespace; `--rm` and log driver `none`
@@ -487,7 +498,9 @@ The effect modules own host resources:
   physical store, and `object_at/3`, which follows an out-link through that mapping.
 - `Host.Git` is the one hardened Git shape: HTTPS-only transport, disabled system and global
   configuration and credentials, no prompt or askpass, no submodule recursion, and an empty
-  template. `Biot.Protocol.RepositorySource` enforces HTTPS before a repository reaches Git.
+  template. `Git.environment/1` takes either `:no_credentials` or a credential include scope;
+  `Git.authentication_failure/2` identifies a unique longest URL match, then a unique origin match.
+  `Biot.Protocol.RepositorySource` enforces HTTPS before a repository reaches Git.
 
 The two environment phases are deliberately separate. Trusted fetch stages moving refs and writes
 `pins.json`; `Host.Environment.prepare/4` invokes `nix build` with `--pure-eval` through `--expr`
@@ -512,11 +525,20 @@ Support modules provide the smaller boundaries:
   long-running command. `Host.Podman` adds the configured Podman module and recognizes absent resources.
 - `Host.ContainerEvents` reads Podman's `events` stream through `Command.open/5`, closes and
   reopens it after `container_events_retry_ms`, and uses `Names.owner/1` for ownership.
+- `Host.Secrets` publishes runtime secret files atomically under the allocation's `secrets` directory.
+  `Host.FetchCredentials` writes URL-scoped Git fragments, the relative `include.config` file, and
+  exposes the scoped path through `scope/2` under the node-owned, unmounted `fetch-credentials` directory. `Host.FileSystem.publish/4` owns same-directory staging,
+  permission and ownership preparation, atomic rename, and cleanup; `unlink/1` is idempotent. `Host.Podman.share/3`
+  gives a credential fragment to the mapped user while `grant/3` handles the runtime secret tree.
 - `Host.Paths` owns the node-private layout. Everything Nix owns is below the Biot: `store_root`,
   `store`, `scratch`, `build_support`, `environments`, `environment`, `staged`, `environment_root`,
-  `runtime_mounts`, and `allocation_owned_directories`. It also owns `worker_nix_config` and
-  `git_template`. `Host.PrivateStore` maps the logical store into the physical one; `Paths` no
-  longer owns a generic `mounts/2` API.
+  `runtime_mounts`, and `allocation_owned_directories`. `Paths.allocation_directories/2` is the one
+  owner of required allocation directories, their owner, and their mount: secrets are node-owned and
+  mounted read-only, while fetch credentials are node-owned and unmounted. It also owns
+  `worker_nix_config` and `git_template`. `Host.PrivateStore` maps the logical store into the physical
+  one. The old zero-arity `Git.environment/0` and `Layout.variables/0`, plus
+  `Paths.mounts_created_at_allocation/2` and `Paths.node_owned_directories/2`, were replaced by
+  the scoped and phase-aware APIs.
 - `Host.Names` derives worker and probe names, network names, and labels. Workers use one stable
   `biot-worker-<id>` name with `io.biot.biot-id`, `io.biot.role=worker`, and a phase label; the
   startup probe is `biot-worker-probe` with `io.biot.role=probe`. `Host.Network` creates isolated
@@ -562,7 +584,10 @@ unused configured range, while the unique `allocation_uid_start` index closes th
 concurrent-insert race.
 
 `Journal.put_intent/1` and `Journal.replace_intents/1` accept intent and drop a
-superseded retry row in the same transaction. `replace_intents/1` also deletes
+superseded retry row in the same transaction. `Journal.record_waiting_for/4` records the source and
+returns the attempt that was counted; `clear_waiting_for/2` clears it when the matching credential is
+published. `RetryState.wait_for_credential/3` stores `{:fetch_credential, source}`, clears retry
+failure and time, and returns the attempt without charging the wait as an additional attempt. `replace_intents/1` also deletes
 local intents and retry rows for Biots omitted from the snapshot. It returns the omitted Biot IDs.
 That deletion stops the controller, leaving any allocation for orphan reporting.
 `Journal.put_destruction_report/2` keeps the intent row as a receipt and removes
@@ -596,7 +621,8 @@ fail with their source locations.
 `nix/agent.nix` builds the vendored Go agent with `buildGoModule` and no module download. `nix/build.nix`
 reads manifest JSON and writes bundle JSON. It builds `rootfs`, `entrypoint`, `shell_entrypoint`, and
 one environment file. `loadEnvironment` is the one secret-loading rule: it loads the bundle
-environment, then entry-specific variables, then files under `/biot/secrets`. `cleanEnvironment` is
+environment, then entry-specific variables, then files under `/biot/secrets`; its sentinel read
+preserves empty values and trailing newlines. `cleanEnvironment` is
 the one clean-environment rule.
 
 Each program gets a restart wrapper with `restartAttemptLimit = 5`,
@@ -609,7 +635,8 @@ program always runs the agent with the two required flags. The final `bundle.jso
 
 `nix/module.nix` defines `biot.shell` and service `directory = { root, path }`, where `root` is
 `checkout` or `service_data`. The reserved service name is `biot-agent`; `BIOT_CONFIG_ROOT`, `HOME`,
-`PATH`, and `TERM` are reserved environment names. Compatible module definitions merge; conflicting
+`PATH`, and `TERM` are reserved environment names. `SecretName` uses the same reserved names, so
+Nix and protocol delivery cannot disagree. Compatible module definitions merge; conflicting
 definitions fail with their source locations.
 
 The entry point starts `supervisord`. The container uses the bundle's empty, read-only rootfs with
@@ -630,8 +657,10 @@ variables, NAR hashes, mounts, and state across a container restart.
 
 ### Node configuration
 
-`config/config.exs` supplies server request and node defaults. The request, capture, controller,
-and diagnostic settings are:
+`config/config.exs` supplies server request and node defaults. `BIOT_NODE_FETCH_CA_BUNDLE` is an
+optional complete absolute trust bundle. It replaces the image trust store, applies only to the
+fetch phase, and must include public roots as well as private authorities; the same contract is
+documented in `Host.Config` and `nix/README.md`. The request, capture, controller, and diagnostic settings are:
 
 | Key | Default | Production override |
 | --- | ---: | --- |
@@ -656,6 +685,7 @@ and diagnostic settings are:
 | `max_staged_specs` | `1_000` | `BIOT_NODE_MAX_STAGED_SPECS` |
 | `max_frame_bytes` | `1_000_000` | `BIOT_MAX_FRAME_BYTES` |
 | `builder_image` | pinned digest | `BIOT_NODE_BUILDER_IMAGE` |
+| `fetch_ca_bundle` | none | `BIOT_NODE_FETCH_CA_BUNDLE` |
 | `binary_cache_urls` | `https://cache.nixos.org` | `BIOT_NODE_BINARY_CACHE_URLS` |
 | `binary_cache_keys` | cache.nixos.org key | `BIOT_NODE_BINARY_CACHE_KEYS` |
 | `build_support_dir` | release support directory | `BIOT_NODE_BUILD_SUPPORT_DIR` |
@@ -736,7 +766,11 @@ real Linux effects, and the controller shell:
 - `runtime_logs_metadata_integration_test.exs` covers metadata round trips and strict JSON validation.
 - `host_command_ownership_test.exs` covers bounded stderr capture, overflow flags, FIFO drain cleanup, cancellation, and reaper ownership.
 - `host_journal_integration_test.exs` covers diagnostic indexing, same-key replacement, retention order, omitted Biot IDs, retry rows, intent replacement, and destruction reports.
-- `host_linux_integration_test.exs` covers Podman log-driver bounds and stream cleanup with real Linux commands.
+- `host_linux_integration_test.exs` covers Podman log-driver bounds and stream cleanup with real Linux commands. Its step 17 stateful fixture remains skipped: the fetch phase now succeeds with a complete CA bundle, but the build phase fails after the binary-cache listing and its cause is not yet known.
+- `secret_values_test.exs` covers the three redacting protocol values, `SecretOutcome`, all eight messages, strict fields, and frame sizing.
+- `secrets_pure_test.exs` covers Git attribution, credential scopes, retry waiting, request phases, phase-aware layout, and allocation directories.
+- `secrets_integration_test.exs` covers server delivery, authorization, exposure-marker ordering, pending requests, failures, timeouts, and `waiting_for` projections.
+- `secrets_linux_integration_test.exs` covers real secret and credential publication, mapped ownership, Podman mounts, private Git fetches, queue ordering, and credential wakeup.
 - `host_pure_test.exs` covers diagnostic selection, data markers, per-environment prepared resources, strict staged-input parsing, private-store mapping, exact worker layouts, Git hardening, owner labels, and retry map types.
 - `node_values_test.exs` covers node-owned parsed values, including `NetworkId`.
 - `reconcile_important_cases_test.exs` covers unknown desired and sibling environments.
@@ -752,9 +786,10 @@ requests, frames, and frame round trips, plus real Unix-socket, TCP-relay, and P
 The node tests cover the rewritten pure and Linux suites. The protocol suite property-tests
 HTTPS-only `RepositorySource` parsing. `host_linux_integration_test.exs` covers real worker
 cancellation, Podman inspection, mounts, rootfs, ownership, private-store use, and environment
-release; its stateful environment fixture is skipped because the worker has no operator CA trust
-for its self-signed test Git server until step 18. The two server proof scripts are skipped while
-that large stateful evidence is replaced by bounded per-contract tests. The strict staged-input
+release; its stateful environment fixture remains skipped because the fetch phase now passes with a
+complete CA bundle but the build phase fails after the binary-cache listing and the cause is not yet
+found. The two server proof scripts are skipped while that large stateful evidence is replaced by
+bounded per-contract tests. The strict staged-input
 parser test remains red for the production gap it exposes: extra keys and invalid NAR hashes are
 not yet rejected. The evidence driver still covers worker isolation, hostile reads, cache use,
 recovery, release, and startup sandboxing.

@@ -1397,7 +1397,7 @@ defmodule Biot.Step14Evidence do
   defp name_of(argument), do: argument
 
   defp node_state(inspection, spec) do
-    Observation.node_state(inspection, spec.execution.desired, nil, nil)
+    Observation.node_state(inspection, spec.execution.desired, nil, nil, nil)
   end
 
   defp build_fixtures do

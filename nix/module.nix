@@ -71,6 +71,8 @@ let
   serviceEnvironmentNames = lib.concatMap
     (name: builtins.attrNames config.biot.services.${name}.environment)
     serviceNames;
+  # Biot.Protocol.SecretName refuses these same four, so a delivered secret cannot take a name the
+  # launcher or the agent needs. Change both together.
   reservedEnvironmentNames = [ "BIOT_CONFIG_ROOT" "HOME" "PATH" "TERM" ];
   invalidEnvironmentNames = builtins.filter
     (name: !validEnvironmentName name)

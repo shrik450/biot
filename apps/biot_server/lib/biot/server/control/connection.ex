@@ -69,6 +69,73 @@ defmodule Biot.Server.Control.Connection do
     :exit, _reason -> {:error, :temporarily_unavailable}
   end
 
+  @secret_calls [
+    :deliver_secret,
+    :remove_secret,
+    :list_secrets,
+    :deliver_fetch_credential,
+    :remove_fetch_credential
+  ]
+
+  @typedoc "What a secret or fetch credential request answers its caller."
+  @type secret_reply :: :ok | {:error, :temporarily_unavailable}
+
+  @spec deliver_secret(
+          pid(),
+          Biot.Protocol.BiotId.t(),
+          Biot.Protocol.SecretName.t(),
+          Biot.Protocol.SecretValue.t(),
+          pos_integer()
+        ) :: secret_reply()
+  def deliver_secret(pid, biot_id, name, value, timeout_ms) do
+    request(pid, {:deliver_secret, biot_id, name, value, timeout_ms}, timeout_ms)
+  end
+
+  @spec remove_secret(
+          pid(),
+          Biot.Protocol.BiotId.t(),
+          Biot.Protocol.SecretName.t(),
+          pos_integer()
+        ) :: secret_reply()
+  def remove_secret(pid, biot_id, name, timeout_ms) do
+    request(pid, {:remove_secret, biot_id, name, timeout_ms}, timeout_ms)
+  end
+
+  @spec list_secrets(pid(), Biot.Protocol.BiotId.t(), pos_integer()) ::
+          {:ok, [Biot.Protocol.SecretName.t()]} | {:error, :temporarily_unavailable}
+  def list_secrets(pid, biot_id, timeout_ms) do
+    request(pid, {:list_secrets, biot_id, timeout_ms}, timeout_ms)
+  end
+
+  @spec deliver_fetch_credential(
+          pid(),
+          Biot.Protocol.BiotId.t(),
+          Biot.Protocol.RepositorySource.t(),
+          Biot.Protocol.AuthorizationValue.t(),
+          pos_integer()
+        ) :: secret_reply()
+  def deliver_fetch_credential(pid, biot_id, source, value, timeout_ms) do
+    request(pid, {:deliver_fetch_credential, biot_id, source, value, timeout_ms}, timeout_ms)
+  end
+
+  @spec remove_fetch_credential(
+          pid(),
+          Biot.Protocol.BiotId.t(),
+          Biot.Protocol.RepositorySource.t(),
+          pos_integer()
+        ) :: secret_reply()
+  def remove_fetch_credential(pid, biot_id, source, timeout_ms) do
+    request(pid, {:remove_fetch_credential, biot_id, source, timeout_ms}, timeout_ms)
+  end
+
+  # The caller waits one second past the request's own deadline, so the connection's timer is what
+  # answers rather than this call giving up first and leaving the request pending.
+  defp request(pid, call, timeout_ms) do
+    GenServer.call(pid, call, timeout_ms + 1_000)
+  catch
+    :exit, _reason -> {:error, :temporarily_unavailable}
+  end
+
   @impl ThousandIsland.Handler
   def handle_connection(socket, options) do
     with {:ok, certificate} <- Socket.peercert(socket),
@@ -219,6 +286,95 @@ defmodule Biot.Server.Control.Connection do
   end
 
   def handle_call({:runtime_logs, _id, _max, _timeout}, _from, {socket, %State{} = state}) do
+    {:reply, {:error, :temporarily_unavailable}, {socket, state}}
+  end
+
+  def handle_call(
+        {:deliver_secret, biot_id, name, value, timeout_ms},
+        from,
+        {socket, %State{phase: :ready} = state}
+      ) do
+    message = fn request_id ->
+      %Message.DeliverSecret{
+        request_id: request_id,
+        biot_id: biot_id,
+        name: name,
+        value: value,
+        timeout_ms: timeout_ms
+      }
+    end
+
+    start_request(socket, state, from, timeout_ms, message, &secret_reply/1)
+  end
+
+  def handle_call(
+        {:remove_secret, biot_id, name, timeout_ms},
+        from,
+        {socket, %State{phase: :ready} = state}
+      ) do
+    message = fn request_id ->
+      %Message.RemoveSecret{
+        request_id: request_id,
+        biot_id: biot_id,
+        name: name,
+        timeout_ms: timeout_ms
+      }
+    end
+
+    start_request(socket, state, from, timeout_ms, message, &secret_reply/1)
+  end
+
+  def handle_call(
+        {:list_secrets, biot_id, timeout_ms},
+        from,
+        {socket, %State{phase: :ready} = state}
+      ) do
+    message = fn request_id ->
+      %Message.ListSecrets{request_id: request_id, biot_id: biot_id, timeout_ms: timeout_ms}
+    end
+
+    start_request(socket, state, from, timeout_ms, message, &secret_list_reply/1)
+  end
+
+  def handle_call(
+        {:deliver_fetch_credential, biot_id, source, value, timeout_ms},
+        from,
+        {socket, %State{phase: :ready} = state}
+      ) do
+    message = fn request_id ->
+      %Message.DeliverFetchCredential{
+        request_id: request_id,
+        biot_id: biot_id,
+        source: source,
+        value: value,
+        timeout_ms: timeout_ms
+      }
+    end
+
+    start_request(socket, state, from, timeout_ms, message, &secret_reply/1)
+  end
+
+  def handle_call(
+        {:remove_fetch_credential, biot_id, source, timeout_ms},
+        from,
+        {socket, %State{phase: :ready} = state}
+      ) do
+    message = fn request_id ->
+      %Message.RemoveFetchCredential{
+        request_id: request_id,
+        biot_id: biot_id,
+        source: source,
+        timeout_ms: timeout_ms
+      }
+    end
+
+    start_request(socket, state, from, timeout_ms, message, &secret_reply/1)
+  end
+
+  # A link that is not ready cannot carry a request, and the caller's answer is the same one a
+  # timeout gives: the node could not be reached, so nothing is known about the biot's secrets.
+  def handle_call(request, _from, {socket, %State{} = state})
+      when elem(request, 0) in @secret_calls do
     {:reply, {:error, :temporarily_unavailable}, {socket, state}}
   end
 
@@ -397,6 +553,26 @@ defmodule Biot.Server.Control.Connection do
     complete_request(state, request_id, result)
   end
 
+  defp handle_message(%Message.SecretResult{} = message, _socket, %State{phase: :ready} = state) do
+    complete_request(state, message.request_id, message.result)
+  end
+
+  defp handle_message(
+         %Message.SecretListResult{} = message,
+         _socket,
+         %State{phase: :ready} = state
+       ) do
+    complete_request(state, message.request_id, message.result)
+  end
+
+  defp handle_message(
+         %Message.FetchCredentialResult{} = message,
+         _socket,
+         %State{phase: :ready} = state
+       ) do
+    complete_request(state, message.request_id, message.result)
+  end
+
   defp handle_message(_message, _socket, state), do: close(:unexpected_message, state)
 
   defp authenticate(registration_id, peer_identity) do
@@ -494,16 +670,29 @@ defmodule Biot.Server.Control.Connection do
     {:ok, {incarnation_id, content, truncated}}
   end
 
+  # An allocation the node does not have yet and a write it could not make are both states that
+  # pass, and neither tells the owner anything they can act on beyond trying again.
+  defp secret_reply(:ok), do: :ok
+  defp secret_reply(:no_allocation), do: {:error, :temporarily_unavailable}
+  defp secret_reply({:failure, _code}), do: {:error, :temporarily_unavailable}
+
+  defp secret_list_reply({:ok, names}), do: {:ok, names}
+  defp secret_list_reply(outcome), do: secret_reply(outcome)
+
+  # The deadline starts before the send, because the node's own deadline starts when it receives the
+  # frame and a timer started afterwards could be the later of the two. A send that fails cancels
+  # the timer again, so an unsent request never holds one.
   defp start_request(socket, state, from, timeout_ms, message, reply) do
     request_id = random_token()
+    timer = Process.send_after(self(), {:request_timeout, request_id}, timeout_ms)
 
     case send_message(socket, message.(request_id), state.version) do
       :ok ->
-        timer = Process.send_after(self(), {:request_timeout, request_id}, timeout_ms)
         pending = Map.put(state.pending_requests, request_id, {from, timer, reply})
         {:noreply, {socket, %{state | pending_requests: pending}}}
 
       {:error, _reason} ->
+        Process.cancel_timer(timer)
         {:reply, {:error, :temporarily_unavailable}, {socket, state}}
     end
   end

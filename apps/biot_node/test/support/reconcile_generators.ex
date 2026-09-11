@@ -169,7 +169,8 @@ defmodule Biot.Node.ReconcileGenerators do
         container: container,
         prepared: prepared,
         pending_exit: pending_exit,
-        failure: failure
+        failure: failure,
+        waiting_for: nil
       }
     end
   end

@@ -131,7 +131,8 @@ defmodule Biot.Node.ReconcileFixtures do
         container: :absent,
         prepared: %{},
         pending_exit: nil,
-        failure: nil
+        failure: nil,
+        waiting_for: nil
       },
       overrides
     )

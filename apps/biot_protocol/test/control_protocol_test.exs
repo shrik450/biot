@@ -4,6 +4,7 @@ defmodule Biot.Protocol.ControlProtocolTest do
 
   require Record
 
+  alias Biot.Protocol.AuthorizationValue
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.BiotSpec
   alias Biot.Protocol.Certificates
@@ -27,6 +28,8 @@ defmodule Biot.Protocol.ControlProtocolTest do
   alias Biot.Protocol.ProjectSnapshot
   alias Biot.Protocol.RegistrationId
   alias Biot.Protocol.RepositorySource
+  alias Biot.Protocol.SecretName
+  alias Biot.Protocol.SecretValue
   alias Biot.Protocol.SourceSelector
   alias Biot.Protocol.TestGenerators, as: Generators
   alias Biot.Protocol.Version
@@ -356,6 +359,9 @@ defmodule Biot.Protocol.ControlProtocolTest do
 
     {:ok, platform} = Platform.parse("aarch64-linux")
     {:ok, repository} = RepositorySource.parse("https://example.test/repo.git")
+    {:ok, secret_name} = SecretName.parse("DATABASE_URL")
+    {:ok, secret_value} = SecretValue.parse("value\n", 1)
+    {:ok, authorization_value} = AuthorizationValue.parse("Bearer token", 1)
 
     selection = %EnvironmentSelection{
       base_nixpkgs: SourceSelector.nixpkgs(),
@@ -377,7 +383,8 @@ defmodule Biot.Protocol.ControlProtocolTest do
       installed_environment_id: environment_id,
       container: :absent,
       data: :present,
-      failure: nil
+      failure: nil,
+      waiting_for: nil
     }
 
     {:ok, pinned} =
@@ -432,7 +439,47 @@ defmodule Biot.Protocol.ControlProtocolTest do
        }},
       {1, %Message.RuntimeLogsResult{request_id: "request-4", result: :not_found}},
       {1, %Message.Heartbeat{challenge: "challenge"}},
-      {1, %Message.HeartbeatResponse{challenge: "challenge"}}
+      {1, %Message.HeartbeatResponse{challenge: "challenge"}},
+      {1,
+       %Message.DeliverSecret{
+         request_id: "request-5",
+         biot_id: biot_id,
+         name: secret_name,
+         value: secret_value,
+         timeout_ms: 200
+       }},
+      {1,
+       %Message.RemoveSecret{
+         request_id: "request-6",
+         biot_id: biot_id,
+         name: secret_name,
+         timeout_ms: 200
+       }},
+      {1, %Message.ListSecrets{request_id: "request-7", biot_id: biot_id, timeout_ms: 200}},
+      {1,
+       %Message.DeliverFetchCredential{
+         request_id: "request-8",
+         biot_id: biot_id,
+         source: repository,
+         value: authorization_value,
+         timeout_ms: 200
+       }},
+      {1,
+       %Message.RemoveFetchCredential{
+         request_id: "request-9",
+         biot_id: biot_id,
+         source: repository,
+         timeout_ms: 200
+       }},
+      {1, %Message.SecretResult{request_id: "request-10", result: :ok}},
+      {1, %Message.SecretResult{request_id: "request-11", result: {:failure, :write_failed}}},
+      {1, %Message.SecretListResult{request_id: "request-12", result: {:ok, [secret_name]}}},
+      {1, %Message.SecretListResult{request_id: "request-13", result: :no_allocation}},
+      {1,
+       %Message.FetchCredentialResult{
+         request_id: "request-14",
+         result: {:failure, :unavailable}
+       }}
     ]
   end
 

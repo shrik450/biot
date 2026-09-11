@@ -17,7 +17,9 @@ defmodule Biot.Node.Controllers do
 
   alias Biot.Node.BiotController
   alias Biot.Node.Controllers.Starter
+  alias Biot.Node.SecretRequest
   alias Biot.Protocol.BiotId
+  alias Biot.Protocol.SecretOutcome
 
   @registry __MODULE__.Registry
   @controllers __MODULE__.Running
@@ -95,6 +97,21 @@ defmodule Biot.Node.Controllers do
     case Registry.lookup(@registry, biot_id) do
       [{controller, _value}] -> BiotController.container_exited(controller)
       [] -> :ok
+    end
+  end
+
+  @doc """
+  Hands one secret or fetch credential request to the controller that owns `biot_id`.
+
+  A biot with no controller here has no allocation this node would serve, and saying so is the
+  answer: a request must never start a controller, because starting one is how this node takes up
+  intent, and a request is not intent.
+  """
+  @spec secret_request(BiotId.t(), SecretRequest.t()) :: :ok | SecretOutcome.t()
+  def secret_request(%BiotId{} = biot_id, %SecretRequest{} = request) do
+    case Registry.lookup(@registry, biot_id) do
+      [{controller, _value}] -> BiotController.secret_request(controller, request)
+      [] -> :no_allocation
     end
   end
 

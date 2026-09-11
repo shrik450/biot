@@ -139,6 +139,10 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
         sleep_executable: System.get_env("BIOT_NODE_SLEEP", "sleep"),
         builder_image: node_required_env.("BIOT_NODE_BUILDER_IMAGE"),
         build_support_dir: node_required_env.("BIOT_NODE_BUILD_SUPPORT_DIR"),
+        # Unset unless the operator runs a Git host the builder image's roots do not cover. It
+        # replaces the fetch phase's trust store rather than adding to it, so the file must hold
+        # every authority a fetch needs, public roots included. The fetch phase alone gets it.
+        fetch_ca_bundle: System.get_env("BIOT_NODE_FETCH_CA_BUNDLE"),
         binary_cache_urls: node_list_env.("BIOT_NODE_BINARY_CACHE_URLS"),
         binary_cache_keys: node_list_env.("BIOT_NODE_BINARY_CACHE_KEYS"),
         nixpkgs_repository:

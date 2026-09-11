@@ -86,7 +86,10 @@ let
     for secret_path in ${mounts.secrets}/*; do
       [ -f "$secret_path" ] || continue
       secret_name="''${secret_path##*/}"
-      export "$secret_name=$(${pkgs.coreutils}/bin/cat -- "$secret_path")"
+      # The sentinel is what saves a trailing newline: command substitution strips every one, so
+      # the value is read with an extra character on the end and that character is removed instead.
+      secret_value="$(${pkgs.coreutils}/bin/cat -- "$secret_path"; printf x)"
+      export "$secret_name=''${secret_value%x}"
     done
   '';
 

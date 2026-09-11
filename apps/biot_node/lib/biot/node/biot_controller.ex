@@ -52,6 +52,7 @@ defmodule Biot.Node.BiotController do
   alias Biot.Node.Backoff
   alias Biot.Node.BlockReason
   alias Biot.Node.Control
+  alias Biot.Node.Control.Connection
   alias Biot.Node.Controllers
   alias Biot.Node.Diagnostics
   alias Biot.Node.Host
@@ -66,6 +67,7 @@ defmodule Biot.Node.BiotController do
   alias Biot.Node.Retry
   alias Biot.Node.RetryState
   alias Biot.Node.RuntimeLogs
+  alias Biot.Node.SecretRequest
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.BiotSpec
   alias Biot.Protocol.ExecutionReport
@@ -102,7 +104,7 @@ defmodule Biot.Node.BiotController do
     ]
 
     @enforce_keys [:biot_id, :context, :spec, :retry] ++ @settings
-    defstruct @enforce_keys ++ [phase: :idle, pending_exit: nil]
+    defstruct @enforce_keys ++ [phase: :idle, pending_exit: nil, requests: []]
 
     @type phase ::
             :idle
@@ -113,6 +115,22 @@ defmodule Biot.Node.BiotController do
             | {:backing_off, Wake.t()}
             | {:waiting, BlockReason.t(), Wake.t()}
             | {:settled, Wake.t()}
+
+    @type t :: %__MODULE__{
+            biot_id: BiotId.t(),
+            context: Host.Context.t(),
+            spec: BiotSpec.t(),
+            retry: RetryState.t(),
+            retry_budget: pos_integer(),
+            retry_backoff_min_ms: pos_integer(),
+            retry_backoff_max_ms: pos_integer(),
+            observation_interval_ms: pos_integer(),
+            inspection_retry_ms: pos_integer(),
+            cancel_grace_ms: pos_integer(),
+            phase: phase(),
+            pending_exit: NodeState.pending_exit(),
+            requests: [SecretRequest.t()]
+          }
 
     @spec settings() :: [atom()]
     def settings, do: @settings
@@ -131,6 +149,18 @@ defmodule Biot.Node.BiotController do
   @doc "Tells one controller that a container it owns stopped."
   @spec container_exited(GenServer.server()) :: :ok
   def container_exited(controller), do: GenServer.cast(controller, :container_exited)
+
+  @doc """
+  Queues one secret or fetch credential request for this controller to answer.
+
+  It is a cast, not a call, because a request waits for the lifecycle action in flight and a
+  controller that blocked on it could not accept new intent, notice a container exit, or cancel
+  that action in the meantime.
+  """
+  @spec secret_request(GenServer.server(), SecretRequest.t()) :: :ok
+  def secret_request(controller, %SecretRequest{} = request) do
+    GenServer.cast(controller, {:secret_request, request})
+  end
 
   @impl true
   def init(options) do
@@ -154,6 +184,18 @@ defmodule Biot.Node.BiotController do
   # container itself, so a hint about a container that is still running costs one inspection.
   def handle_cast(:container_exited, state), do: converge(state)
 
+  # Nothing else converges on this path, so a wait cleared here is woken from here.
+  def handle_cast({:secret_request, request}, %State{} = state) do
+    case serve_requests(%{state | requests: state.requests ++ [request]}) do
+      {state, :woken} ->
+        send(self(), :converge)
+        {:noreply, state}
+
+      {state, :unchanged} ->
+        {:noreply, state}
+    end
+  end
+
   @impl true
   def handle_info(
         {reference, result},
@@ -163,7 +205,11 @@ defmodule Biot.Node.BiotController do
 
     case result do
       :ok ->
-        after_recovery(put_phase(state, :idle))
+        # Confirmed absence is the only thing that makes this controller's resources its own again,
+        # so it is the other point at which a queued request may touch them. `after_recovery/1`
+        # converges, so a wait cleared here needs no separate wake either.
+        {drained, _woken} = state |> put_phase(:idle) |> serve_requests()
+        after_recovery(drained)
 
       {:error, %Outcome{} = outcome} ->
         {:noreply, block_recovery(state, outcome)}
@@ -175,8 +221,7 @@ defmodule Biot.Node.BiotController do
         %State{phase: {:running, %Effect{task: %Task{ref: reference}} = effect}} = state
       ) do
     Process.demonitor(reference, [:flush])
-    state = put_phase(state, :idle)
-    after_retry_write(state, record(state, effect, result), &reload/1)
+    state |> put_phase(:idle) |> finish_action(effect, result)
   end
 
   # A cancelled effect's result says nothing worth recording: the controller cancelled it because
@@ -219,6 +264,12 @@ defmodule Biot.Node.BiotController do
 
   # A wake whose phase is gone was already in the mailbox when the phase changed.
   def handle_info({:wake, _token}, state), do: {:noreply, state}
+
+  # A queued request cleared the wait this biot was blocked on, and no convergence was already
+  # under way to notice. It arrives through the mailbox rather than running inside the request that
+  # cleared it, because converging changes the phase and the phase is what decides whether a
+  # request may be served at all.
+  def handle_info(:converge, state), do: converge(state)
 
   # A stored destruction report means this node already finished the biot and is waiting for the
   # server to acknowledge the receipt. Refusing to start here is the whole rule: the starter and
@@ -344,6 +395,7 @@ defmodule Biot.Node.BiotController do
       |> Observation.node_state(
         state.spec.execution.desired,
         state.pending_exit,
+        state.retry.waiting_for,
         recorded_failure(state.retry)
       )
 
@@ -425,9 +477,36 @@ defmodule Biot.Node.BiotController do
       {:blocked, {:recorded_failure, _failure}} ->
         {:noreply, put_phase(state, :idle)}
 
+      # Only a delivered credential or a new revision can change this, and both wake the
+      # controller themselves, so there is nothing to schedule.
+      {:blocked, {:fetch_credential, _source}} ->
+        {:noreply, put_phase(state, :idle)}
+
       {:failed, failure} ->
         after_retry_write(state, fail(state, failure, node_state), &{:noreply, &1})
     end
+  end
+
+  # An action has finished, and this is the one place that says what that means: record its outcome,
+  # then open the request queue, then converge.
+  #
+  # The order is the whole of the request contract. Recording first is what lets a request that
+  # waited through the action be served against what that action turned out to mean, so a credential
+  # delivered during a fetch that then reports a wait clears that wait instead of landing in front
+  # of it. Draining on both outcomes is the other half: a superseded write means the revision this
+  # result belonged to is gone, but the requests queued while it ran are not, and nothing else would
+  # come back for them.
+  #
+  # `reload/1` converges, so a wait cleared here needs no separate wake.
+  defp finish_action(%State{} = state, %Effect{} = effect, result) do
+    recorded =
+      case record(state, effect, result) do
+        {:ok, written} -> written
+        :superseded -> state
+      end
+
+    {drained, _woken} = serve_requests(recorded)
+    reload(drained)
   end
 
   # A refused retry write leaves its keyed diagnostic in place. The next write for that key
@@ -480,10 +559,86 @@ defmodule Biot.Node.BiotController do
 
   # Replacing a phase drops its timer, so only the phase now in force can wake the controller. A
   # token still says which wake this is, because the replaced message may already be in the mailbox.
+  # It changes the phase and nothing else: serving a request is an effect, and an effect belongs at
+  # a named safe point rather than to every transition that happens to pass through here.
   defp put_phase(%State{} = state, phase) do
     cancel_wake(state.phase)
     %{state | phase: phase}
   end
+
+  # A drained queue, and whether draining it changed what this biot can do next. `woken` means a
+  # delivered credential ended the wait reconciliation was blocked on. The caller decides what to
+  # do about it, because only the caller knows whether it is about to converge anyway; that is what
+  # keeps one delivery from causing two convergences.
+  @typep drained :: {State.t(), :woken | :unchanged}
+
+  @spec serve_requests(State.t()) :: drained()
+  defp serve_requests(%State{requests: []} = state), do: {state, :unchanged}
+
+  defp serve_requests(%State{} = state) do
+    if serves_requests?(state.phase),
+      do:
+        Enum.reduce(state.requests, {%{state | requests: []}, :unchanged}, &serve_request(&2, &1)),
+      else: {state, :unchanged}
+  end
+
+  @doc false
+  # Which phases may touch this biot's files, stated for every phase rather than as the complement
+  # of the busy ones. A phase that holds an effect is the model's "concurrent mutation during a long
+  # build", and it waits. `recovery_blocked` waits too, and for a stronger reason: the controller
+  # cannot tell whether a build worker is still running, and that worker may be reading the very
+  # credential a queued request would replace.
+  @spec serves_requests?(State.phase()) :: boolean()
+  def serves_requests?(:idle), do: true
+  def serves_requests?({:backing_off, _wake}), do: true
+  def serves_requests?({:waiting, _reason, _wake}), do: true
+  def serves_requests?({:settled, _wake}), do: true
+  def serves_requests?({:recovering, _task}), do: false
+  def serves_requests?({:recovery_blocked, _wake}), do: false
+  def serves_requests?({:running, _effect}), do: false
+  def serves_requests?({:cancelling, _effect, _wake}), do: false
+
+  # The clock is read here rather than once for the whole drain, because each request runs real
+  # filesystem and Podman work and a slow one can spend a later one's remaining time.
+  #
+  # An expired request is dropped without a reply: its deadline has passed, so the answer it could
+  # give is no longer the answer its caller is waiting for. The server releases that caller on its
+  # own timer and ignores a reply that arrives after it.
+  defp serve_request({%State{} = state, woken}, %SecretRequest{} = request) do
+    if SecretRequest.expired?(request, SecretRequest.now()) do
+      {state, woken}
+    else
+      answer({state, woken}, request, Host.serve(request.operation, state.context))
+    end
+  end
+
+  defp answer({%State{} = state, woken}, %SecretRequest{} = request, outcome) do
+    :ok =
+      Connection.reply(
+        request.reply_to,
+        request.request_id,
+        SecretRequest.result_kind(request.operation),
+        outcome
+      )
+
+    delivered({state, woken}, request.operation, outcome)
+  end
+
+  # Delivering the credential a fetch stopped for is the one request that changes what this biot
+  # can do next. Another source's credential changes nothing, so the wait stands and the fetch is
+  # not run again for nothing.
+  defp delivered({%State{} = state, woken}, {:deliver_fetch_credential, source, _value}, :ok) do
+    if state.retry.waiting_for == {:fetch_credential, source} do
+      case Journal.clear_waiting_for(state.biot_id, revision(state.spec)) do
+        {:ok, retry} -> {%{state | retry: retry}, :woken}
+        :superseded -> {state, woken}
+      end
+    else
+      {state, woken}
+    end
+  end
+
+  defp delivered({%State{} = state, woken}, _operation, _outcome), do: {state, woken}
 
   defp cancel_wake({_tag, %Wake{} = wake}), do: Process.cancel_timer(wake.timer)
   defp cancel_wake({_tag, _detail, %Wake{} = wake}), do: Process.cancel_timer(wake.timer)
@@ -510,6 +665,20 @@ defmodule Biot.Node.BiotController do
   # a container that keeps exiting still runs out of budget across its restarts.
   defp record_result(%State{} = state, %Effect{revision: revision}, :ok) do
     put_retry(state, Journal.clear_failure(state.biot_id, revision))
+  end
+
+  # A wait is not a failure and not an attempt, so the only thing recorded is what it waits for.
+  # The convergence that follows reports it and then blocks on it.
+  defp record_result(%State{} = state, %Effect{} = effect, {:waiting_for, source}) do
+    put_retry(
+      state,
+      Journal.record_waiting_for(
+        state.biot_id,
+        effect.revision,
+        Action.stage(effect.action),
+        source
+      )
+    )
   end
 
   defp record_result(%State{} = state, %Effect{} = effect, {:error, %Outcome{} = outcome}) do

@@ -8,6 +8,7 @@ defmodule Biot.Node.Host.Allocation do
   alias Biot.Node.Host.Container
   alias Biot.Node.Host.Context
   alias Biot.Node.Host.DataInspection
+  alias Biot.Node.Host.FetchCredentials
   alias Biot.Node.Host.FileSystem
   alias Biot.Node.Host.Git
   alias Biot.Node.Host.Network
@@ -48,7 +49,7 @@ defmodule Biot.Node.Host.Allocation do
         repository
       ) do
     with {:ok, _network} <- ensure_network(config, allocation),
-         {:ok, _checkout} <- ensure_checkout(config, biot_id, repository),
+         {:ok, _checkout} <- ensure_checkout(config, allocation, repository),
          {:ok, _mounts} <- ensure_owned(config, allocation, owned_directories(config, biot_id)),
          {:ok, _marker} <- write_marker(config, biot_id),
          {:ok, _record} <- complete_initialization(allocation) do
@@ -158,10 +159,22 @@ defmodule Biot.Node.Host.Allocation do
     with {:ok, _root} <- make_directory(NodePrivatePath.to_string(allocation.data_root)),
          {:ok, _support} <- make_directory(Paths.build_support(config, biot_id)),
          {:ok, _environments} <- make_directory(Paths.environments(config, biot_id)),
+         {:ok, _required} <- make_required(config, biot_id),
          {:ok, _mounts} <-
            ensure_owned(config, allocation, Paths.allocation_owned_directories(config, biot_id)),
          {:ok, _network} <- ensure_network(config, allocation) do
       {:ok, :prepared}
+    end
+  end
+
+  # `Paths.allocation_directories/2` says what the allocation is, so creation, the ownership
+  # handoff, the runtime mounts, and the presence facts below all read that one list. Allocation is
+  # also the only thing that creates them, which is how a secret or credential request finds a
+  # directory to publish into without ever creating an allocation to service itself.
+  defp make_required(config, biot_id) do
+    case FileSystem.ensure_directories(Paths.required_directories(config, biot_id)) do
+      :ok -> {:ok, :created}
+      {:error, reason} -> {:error, Outcome.from_reason(reason)}
     end
   end
 
@@ -187,8 +200,14 @@ defmodule Biot.Node.Host.Allocation do
 
   defp mount_facts(_config, %Allocation{initialization: :uninitialized}), do: []
 
+  # Data are present only when everything the allocation established is still there, whoever owns it
+  # and whether or not the runtime mounts it. A credential directory that vanished would otherwise
+  # leave inspection calling the data healthy while every later delivery answered `no_allocation`.
   defp mount_facts(config, allocation) do
-    Enum.map(owned_directories(config, allocation.biot_id), &FileSystem.directory/1)
+    biot_id = allocation.biot_id
+
+    [Paths.checkout(config, biot_id) | Paths.required_directories(config, biot_id)]
+    |> Enum.map(&FileSystem.directory/1)
   end
 
   defp marker_fact(_config, %Allocation{initialization: :uninitialized}), do: :absent
@@ -197,33 +216,36 @@ defmodule Biot.Node.Host.Allocation do
     FileSystem.read(Paths.marker(config, allocation.biot_id))
   end
 
-  defp ensure_checkout(config, biot_id, repository) do
-    checkout = Paths.checkout(config, biot_id)
+  defp ensure_checkout(config, allocation, repository) do
+    checkout = Paths.checkout(config, allocation.biot_id)
 
     case FileSystem.directory(checkout) do
       {:present, :directory} -> {:ok, :checkout}
-      :absent -> clone_checkout(config, repository, checkout, biot_id)
+      :absent -> clone_checkout(config, allocation, repository, checkout)
       {:error, reason} -> {:error, Outcome.from_reason(reason)}
     end
   end
 
-  defp clone_checkout(config, repository, checkout, biot_id) do
-    staging = Paths.checkout_staging(config, biot_id)
+  # The checkout is a private repository as often as a layer is, so the node's own clone runs with
+  # the same credentials the fetch phase gets, read from the same file it writes for that phase.
+  defp clone_checkout(config, allocation, repository, checkout) do
+    staging = Paths.checkout_staging(config, allocation.biot_id)
 
-    with {:ok, _removed} <- remove_tree(staging),
-         {:ok, _cloned} <- clone(config, repository, staging),
+    with :ok <- FetchCredentials.write_include(config, allocation),
+         {:ok, _removed} <- remove_tree(staging),
+         {:ok, _cloned} <- clone(config, allocation, repository, staging),
          {:ok, _promoted} <- promote_checkout(staging, checkout) do
       {:ok, :checkout}
     end
   end
 
-  defp clone(config, repository, staging) do
+  defp clone(config, allocation, repository, staging) do
     result =
       command(
         config,
         config.git_executable,
         Git.clone_arguments(config, repository, staging),
-        env: Git.environment()
+        env: Git.environment(FetchCredentials.scope(config, allocation.biot_id))
       )
 
     case result do
@@ -232,11 +254,20 @@ defmodule Biot.Node.Host.Allocation do
 
       {:ok, %Command.Result{} = command_result} ->
         FileSystem.remove_tree(staging)
-        {:error, Outcome.from_command(:invalid_source, command_result)}
+        clone_failure(command_result, repository)
 
       {:error, reason} ->
         FileSystem.remove_tree(staging)
         {:error, Outcome.from_reason(reason)}
+    end
+  end
+
+  # A checkout the node cannot read without a credential is the same wait a private layer produces,
+  # so it ends the action the same way instead of spending the budget on a clone that cannot work.
+  defp clone_failure(%Command.Result{} = result, repository) do
+    case Git.authentication_failure(result.stdout <> result.stderr, [repository]) do
+      {:credential_required, source} -> {:waiting_for, source}
+      :none -> {:error, Outcome.from_command(:invalid_source, result)}
     end
   end
 

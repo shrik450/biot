@@ -11,19 +11,21 @@ defmodule Biot.Node.RetryState do
   """
 
   alias Biot.Protocol.BiotId
+  alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Failure
 
   @typedoc "How many attempts this revision has spent on each lifecycle stage."
   @type attempts :: %{Failure.stage() => pos_integer()}
 
-  @enforce_keys [:biot_id, :target_revision, :attempts, :next_attempt_at, :failure]
-  defstruct [:biot_id, :target_revision, :attempts, :next_attempt_at, :failure]
+  @enforce_keys [:biot_id, :target_revision, :attempts, :next_attempt_at, :waiting_for, :failure]
+  defstruct [:biot_id, :target_revision, :attempts, :next_attempt_at, :waiting_for, :failure]
 
   @type t :: %__MODULE__{
           biot_id: BiotId.t(),
           target_revision: pos_integer(),
           attempts: attempts(),
           next_attempt_at: DateTime.t() | nil,
+          waiting_for: ExecutionReport.waiting_for(),
           failure: Failure.t() | nil
         }
 
@@ -35,6 +37,7 @@ defmodule Biot.Node.RetryState do
       target_revision: target_revision,
       attempts: %{},
       next_attempt_at: nil,
+      waiting_for: nil,
       failure: nil
     }
   end
@@ -59,5 +62,33 @@ defmodule Biot.Node.RetryState do
       | attempts: Map.update(state.attempts, stage, 1, &(&1 + 1)),
         next_attempt_at: nil
     }
+  end
+
+  @doc """
+  The same state waiting for `source`, with the attempt this action spent on `stage` given back.
+
+  Waiting is the one outcome that is not an attempt: the node reached the source and learned it
+  needs a person, which is not work that can run out. The attempt was counted before the action
+  started, because an action a crash interrupts must still cost the budget, so the only honest
+  place to undo it is here.
+  """
+  @spec wait_for_credential(t(), Failure.stage(), Biot.Protocol.RepositorySource.t()) :: t()
+  def wait_for_credential(%__MODULE__{} = state, stage, source) do
+    %{
+      state
+      | attempts: return_attempt(state.attempts, stage),
+        next_attempt_at: nil,
+        failure: nil,
+        waiting_for: {:fetch_credential, source}
+    }
+  end
+
+  # A stage with no entry has spent nothing, which `attempts/2` already reads as zero, so returning
+  # the only attempt drops the entry rather than storing a count of none.
+  defp return_attempt(attempts, stage) do
+    case Map.get(attempts, stage, 0) do
+      count when count <= 1 -> Map.delete(attempts, stage)
+      count -> Map.put(attempts, stage, count - 1)
+    end
   end
 end

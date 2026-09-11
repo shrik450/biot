@@ -1,6 +1,7 @@
 defmodule Biot.Protocol.Wire do
   @moduledoc "Encodes and decodes strict JSON messages for a negotiated protocol version. Handshake messages always use the fixed version 1 shape."
 
+  alias Biot.Protocol.AuthorizationValue
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.BiotSpec
   alias Biot.Protocol.ConnectionId
@@ -16,6 +17,10 @@ defmodule Biot.Protocol.Wire do
   alias Biot.Protocol.Platform
   alias Biot.Protocol.PrivateDiagnosticId
   alias Biot.Protocol.RegistrationId
+  alias Biot.Protocol.RepositorySource
+  alias Biot.Protocol.SecretName
+  alias Biot.Protocol.SecretOutcome
+  alias Biot.Protocol.SecretValue
   alias Biot.Protocol.Version
 
   @modules %{
@@ -26,6 +31,11 @@ defmodule Biot.Protocol.Wire do
       Message.Desired,
       Message.Diagnostic,
       Message.RuntimeLogs,
+      Message.DeliverSecret,
+      Message.RemoveSecret,
+      Message.ListSecrets,
+      Message.DeliverFetchCredential,
+      Message.RemoveFetchCredential,
       Message.Synchronized,
       Message.Observation,
       Message.AccessApplied,
@@ -33,6 +43,9 @@ defmodule Biot.Protocol.Wire do
       Message.NodeObservation,
       Message.DiagnosticResult,
       Message.RuntimeLogsResult,
+      Message.SecretResult,
+      Message.SecretListResult,
+      Message.FetchCredentialResult,
       Message.Heartbeat,
       Message.HeartbeatResponse
     ],
@@ -44,6 +57,7 @@ defmodule Biot.Protocol.Wire do
   @type context :: phase() | version()
   @type error_reason ::
           :biot_spec_too_large
+          | :secret_value_too_large
           | :invalid_json
           | :invalid_message
           | {:invalid_message, atom()}
@@ -73,11 +87,22 @@ defmodule Biot.Protocol.Wire do
     end
   end
 
+  @doc """
+  The smallest frame limit that can still carry every message this version allows.
+
+  Two messages set it: the largest BiotSpec and the largest delivered secret. A frame limit below
+  either one would leave an accepted selection or an accepted secret undeliverable, which is a
+  configuration fault the node and the server both refuse at boot rather than discover in use.
+  """
   @spec min_frame_bytes(version()) :: pos_integer()
-  # Step 18 adds the encoded secret payload to this minimum.
   def min_frame_bytes(version) do
-    Limits.max_biot_spec_bytes(version) + biot_spec_envelope_bytes(version) +
-      Frame.overhead_bytes()
+    largest =
+      max(
+        Limits.max_biot_spec_bytes(version) + biot_spec_envelope_bytes(version),
+        encoded_secret_value_bytes(version) + secret_envelope_bytes(version)
+      )
+
+    largest + Frame.overhead_bytes()
   end
 
   @spec check_frame_limit!(pos_integer()) :: :ok
@@ -165,13 +190,33 @@ defmodule Biot.Protocol.Wire do
     end
   end
 
-  defp decode_field_error(:biot_spec_too_large, _field),
-    do: {:error, :biot_spec_too_large}
+  @bound_reasons [:biot_spec_too_large, :secret_value_too_large]
 
-  defp decode_field_error(reason, field) when reason != :biot_spec_too_large,
+  # A bound violation keeps its own reason so the peer that closed the link can say which bound it
+  # was. Every other reason becomes the field name alone, which is the metadata rule: a decode
+  # error names where the message was wrong and never what it contained.
+  defp decode_field_error(reason, _field) when reason in @bound_reasons, do: {:error, reason}
+
+  defp decode_field_error(reason, field) when reason not in @bound_reasons,
     do: {:error, {:invalid_message, field}}
 
   @spec_carrying_messages [Message.SynchronizeItem, Message.Desired]
+
+  @secret_messages [
+    Message.DeliverSecret,
+    Message.RemoveSecret,
+    Message.ListSecrets,
+    Message.DeliverFetchCredential,
+    Message.RemoveFetchCredential
+  ]
+
+  @secret_result_messages [
+    Message.SecretResult,
+    Message.SecretListResult,
+    Message.FetchCredentialResult
+  ]
+
+  @value_carrying_messages [Message.DeliverSecret, Message.DeliverFetchCredential]
 
   defp encode_field(Message.SynchronizeItem, :biot_spec, spec, context),
     do: encode_biot_spec(spec, context)
@@ -222,6 +267,43 @@ defmodule Biot.Protocol.Wire do
   defp encode_field(Message.RuntimeLogs, field, value, _context)
        when field in [:max_bytes, :timeout_ms],
        do: {:ok, value}
+
+  defp encode_field(module, :request_id, value, _context)
+       when module in @secret_messages,
+       do: {:ok, value}
+
+  defp encode_field(module, :biot_id, value, _context)
+       when module in @secret_messages,
+       do: {:ok, BiotId.to_string(value)}
+
+  defp encode_field(module, :timeout_ms, value, _context)
+       when module in @secret_messages,
+       do: {:ok, value}
+
+  defp encode_field(module, :name, value, _context)
+       when module in [Message.DeliverSecret, Message.RemoveSecret],
+       do: {:ok, SecretName.to_string(value)}
+
+  defp encode_field(module, :source, value, _context)
+       when module in [Message.DeliverFetchCredential, Message.RemoveFetchCredential],
+       do: {:ok, RepositorySource.to_string(value)}
+
+  defp encode_field(Message.DeliverSecret, :value, value, _context),
+    do: {:ok, Base.encode64(SecretValue.reveal(value))}
+
+  defp encode_field(Message.DeliverFetchCredential, :value, value, _context),
+    do: {:ok, Base.encode64(AuthorizationValue.reveal(value))}
+
+  defp encode_field(module, :request_id, value, _context)
+       when module in @secret_result_messages,
+       do: {:ok, value}
+
+  defp encode_field(Message.SecretListResult, :result, value, _context),
+    do: {:ok, SecretOutcome.encode_listing(value)}
+
+  defp encode_field(module, :result, value, _context)
+       when module in [Message.SecretResult, Message.FetchCredentialResult],
+       do: {:ok, SecretOutcome.encode(value)}
 
   defp encode_field(Message.Synchronized, :connection_id, value, _context),
     do: {:ok, ConnectionId.to_string(value)}
@@ -336,6 +418,41 @@ defmodule Biot.Protocol.Wire do
        when field in [:max_bytes, :timeout_ms],
        do: positive_integer(value)
 
+  defp decode_field(module, :request_id, value, _context)
+       when module in @secret_messages or module in @secret_result_messages,
+       do: nonempty_string(value)
+
+  defp decode_field(module, :biot_id, value, _context)
+       when module in @secret_messages,
+       do: BiotId.parse(value)
+
+  defp decode_field(module, :timeout_ms, value, _context)
+       when module in @secret_messages,
+       do: positive_integer(value)
+
+  defp decode_field(module, :name, value, _context)
+       when module in [Message.DeliverSecret, Message.RemoveSecret],
+       do: SecretName.parse(value)
+
+  defp decode_field(module, :source, value, _context)
+       when module in [Message.DeliverFetchCredential, Message.RemoveFetchCredential],
+       do: RepositorySource.parse(value)
+
+  defp decode_field(Message.DeliverSecret, :value, value, context) do
+    with {:ok, decoded} <- decode_base64(value), do: SecretValue.parse(decoded, context)
+  end
+
+  defp decode_field(Message.DeliverFetchCredential, :value, value, context) do
+    with {:ok, decoded} <- decode_base64(value), do: AuthorizationValue.parse(decoded, context)
+  end
+
+  defp decode_field(Message.SecretListResult, :result, value, _context),
+    do: SecretOutcome.parse_listing(value)
+
+  defp decode_field(module, :result, value, _context)
+       when module in [Message.SecretResult, Message.FetchCredentialResult],
+       do: SecretOutcome.parse(value)
+
   defp decode_field(Message.Synchronized, :connection_id, value, _context),
     do: ConnectionId.parse(value)
 
@@ -415,12 +532,16 @@ defmodule Biot.Protocol.Wire do
 
   defp runtime_logs_result(_value), do: {:error, :invalid_format}
 
-  defp decode_base64(value) do
+  defp decode_base64(value) when is_binary(value) do
     case Base.decode64(value) do
       {:ok, decoded} -> {:ok, decoded}
       :error -> {:error, :invalid_format}
     end
   end
+
+  # JSON offers numbers, booleans, null, arrays, and objects where a field expects text, and every
+  # one of them reaches here. A decoder answers that with a reason, never an exception.
+  defp decode_base64(_value), do: {:error, :invalid_format}
 
   defp positive_integer(value) when is_integer(value) and value > 0, do: {:ok, value}
   defp positive_integer(_value), do: {:error, :invalid_format}
@@ -460,12 +581,27 @@ defmodule Biot.Protocol.Wire do
   end
 
   defp biot_spec_envelope_bytes(version) do
-    @spec_carrying_messages
-    |> Enum.map(&biot_spec_envelope_bytes(&1, version))
+    envelope_bytes(@spec_carrying_messages, version)
+  end
+
+  defp secret_envelope_bytes(version) do
+    envelope_bytes(@value_carrying_messages, version)
+  end
+
+  # Base64 is how a delivered value crosses JSON, so the frame has to fit the encoded form.
+  defp encoded_secret_value_bytes(version) do
+    version |> Limits.max_secret_value_bytes() |> Kernel.+(2) |> div(3) |> Kernel.*(4)
+  end
+
+  defp envelope_bytes(modules, version) do
+    modules
+    |> Enum.map(&envelope_bytes_for(&1, version))
     |> Enum.max()
   end
 
-  defp biot_spec_envelope_bytes(module, version) do
+  # What the message costs around its one large field, measured by encoding the message with every
+  # field null, so a renamed or added field changes this number without anyone remembering to.
+  defp envelope_bytes_for(module, version) do
     message = module.__struct__()
     {:ok, ^module} = message_module(message, version)
 

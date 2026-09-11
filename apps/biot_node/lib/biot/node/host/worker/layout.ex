@@ -16,11 +16,15 @@ defmodule Biot.Node.Host.Worker.Layout do
   every later worker. That is why environment directories keep their own name in the mount target
   instead of being mounted at one fixed place.
 
-  Step 18's fetch credential is one entry added to the fetch phase's mounts and nothing else; no
-  build or collection worker has a mount it could inherit it through.
+  The fetch phase is the only one with credentials and the only one with the operator's certificate
+  authority, and both are one mount and one variable there. A build or collection worker has no
+  mount it could inherit either through, which is what makes `variables/2` and `mounts/3` the two
+  places a phase differs.
   """
 
   alias Biot.Node.Host.Config
+  alias Biot.Node.Host.FetchCredentials
+  alias Biot.Node.Host.Git
   alias Biot.Node.Host.Paths
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.EnvironmentId
@@ -42,6 +46,8 @@ defmodule Biot.Node.Host.Worker.Layout do
   @environments "/biot/environments"
   @staged "/biot/staged"
   @build_support "/biot/build-support"
+  @fetch_credentials "/biot/fetch-credentials"
+  @fetch_ca "/biot/fetch-ca.pem"
   @nix_config "/etc/nix/nix.conf"
 
   @doc "Where Nix is told the store is. Every worker command carries this and only this."
@@ -86,21 +92,45 @@ defmodule Biot.Node.Host.Worker.Layout do
   def bundle_link(environment_id), do: Path.join(environment(environment_id), "root")
 
   @doc """
-  The environment every worker runs with.
+  The environment one worker runs with.
 
   Nix gets no channel search path and no inherited configuration, so the operator's settings reach
   it through the mounted configuration file alone, and everything it writes outside the store goes
   to the allocation's own scratch.
+
+  The phase decides the rest. A fetch reaches repositories, so it is the only phase whose Git has
+  credentials and the only one that reads the operator's trust bundle; every other phase gets the
+  hardened Git shape with nothing to authenticate with and the image's own roots.
+
+  The bundle replaces those roots rather than extending them, so an operator who names one names a
+  complete set. `Biot.Node.Host.Config` states that where the setting is read.
   """
-  @spec variables() :: [{String.t(), String.t()}]
-  def variables do
+  @spec variables(Config.t(), phase()) :: [{String.t(), String.t()}]
+  def variables(config, phase) do
     [
       {"NIX_PATH", ""},
       {"TMPDIR", @scratch},
       {"HOME", Path.join(@scratch, "home")},
       {"XDG_CACHE_HOME", Path.join(@scratch, "cache")}
-    ]
+    ] ++ Git.environment(git_scope(phase)) ++ certificate_authority(config, phase)
   end
+
+  @doc "Where the fetch phase reads its credentials from. Only that phase has the directory."
+  @spec credentials_include() :: String.t()
+  def credentials_include, do: Path.join(@fetch_credentials, FetchCredentials.include_name())
+
+  defp git_scope({:fetch, %EnvironmentId{}}), do: {:credentials, credentials_include()}
+  defp git_scope({:build, %EnvironmentId{}, _staged}), do: :no_credentials
+  defp git_scope(:collect), do: :no_credentials
+
+  defp certificate_authority(%Config{fetch_ca_bundle: nil}, _phase), do: []
+
+  defp certificate_authority(%Config{}, {:fetch, %EnvironmentId{}}) do
+    [{"GIT_SSL_CAINFO", @fetch_ca}, {"NIX_SSL_CERT_FILE", @fetch_ca}]
+  end
+
+  defp certificate_authority(%Config{}, {:build, %EnvironmentId{}, _staged}), do: []
+  defp certificate_authority(%Config{}, :collect), do: []
 
   @doc "Where the operator's Nix settings are mounted. A worker inherits no other configuration."
   @spec nix_config() :: String.t()
@@ -125,8 +155,9 @@ defmodule Biot.Node.Host.Worker.Layout do
   def mounts(config, biot_id, {:fetch, environment_id}) do
     [
       {Paths.environment(config, biot_id, environment_id), environment(environment_id), :rw},
-      {Paths.build_support(config, biot_id), @build_support, :ro}
-      | common_mounts(config, biot_id)
+      {Paths.build_support(config, biot_id), @build_support, :ro},
+      {Paths.fetch_credentials(config, biot_id), @fetch_credentials, :ro}
+      | certificate_authority_mount(config) ++ common_mounts(config, biot_id)
     ]
   end
 
@@ -150,6 +181,9 @@ defmodule Biot.Node.Host.Worker.Layout do
       | common_mounts(config, biot_id)
     ]
   end
+
+  defp certificate_authority_mount(%Config{fetch_ca_bundle: nil}), do: []
+  defp certificate_authority_mount(%Config{fetch_ca_bundle: path}), do: [{path, @fetch_ca, :ro}]
 
   defp common_mounts(config, biot_id) do
     [
