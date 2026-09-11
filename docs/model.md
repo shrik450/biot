@@ -2127,10 +2127,15 @@ installed and in-use closures through roots in the private store. Garbage
 collection and store writes use the same single-worker ownership rule.
 
 This duplicates unpacked dependencies across biots. The cache reduces downloads
-and builds, but does not deduplicate private store storage. The host enforces
-worker CPU and memory limits, private store and scratch quotas, and node build
-concurrency. It must confirm those limits work on the supported rootless setup.
-Unsupported required isolation or limits reject node startup.
+and builds, but does not deduplicate private store storage. Unsupported required
+isolation rejects node startup.
+
+Worker CPU and memory limits, private store and scratch quotas, and a maximum
+worker count are a v2 plan. They come after the UI has landed and the operator
+has run the system for a while. When they arrive, the host must confirm they
+work on the supported rootless setup, and an unenforceable limit rejects node
+startup. Until then, one biot's build can consume the node's build resources;
+the trusted group is the bound.
 
 Project snapshots stay within the biot's storage boundary, but can retain files
 after the working copy changes. UI and CLI project-context selection state:
@@ -2161,9 +2166,10 @@ to the bundle's service runner. Registries use opaque IDs, never dynamically
 created atoms. Expected build and configuration failures are values, not
 supervisor restart signals.
 
-Operator configuration bounds containers, build concurrency, streams per node
-and per biot, session and credential lifetimes, secret size, buffers, assigned
-biots, logs, and scratch growth. Disk exhaustion is reported. There is no
+Operator configuration bounds containers, streams per node and per biot,
+session and credential lifetimes, secret size, buffers, assigned biots, and
+logs. Build concurrency and scratch growth bounds are v2. Disk exhaustion is
+reported. There is no
 fair-share scheduler, billing, capacity reservation, or tamper-evident audit
 system. The [diagnostic contract](#diagnostics-and-runtime-output) defines capture bounds.
 Unguessable tokens do not replace request, buffer, or resource bounds.
@@ -2201,9 +2207,11 @@ Builders load those files directly from the release.
 
 Node settings keep their existing `BIOT_NODE_*` names and add
 `BIOT_NODE_MAX_STREAMS` and `BIOT_NODE_MAX_STREAMS_PER_BIOT`. The node also configures
-the trusted builder image, binary cache URLs and keys, worker CPU and memory
-limits, storage quotas, and maximum worker count. The getting-started guide
-names the supported Linux mechanisms and verifies their enforcement. Certificate
+the trusted builder image and binary cache URLs and keys. Worker CPU and memory
+limits, storage quotas, and a maximum worker count are v2 settings; see
+[Private Nix execution and shared cache](#private-nix-execution-and-shared-cache).
+The getting-started guide names the supported Linux mechanisms and verifies
+their enforcement. Certificate
 tooling preserves the operator's CA certificate and protected private key so
 it can issue and renew leaf certificates. The operator can also supply an
 existing CA; the CA private key is never deployed to a node. `mix biot.gen.certs`
@@ -2369,7 +2377,7 @@ container.
 | Private store and cache | A real cached build and a cache miss run in an isolated worker; the runtime executes both closures without a daemon mount |
 | Worker cancellation | The whole worker ends, including its daemon; another writer waits for inspected absence; installed closures remain usable |
 | Controller or node restart during a build | Recovery cancels the whole worker before retrying; completed outputs remain reusable; matching runtime containers stay running |
-| Worker resource limits | CPU and memory limits and storage quotas work on the supported Linux host; one worker cannot exhaust unbounded node resources |
+| Worker resource limits (v2) | CPU and memory limits and storage quotas work on the supported Linux host; one worker cannot exhaust unbounded node resources |
 | Managed source fetching | Local paths, `file://`, `ext::`, SSH, protocol-changing redirects, inherited helpers, and submodule recursion cannot bypass HTTPS-only fetching |
 | Project context snapshot | Export cannot escape the selected directory through links; snapshot and outputs remain private to the biot |
 | Service exits while its supervisor runs | Lifecycle success remains accurate; an owner or shell collaborator can retrieve useful bounded runtime logs |

@@ -157,7 +157,10 @@ defmodule Biot.Node.Host.Container do
         Names.container(incarnation_id),
         "--detach",
         "--read-only",
-        "--rootfs",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev",
+        "--tmpfs",
+        "/run:rw,noexec,nosuid,nodev",
         "--network",
         Names.network(allocation.network_id),
         "--uidmap",
@@ -172,7 +175,11 @@ defmodule Biot.Node.Host.Container do
         ) ++
         runtime_log_arguments(config) ++
         volume_arguments(config, allocation.biot_id) ++
-        [Paths.rootfs(config, allocation.biot_id), StorePath.to_string(bundle.entrypoint)]
+        [
+          "--rootfs",
+          StorePath.to_string(bundle.rootfs),
+          StorePath.to_string(bundle.entrypoint)
+        ]
 
     case Podman.run(config, arguments) do
       {:ok, %Command.Result{status: 0}} ->
@@ -316,8 +323,8 @@ defmodule Biot.Node.Host.Container do
 
   defp volume_arguments(config, biot_id) do
     ["--volume", "/nix/store:/nix/store:ro"] ++
-      Enum.flat_map(Paths.mounts(config, biot_id), fn {source, target} ->
-        ["--volume", "#{source}:#{target}:rw"]
+      Enum.flat_map(Paths.mounts(config, biot_id), fn {source, target, mode} ->
+        ["--volume", "#{source}:#{target}:#{mode}"]
       end)
   end
 

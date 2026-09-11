@@ -43,7 +43,10 @@ in
   biot.packages = [ stateServer ];
   biot.services.counter = {
     command = [ "${stateServer}/bin/biot-state-server" ];
-    directory = "counter";
+    directory = {
+      root = "service_data";
+      path = "counter";
+    };
     environment.PORT = "8080";
     restart = "on-failure";
   };

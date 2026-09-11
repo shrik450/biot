@@ -57,10 +57,11 @@ Each layer is a Nix module with these options:
 {
   biot.packages = [ pkgs.git ];
   biot.environment.EDITOR = "vim";
+  biot.shell = pkgs.zsh;
   biot.files."example/settings".text = "mode = development\n";
   biot.services.web = {
     command = [ "${pkgs.nodejs}/bin/node" "server.js" ];
-    directory = "checkout";
+    directory = { root = "checkout"; path = "."; };
     environment.PORT = "3000";
     restart = "on-failure";
   };
@@ -72,18 +73,23 @@ package wins a name collision on `PATH`.
 
 Environment variables, files, and services default to empty attribute sets.
 Environment variable names must be shell variable names. Layers cannot set
-`BIOT_CONFIG_ROOT`, `HOME`, or `PATH` in shared or service environments. The
-bundle sets `BIOT_CONFIG_ROOT` and `HOME`; the runtime only provides the mounts.
-Use `biot.packages` for commands.
+`BIOT_CONFIG_ROOT`, `HOME`, `PATH`, or `TERM` in shared or service
+environments. The bundle sets the first three values. The agent sets `TERM` for
+each shell. Use `biot.packages` for commands.
 
-File names and service directories must be relative paths. They cannot contain
-empty, `.`, or `..` segments. Read a declared file from
+File names must be relative paths with no empty, `.` or `..` segments. A
+service directory path is either `.` or a relative path with no empty, `.` or
+`..` segments. Read a declared file from
 `$BIOT_CONFIG_ROOT/files/<path>`.
 
 A service must set a non-empty command. Service names can contain letters,
-numbers, periods, underscores, and hyphens. Each service defaults its directory
-to its name and its restart rule to `on-failure`. Restart rules are `always`,
-`on-failure`, and `never`.
+numbers, periods, underscores, and hyphens. The name `biot-agent` is reserved.
+Each service directory defaults to `{ root = "checkout"; path = "."; }`.
+The root can be `checkout` or `service_data`. Each restart rule defaults to
+`on-failure`. Restart rules are `always`, `on-failure`, and `never`.
+
+`biot.shell` defaults to bash. Set it to another package, such as `pkgs.zsh`,
+to change the shell that starts when an agent request has no command.
 
 The build writes `bundle.json` at the output root. It has this exact shape:
 
@@ -91,33 +97,43 @@ The build writes `bundle.json` at the output root. It has this exact shape:
 {
   "format": 1,
   "closure_root": "/nix/store/<hash>-biot-environment-bundle",
+  "rootfs": "/nix/store/<hash>-biot-rootfs",
   "entrypoint": "/nix/store/<hash>-biot-entrypoint/bin/biot-entrypoint",
+  "shell_entrypoint": "/nix/store/<hash>-biot-shell-entrypoint/bin/biot-shell-entrypoint",
   "environment_file": "/nix/store/<hash>-biot-environment",
   "config_root": "/nix/store/<hash>-biot-config"
 }
 ```
 
 The keys must match `Biot.Node.EnvironmentBundle`. `closure_root` is the build
-output. Retaining its output link retains the entry point, environment file,
-config root, runner, and packages.
+output. Retaining its output link retains the root filesystem, both entry
+points, the agent, the runner, and all packages.
 
-The config root contains `supervisord.conf` and the declared files under
-`files/`. The entry point loads the environment file and starts `supervisord`.
-Every executable resolves inside `/nix/store`. The container needs no base
-image.
+The config root contains declared files under `files/`. The entry point starts
+`supervisord` with the generated runner configuration. Every executable
+resolves inside `/nix/store`.
 
-Launch the bundle on a read-only, empty root filesystem. Mount `/nix/store`
-read only. Mount private writable directories at `/biot/checkout`,
-`/biot/home`, and `/biot/service-data`. The read-only root makes a missing
-private mount fail instead of creating temporary state.
+Launch the bundle with its `rootfs`. Mount `/nix/store` read only. Mount private
+writable directories at `/biot/checkout`, `/biot/home`,
+`/biot/service-data`, and `/biot/run`. Mount `/biot/secrets` read only. The
+root filesystem contains the system files and mount points that Podman needs.
 
-The schema uses `supervisord` because it supports several programs and all
-three restart rules without root or an init system. It also adds CPython to
-each bundle closure, so it costs more storage than a smaller runner. The bundle
-does not create a control socket. Per-service control is out of scope for now.
+The runner includes the Go `biot-agent`. The agent listens on
+`/biot/run/agent.sock`. The repository checks in the agent's vendor tree, so
+Nix builds its pinned module graph without network module downloads.
+
+Generated wrappers own service restart rules. Supervisord cannot limit restarts
+after a process first reaches its running state. Each wrapper applies bounded
+backoff and stops after five starts. It writes one exhaustion line to the
+runtime log. Supervisord stays alive when one wrapper stops.
+
+Each service and shell starts with a clean environment. Its entry loads the
+bundle environment and current files from `/biot/secrets`. The runner and agent
+do not load secret values.
 
 The `stateful-counter` example uses two layers. Both set `BIOT_EXAMPLE` to the
 same value, so the module system merges the definitions. The service stores its
-value below the service data mount. It serves the declared file at `/message`.
+value below the service data mount. Its layer selects zsh for shells. The
+service serves the declared file at `/message`.
 Add `nix/examples/conflicting-layer` as a third source to see both source
 locations in the module system conflict error.

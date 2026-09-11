@@ -123,24 +123,34 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     allocated_twice = Host.inspect_state(biot_id, host)
     assert {:uninitialized, allocation} = allocated_once.data
 
-    rootfs = Paths.rootfs(host.config, biot_id)
-    assert {_, 0} = System.cmd("podman", ["unshare", "chown", "-R", "0:0", rootfs])
-    File.rm_rf!(rootfs)
+    allocation_mounts = Paths.mounts_created_at_allocation(host.config, biot_id)
+    assert Enum.all?(allocation_mounts, fn {source, _target, _mode} -> File.dir?(source) end)
+
+    assert Enum.all?(allocation_mounts, fn {source, _target, _mode} ->
+             match?({:ok, %File.Stat{uid: owner, gid: owner}}, File.stat(source)) and
+               File.stat!(source).uid == allocation.uid_range.start
+           end)
+
+    refute File.exists?(Paths.checkout(host.config, biot_id))
+    refute File.exists?(Path.join(Paths.biot(host.config, biot_id), "rootfs"))
 
     assert {:ok, %Command.Result{status: 0}} =
              Podman.run(host.config, ["network", "rm", Names.network(allocation.network_id)])
 
     repaired_allocate = Host.run(allocate, host)
-    repaired_rootfs = File.dir?(rootfs)
     repaired_network = Network.state(host.config, allocation.network_id)
 
     assert repaired_allocate == :ok
-    assert repaired_rootfs
     assert repaired_network == :present
 
     assert {:run, {:initialize, ^allocation, _repository} = initialize} = decision(running, host)
     assert :ok = Host.run(initialize, host)
     initialized_once = Host.inspect_state(biot_id, host)
+
+    assert Enum.all?(Paths.mounts(host.config, biot_id), fn {source, _target, _mode} ->
+             File.dir?(source)
+           end)
+
     assert :ok = Host.run(initialize, host)
     assert Host.inspect_state(biot_id, host) == initialized_once
 
@@ -153,6 +163,13 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     assert create_actions == [:resolve, :prepare, :install, :start]
     assert decision(running, host) == :settled
     assert {:present, first_container} = settled.container
+
+    assert_container_runtime_contract(
+      host,
+      biot_id,
+      first_container,
+      bundle(host, environment_id)
+    )
 
     assert %{"Type" => "k8s-file", "Size" => "1.049MB", "Path" => log_path} =
              container_log_config(host, first_container)
@@ -446,6 +463,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
       {:run, action} ->
         assert :ok = Host.run(action, host)
+        report_failed_start(action, spec, host)
         converge(spec, host, [elem(action, 0) | actions])
 
       other ->
@@ -455,6 +473,33 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
   defp converge(_spec, _host, actions) do
     flunk("reconciliation exceeded its action limit: #{inspect(Enum.reverse(actions))}")
+  end
+
+  defp report_failed_start({:start, _allocation, _installation}, spec, host) do
+    running = fn ->
+      match?({:present, %{state: :running}}, Host.inspect_state(spec.biot_id, host).container)
+    end
+
+    if eventually(running) do
+      :ok
+    else
+      report_stopped_container(spec, host)
+    end
+  end
+
+  defp report_failed_start(_action, _spec, _host), do: :ok
+
+  defp report_stopped_container(spec, host) do
+    case Host.inspect_state(spec.biot_id, host).container do
+      {:present, %{state: {:exited, status}, incarnation_id: incarnation_id}} ->
+        {:ok, %Command.Result{stdout: output}} =
+          Podman.run(host.config, ["logs", Names.container(incarnation_id)])
+
+        flunk("container exited with #{status}:\n#{output}")
+
+      _other ->
+        :ok
+    end
   end
 
   defp node_state(%Inspection{} = inspection) do
@@ -478,6 +523,46 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   defp bundle(host, environment_id) do
     assert {:ok, bundle} = HostEnvironment.bundle(host.config, environment_id)
     bundle
+  end
+
+  defp assert_container_runtime_contract(host, biot_id, container, bundle) do
+    name = Names.container(container.incarnation_id)
+
+    assert {:ok, %Command.Result{status: 0, stdout: output}} =
+             Podman.run(host.config, ["inspect", "--format", "{{json .}}", name])
+
+    inspection = output |> String.trim() |> Jason.decode!()
+
+    actual_mounts =
+      inspection["Mounts"]
+      |> Enum.map(fn mount ->
+        {mount["Source"], mount["Destination"], if(mount["RW"], do: :rw, else: :ro)}
+      end)
+      |> Enum.sort()
+
+    expected_mounts =
+      ([{"/nix/store", "/nix/store", :ro}] ++ Paths.mounts(host.config, biot_id))
+      |> Enum.sort()
+
+    assert actual_mounts == expected_mounts
+    assert inspection["HostConfig"]["ReadonlyRootfs"]
+    assert inspection["HostConfig"]["Tmpfs"] |> Map.keys() |> Enum.sort() == ["/run", "/tmp"]
+    assert StorePath.to_string(bundle.rootfs) in inspection["Config"]["CreateCommand"]
+    refute File.exists?(Path.join(Paths.biot(host.config, biot_id), "rootfs"))
+
+    socket_path = Path.join(Paths.run(host.config, biot_id), "agent.sock")
+    assert eventually(fn -> match?({:ok, %File.Stat{type: :other}}, File.stat(socket_path)) end)
+    assert Bitwise.band(File.stat!(socket_path).mode, 0o777) == 0o666
+
+    assert {:ok, socket} = :socket.open(:local, :stream, :default)
+    assert :ok = :socket.connect(socket, %{family: :local, path: socket_path})
+    assert {:ok, credentials} = :socket.getopt(socket, 1, {17, 12})
+    assert :ok = :socket.close(socket)
+    <<_pid::native-signed-32, uid::native-unsigned-32, _gid::native-unsigned-32>> = credentials
+    allocation = Journal.allocation(biot_id)
+
+    assert uid in allocation.uid_range.start..(allocation.uid_range.start +
+                                                 allocation.uid_range.count - 1)
   end
 
   defp curl_executable(bundle) do
@@ -557,8 +642,8 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
     volumes =
       ["--volume", "/nix/store:/nix/store:ro"] ++
-        Enum.flat_map(Paths.mounts(host.config, biot_id), fn {source, target} ->
-          ["--volume", "#{source}:#{target}:rw"]
+        Enum.flat_map(Paths.mounts(host.config, biot_id), fn {source, target, mode} ->
+          ["--volume", "#{source}:#{target}:#{mode}"]
         end)
 
     arguments =
@@ -568,7 +653,10 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
         Names.container(incarnation_id),
         "--detach",
         "--read-only",
-        "--rootfs",
+        "--tmpfs",
+        "/tmp",
+        "--tmpfs",
+        "/run",
         "--network",
         Names.network(allocation.network_id),
         "--uidmap",
@@ -578,7 +666,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
       ] ++
         Names.label_arguments(foreign_owner, incarnation_id, installation.environment_id) ++
         volumes ++
-        [Paths.rootfs(host.config, biot_id), StorePath.to_string(bundle.entrypoint)]
+        ["--rootfs", StorePath.to_string(bundle.rootfs), StorePath.to_string(bundle.entrypoint)]
 
     assert {:ok, %Command.Result{status: 0}} = Podman.run(host.config, arguments)
     File.write!(Paths.container_identity(host.config, biot_id), "#{incarnation_id}\n")

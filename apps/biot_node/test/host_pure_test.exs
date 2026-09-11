@@ -242,15 +242,22 @@ defmodule Biot.Node.HostPureTest do
     end
   end
 
-  test "paths keep metadata outside the writable mounts" do
+  test "paths distinguish allocation mounts from the initialized mount set" do
     config = config("/var/lib/biot")
     biot = biot_id()
 
     assert Paths.mounts(config, biot) == [
-             {"/var/lib/biot/biots/#{biot}/checkout", "/biot/checkout"},
-             {"/var/lib/biot/biots/#{biot}/home", "/biot/home"},
-             {"/var/lib/biot/biots/#{biot}/service-data", "/biot/service-data"}
+             {"/var/lib/biot/biots/#{biot}/checkout", "/biot/checkout", :rw},
+             {"/var/lib/biot/biots/#{biot}/home", "/biot/home", :rw},
+             {"/var/lib/biot/biots/#{biot}/service-data", "/biot/service-data", :rw},
+             {"/var/lib/biot/biots/#{biot}/run", "/biot/run", :rw},
+             {"/var/lib/biot/biots/#{biot}/secrets", "/biot/secrets", :ro}
            ]
+
+    assert Paths.mounts_created_at_allocation(config, biot) == tl(Paths.mounts(config, biot))
+
+    assert Paths.mounts(config, biot) -- Paths.mounts_created_at_allocation(config, biot) ==
+             [{"/var/lib/biot/biots/#{biot}/checkout", "/biot/checkout", :rw}]
 
     assert Paths.marker(config, biot) == "/var/lib/biot/biots/#{biot}/marker"
     refute Paths.marker(config, biot) in Enum.map(Paths.mounts(config, biot), &elem(&1, 0))

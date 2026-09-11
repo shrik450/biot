@@ -3,5 +3,6 @@
 {
   biot.packages = [ pkgs.curl ];
   biot.environment.BIOT_EXAMPLE = "stateful-counter";
+  biot.shell = pkgs.zsh;
   biot.files."example/message".text = "State survives a container restart.\n";
 }

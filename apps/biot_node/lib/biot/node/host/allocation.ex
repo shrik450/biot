@@ -46,7 +46,7 @@ defmodule Biot.Node.Host.Allocation do
       ) do
     with {:ok, _network} <- ensure_network(config, allocation),
          {:ok, _checkout} <- ensure_checkout(config, biot_id, repository),
-         {:ok, _mounts} <- ensure_mounts(config, allocation),
+         {:ok, _mounts} <- ensure_mounts(config, allocation, Paths.mounts(config, biot_id)),
          {:ok, _marker} <- write_marker(config, biot_id),
          {:ok, _record} <- complete_initialization(allocation) do
       :ok
@@ -141,59 +141,14 @@ defmodule Biot.Node.Host.Allocation do
 
   defp prepare(config, allocation) do
     with {:ok, _root} <- make_directory(NodePrivatePath.to_string(allocation.data_root)),
-         {:ok, _layout} <- ensure_allocation_layout(config, allocation),
-         {:ok, _ownership} <-
-           chown(config, allocation, [Paths.rootfs(config, allocation.biot_id)]),
+         {:ok, _mounts} <-
+           ensure_mounts(
+             config,
+             allocation,
+             Paths.mounts_created_at_allocation(config, allocation.biot_id)
+           ),
          {:ok, _network} <- ensure_network(config, allocation) do
       {:ok, :prepared}
-    end
-  end
-
-  defp ensure_allocation_layout(config, allocation) do
-    rootfs = Paths.rootfs(config, allocation.biot_id)
-
-    directories = [
-      Path.join(rootfs, "dev"),
-      Path.join(rootfs, "proc"),
-      Path.join(rootfs, "sys"),
-      Path.join(rootfs, "etc"),
-      Path.join(rootfs, "run"),
-      Path.join(rootfs, "tmp"),
-      Path.join(rootfs, "nix/store"),
-      Path.join(rootfs, "biot/checkout"),
-      Path.join(rootfs, "biot/home"),
-      Path.join(rootfs, "biot/service-data")
-    ]
-
-    case FileSystem.ensure_directories(directories) do
-      :ok -> ensure_rootfs_files(rootfs)
-      {:error, reason} -> {:error, Outcome.from_reason(reason)}
-    end
-  end
-
-  defp ensure_rootfs_files(rootfs) do
-    Enum.reduce_while(["etc/hosts", "etc/hostname", "etc/resolv.conf"], {:ok, :files}, fn
-      relative, {:ok, :files} ->
-        case ensure_file(Path.join(rootfs, relative)) do
-          {:ok, :file} -> {:cont, {:ok, :files}}
-          {:error, reason} -> {:halt, {:error, Outcome.from_reason(reason)}}
-        end
-    end)
-  end
-
-  defp ensure_file(path) do
-    case File.stat(path) do
-      {:ok, %File.Stat{type: :regular}} -> {:ok, :file}
-      {:ok, %File.Stat{}} -> {:error, {:not_a_file, path}}
-      {:error, :enoent} -> create_file(path)
-      {:error, reason} -> {:error, {reason, path}}
-    end
-  end
-
-  defp create_file(path) do
-    case File.touch(path) do
-      :ok -> {:ok, :file}
-      {:error, reason} -> {:error, {reason, path}}
     end
   end
 
@@ -214,7 +169,7 @@ defmodule Biot.Node.Host.Allocation do
   defp mount_facts(_config, %Allocation{initialization: :uninitialized}), do: []
 
   defp mount_facts(config, allocation) do
-    Enum.map(Paths.mounts(config, allocation.biot_id), fn {path, _target} ->
+    Enum.map(Paths.mounts(config, allocation.biot_id), fn {path, _target, _mode} ->
       FileSystem.directory(path)
     end)
   end
@@ -286,8 +241,8 @@ defmodule Biot.Node.Host.Allocation do
     end
   end
 
-  defp ensure_mounts(config, allocation) do
-    paths = Enum.map(Paths.mounts(config, allocation.biot_id), &elem(&1, 0))
+  defp ensure_mounts(config, allocation, mounts) do
+    paths = Enum.map(mounts, &elem(&1, 0))
 
     case FileSystem.ensure_directories(paths) do
       :ok -> chown(config, allocation, paths)

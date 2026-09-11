@@ -199,14 +199,14 @@ defmodule Biot.Step14Evidence do
     {:ok, host} = Host.context(biot_id)
     :ok = Host.run({:allocate, biot_id}, host)
 
-    Enum.each(Paths.mounts(host.config, biot_id), fn {source, _target} ->
+    Enum.each(Paths.mounts(host.config, biot_id), fn {source, _target, _mode} ->
       File.mkdir_p!(source)
     end)
 
     allocation = Journal.allocation(biot_id)
     first_runner = runtime_runner("first")
     write_runtime_bundle(host.config, environment_id, first_runner)
-    {:ok, first_artifact} = ArtifactId.parse(first_runner)
+    {:ok, first_artifact} = ArtifactId.parse(first_runner.closure_root)
 
     installation = %Installation{
       biot_id: biot_id,
@@ -249,14 +249,17 @@ defmodule Biot.Step14Evidence do
     :ok = Container.retire(host, first_container.incarnation_id)
     after_retire = RuntimeLogs.fetch(biot_id, 10_000)
     metadata_before_failure = File.read!(Paths.runtime_log_metadata(host.config, biot_id))
-    failed_rootfs = Paths.rootfs(host.config, biot_id) <> ".failed-run"
-    :ok = File.rename(Paths.rootfs(host.config, biot_id), failed_rootfs)
+    bundle_path = Path.join(Paths.environment_root(host.config, environment_id), "bundle.json")
+    valid_bundle = File.read!(bundle_path)
+    invalid_rootfs = "/nix/store/00000000000000000000000000000000-missing-rootfs"
+    invalid_bundle = valid_bundle |> Jason.decode!() |> Map.put("rootfs", invalid_rootfs)
+    File.write!(bundle_path, Jason.encode!(invalid_bundle))
 
     failed_start =
       try do
         Container.start(host, allocation, installation)
       after
-        :ok = File.rename(failed_rootfs, Paths.rootfs(host.config, biot_id))
+        File.write!(bundle_path, valid_bundle)
       end
 
     after_failed_start = RuntimeLogs.fetch(biot_id, 10_000)
@@ -264,7 +267,7 @@ defmodule Biot.Step14Evidence do
 
     second_runner = runtime_runner("second")
     write_runtime_bundle(host.config, environment_id, second_runner)
-    {:ok, second_artifact} = ArtifactId.parse(second_runner)
+    {:ok, second_artifact} = ArtifactId.parse(second_runner.closure_root)
     second_installation = %{installation | artifact_id: second_artifact}
     :ok = Container.start(host, allocation, second_installation)
     {:present, second_container} = running_container(host, biot_id)
@@ -309,20 +312,36 @@ defmodule Biot.Step14Evidence do
   defp runtime_runner(label) do
     expression = """
     let pkgs = import <nixpkgs> {};
-    in pkgs.writeShellScript "biot-step15-#{label}" ''
-      i=0
-      while [ "$i" -lt 400 ]; do
-        printf '#{label}-service-%04d-abcdefghijklmnopqrstuvwxyz0123456789\\n' "$i"
-        i=$((i + 1))
-        ${pkgs.coreutils}/bin/sleep 0.02
-      done
-      exec ${pkgs.coreutils}/bin/sleep 300
-    ''
+        runner = pkgs.writeShellScript "biot-step15-#{label}" ''
+          i=0
+          while [ "$i" -lt 400 ]; do
+            printf '#{label}-service-%04d-abcdefghijklmnopqrstuvwxyz0123456789\\n' "$i"
+            i=$((i + 1))
+            ${pkgs.coreutils}/bin/sleep 0.02
+          done
+          exec ${pkgs.coreutils}/bin/sleep 300
+        '';
+        rootfs = pkgs.runCommandLocal "biot-step15-rootfs-#{label}" {} ''
+          mkdir -p "$out"/{etc,biot/{checkout,home,service-data,run,secrets},nix/store,tmp,run,dev,proc,sys}
+          touch "$out/etc/hosts" "$out/etc/hostname" "$out/etc/resolv.conf"
+        '';
+    in [ rootfs runner ]
     """
 
     case System.cmd("nix-build", ["--no-out-link", "--expr", expression], stderr_to_stdout: true) do
-      {output, 0} -> output |> String.split("\n", trim: true) |> List.last()
-      {output, status} -> raise "nix-build exited with #{status}: #{output}"
+      {output, 0} ->
+        paths =
+          output
+          |> String.split("\n", trim: true)
+          |> Enum.filter(&String.starts_with?(&1, "/nix/store/"))
+
+        rootfs = Enum.find(paths, &String.ends_with?(&1, "-biot-step15-rootfs-#{label}"))
+        runner = Enum.find(paths, &String.ends_with?(&1, "-biot-step15-#{label}"))
+        true = is_binary(rootfs) and is_binary(runner)
+        %{closure_root: rootfs, rootfs: rootfs, entrypoint: runner}
+
+      {output, status} ->
+        raise "nix-build exited with #{status}: #{output}"
     end
   end
 
@@ -334,10 +353,12 @@ defmodule Biot.Step14Evidence do
       Path.join(root, "bundle.json"),
       Jason.encode!(%{
         "format" => 1,
-        "closure_root" => runner,
-        "entrypoint" => runner,
-        "environment_file" => runner,
-        "config_root" => runner
+        "closure_root" => runner.closure_root,
+        "rootfs" => runner.rootfs,
+        "entrypoint" => runner.entrypoint,
+        "shell_entrypoint" => runner.entrypoint,
+        "environment_file" => runner.entrypoint,
+        "config_root" => runner.closure_root
       })
     )
   end

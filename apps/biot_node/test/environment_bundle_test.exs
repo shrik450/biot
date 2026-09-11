@@ -7,12 +7,14 @@ defmodule Biot.Node.EnvironmentBundleTest do
 
   @hash "0123456789abcdfghijklmnpqrsvwxyz"
 
-  test "parse returns the four paths from format 1" do
+  test "parse returns the six store paths from format 1" do
     encoded = encoded_bundle()
 
     assert {:ok, bundle} = EnvironmentBundle.parse(encoded)
     assert StorePath.to_string(bundle.closure_root) == encoded["closure_root"]
+    assert StorePath.to_string(bundle.rootfs) == encoded["rootfs"]
     assert StorePath.to_string(bundle.entrypoint) == encoded["entrypoint"]
+    assert StorePath.to_string(bundle.shell_entrypoint) == encoded["shell_entrypoint"]
     assert StorePath.to_string(bundle.environment_file) == encoded["environment_file"]
     assert StorePath.to_string(bundle.config_root) == encoded["config_root"]
   end
@@ -76,13 +78,15 @@ defmodule Biot.Node.EnvironmentBundleTest do
   end
 
   property "parse accepts generated valid bundles" do
-    check all(paths <- StreamData.list_of(store_path(), length: 4)) do
+    check all(paths <- StreamData.list_of(store_path(), length: 6)) do
       encoded =
         encoded_bundle()
         |> Map.put("closure_root", Enum.at(paths, 0))
-        |> Map.put("entrypoint", Enum.at(paths, 1))
-        |> Map.put("environment_file", Enum.at(paths, 2))
-        |> Map.put("config_root", Enum.at(paths, 3))
+        |> Map.put("rootfs", Enum.at(paths, 1))
+        |> Map.put("entrypoint", Enum.at(paths, 2))
+        |> Map.put("shell_entrypoint", Enum.at(paths, 3))
+        |> Map.put("environment_file", Enum.at(paths, 4))
+        |> Map.put("config_root", Enum.at(paths, 5))
 
       assert {:ok, %EnvironmentBundle{}} = EnvironmentBundle.parse(encoded)
     end
@@ -92,7 +96,9 @@ defmodule Biot.Node.EnvironmentBundleTest do
     %{
       "format" => 1,
       "closure_root" => "/nix/store/#{@hash}-bundle",
+      "rootfs" => "/nix/store/#{@hash}-rootfs",
       "entrypoint" => "/nix/store/#{@hash}-entrypoint/bin/biot-entrypoint",
+      "shell_entrypoint" => "/nix/store/#{@hash}-shell/bin/biot-shell-entrypoint",
       "environment_file" => "/nix/store/#{@hash}-environment",
       "config_root" => "/nix/store/#{@hash}-config"
     }

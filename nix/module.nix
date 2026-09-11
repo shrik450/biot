@@ -1,4 +1,4 @@
-{ config, lib, ... }:
+{ config, lib, pkgs, ... }:
 
 let
   inherit (lib) mkOption types;
@@ -9,9 +9,10 @@ let
     path != ""
     && !(lib.hasPrefix "/" path)
     && builtins.all (part: part != "" && part != "." && part != "..") (lib.splitString "/" path);
-  relativePath = types.addCheck types.str validRelativePath // {
-    name = "relativePath";
-    description = "relative path with no empty, \".\", or \"..\" segment";
+  validDirectoryPath = path: path == "." || validRelativePath path;
+  directoryPath = types.addCheck types.str validDirectoryPath // {
+    name = "directoryPath";
+    description = "a dot or a relative path with no empty, \".\", or \"..\" segment";
   };
 
   fileModule = {
@@ -21,7 +22,23 @@ let
     };
   };
 
-  serviceModule = { name, ... }: {
+  directoryModule = {
+    options = {
+      root = mkOption {
+        type = types.enum [ "checkout" "service_data" ];
+        default = "checkout";
+        description = "The private mount that contains the service directory.";
+      };
+
+      path = mkOption {
+        type = directoryPath;
+        default = ".";
+        description = "The service directory below the selected private mount.";
+      };
+    };
+  };
+
+  serviceModule = {
     options = {
       command = mkOption {
         type = types.nonEmptyListOf types.str;
@@ -29,9 +46,9 @@ let
       };
 
       directory = mkOption {
-        type = relativePath;
-        default = name;
-        description = "The directory below the service data mount where the service runs.";
+        type = types.submodule directoryModule;
+        default = { };
+        description = "The private directory where the service runs.";
       };
 
       environment = mkOption {
@@ -54,11 +71,11 @@ let
   serviceEnvironmentNames = lib.concatMap
     (name: builtins.attrNames config.biot.services.${name}.environment)
     serviceNames;
-  reservedEnvironmentNames = [ "BIOT_CONFIG_ROOT" "HOME" "PATH" ];
+  reservedEnvironmentNames = [ "BIOT_CONFIG_ROOT" "HOME" "PATH" "TERM" ];
   invalidEnvironmentNames = builtins.filter
     (name: !validEnvironmentName name)
     (environmentNames ++ serviceEnvironmentNames);
-  invalidReservedEnvironmentNames = builtins.filter
+  usedReservedEnvironmentNames = builtins.filter
     (name: builtins.elem name reservedEnvironmentNames)
     (environmentNames ++ serviceEnvironmentNames);
   invalidServiceNames = builtins.filter (name: !validServiceName name) serviceNames;
@@ -76,13 +93,19 @@ in
       packages = mkOption {
         type = types.listOf types.package;
         default = [ ];
-        description = "Packages placed on PATH for every service.";
+        description = "Packages placed on PATH for services and shells.";
       };
 
       environment = mkOption {
         type = types.attrsOf types.str;
         default = { };
-        description = "Environment variables shared by every service.";
+        description = "Environment variables shared by services and shells.";
+      };
+
+      shell = mkOption {
+        type = types.package;
+        default = pkgs.bash;
+        description = "The default interactive shell package.";
       };
 
       files = mkOption {
@@ -111,13 +134,17 @@ in
         assertion = false;
         message = "biot environment variable \"${name}\" is reserved; use biot.packages for commands and the home mount for home data";
       })
-      invalidReservedEnvironmentNames
+      usedReservedEnvironmentNames
     ++ map
       (name: {
         assertion = false;
         message = "biot service name \"${name}\" may contain letters, numbers, periods, underscores, and hyphens";
       })
       invalidServiceNames
+    ++ lib.optional (builtins.elem "biot-agent" serviceNames) {
+      assertion = false;
+      message = "biot service name \"biot-agent\" is reserved for the environment agent";
+    }
     ++ map
       (name: {
         assertion = false;

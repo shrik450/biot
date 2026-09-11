@@ -52,6 +52,7 @@ defmodule Step9Run do
   @data_root Path.join(@work, "step9-data")
   @sources Path.join(@work, "step9-sources")
   @certificates Path.join(@work, "step9-certificates")
+  @git_config Path.join(@work, "step9-gitconfig")
   @source_prefix "https://sources.biot.test/"
   @build_timeout_ms 600_000
 
@@ -108,8 +109,17 @@ defmodule Step9Run do
   # The biot repository and the two example layers are local Git repositories. Git rewrites the
   # credential-free HTTPS URL the protocol requires to the local path, so both the checkout and
   # Nix's own fetch read the same commit without a network service.
+  #
+  # That rewrite lives in a configuration file the run owns and throws away with everything else
+  # it wrote. The sources sit in a new directory every run, so the rewrite's key is new every run
+  # too: in the home directory it would accumulate one section per run, and Git honours the first
+  # rewrite it reads for a URL, so every run after the first would clone from a source tree that
+  # no longer exists. `GIT_CONFIG_GLOBAL` reaches the node's `git` and Nix's `builtins.fetchGit`
+  # alike, because both read it from this process's environment.
   defp prepare_sources do
     File.mkdir_p!(@sources)
+    File.write!(@git_config, "")
+    System.put_env("GIT_CONFIG_GLOBAL", @git_config)
     git_global(["config", "--global", "user.name", "Biot proof"])
     git_global(["config", "--global", "user.email", "proof@biot.test"])
     git_global(["config", "--global", "url.#{@sources}/.insteadOf", @source_prefix])

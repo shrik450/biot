@@ -10,11 +10,30 @@
 - `cli` contains the Go command-line client.
 - `config` contains shared Mix and runtime configuration.
 - `docker/linux-host` contains the Linux host image for node host tests.
+- `agent/` contains the Go agent and its vendored dependencies.
 
 The server owns authorization, durable intent, observations, and operation meaning.
 The node owns host resources and reports inspected state.
 The protocol app owns shared boundary values and codecs.
 The web and CLI code do not own domain state.
+
+## `agent/`
+
+The Go agent has four packages:
+
+- `cmd/biot-agent` owns the Unix socket listener, request dispatch, stale-socket replacement, and
+  accepted or rejected replies.
+- `protocol` owns the closed `Request` set (`PortRequest` and `ShellRequest`), the `Rejection` set,
+  and the wire bounds: request lines are limited to 16 KiB and frame payloads to 64 KiB. Its two
+  required command-line values are `--socket` and `--shell-entrypoint`.
+- `portrelay` connects a port target to `127.0.0.1:<port>` and relays until either side closes.
+- `shellsession` owns the PTY, data and resize frames, and exit status. It drains output before
+  sending the exit frame, then waits for the process and closes the session. A disconnected shell
+  gets `SIGHUP`, waits `DisconnectGrace`, then gets `SIGKILL` if needed.
+
+The PTY implementation is vendored under `agent/vendor/`. The agent starts with a clean environment;
+its shell entrypoint supplies the terminal value and the bundle supplies the socket and entrypoint
+paths.
 
 ## `apps/biot_protocol`
 
@@ -408,7 +427,8 @@ policies stay unchanged.
 - `NodePrivatePath`, `NetworkId`, and `ArtifactId` are node-owned parsed values for private paths,
   networks, and artifacts.
 - `Biot.Node.StorePath` parses one canonical path at or inside a Nix store object.
-- `Biot.Node.EnvironmentBundle` parses the format 1 gate and its four store paths.
+- `Biot.Node.EnvironmentBundle` parses the format 1 gate and its seven fields: `format`,
+  `closure_root`, `rootfs`, `entrypoint`, `shell_entrypoint`, `environment_file`, and `config_root`.
   It returns `:invalid_format` for a malformed shape or path and `:unsupported_format` for another
   numeric format.
 
@@ -423,13 +443,15 @@ Host.Outcome.t()}` and dispatches totally over every `Biot.Node.Action` variant.
 
 The effect modules own host resources:
 
-- `Host.Allocation` creates or repairs an allocation, its network, checkout, mounts,
-  root filesystem, and initialization marker. It also removes data and releases the
-  allocation.
+- `Host.Allocation` creates or repairs an allocation, its network, checkout, mounts, and
+  initialization marker. `Allocation.ensure_mounts/3` creates and chowns the selected mount set.
+  It also removes data and releases the allocation; the bundle owns the container rootfs.
 - `Host.Environment` resolves sources, persists manifests, builds bundles, records
   installations, and releases environment resources.
-- `Host.Container` starts and retires rootless Podman containers. `Host.Network`
-  creates, inspects, and removes their named private networks.
+- `Host.Container` starts and retires rootless Podman containers. `run_container` uses the bundle's
+  `--rootfs`, `--read-only`, `/tmp` and `/run` tmpfs mounts, and the five allocation mounts.
+  `Host.Network` creates, inspects, and removes their
+  named private networks.
 - `Host.SourceResolver` pins Nixpkgs and Git selectors through the configured Nix
   boundary and returns resolved source values.
 
@@ -461,7 +483,10 @@ Support modules provide the smaller boundaries:
   `Command.Stream`. It calls `Command.close/1` when a stream ends and reopens it after
   `container_events_retry_ms`. `Names.owner/1` parses the owning Biot ID from a container label.
 - `Host.Paths` owns every node-private path. Its moduledoc is the authority for
-  the data-root layout. `Paths.checkout_staging/2` names the per-Biot staging path.
+  the data-root layout. `Paths.run/2`, `Paths.secrets/2`, and `Paths.mounts/2` define the five
+  container mounts and their modes; `Paths.mounts_created_at_allocation/2` defines the four
+  mounts created before checkout. The checkout is excluded because its presence marks a completed
+  clone. `Paths.checkout_staging/2` names the per-Biot staging path.
   The root holds node-wide coordination and configuration plus per-Biot writable
   data and per-environment build state.
 - `Host.Names` derives stable network and container names and ownership labels.
@@ -530,23 +555,29 @@ cross-field rules such as reserved environment names and safe relative paths
 with the schema. Compatible module definitions merge; conflicting definitions
 fail with their source locations.
 
-`nix/build.nix` reads manifest JSON and writes bundle JSON. The manifest has the
-exact `base_nixpkgs`, `digest`, `layers`, and `project_snapshot` fields. The
-bundle reports `format`, `closure_root`, `entrypoint`, `environment_file`, and
-`config_root`. The node retains the output link as the garbage collection root.
-`nix/pin.nix` is the source-resolution artifact: `Host.SourceResolver` invokes
-`nix-instantiate --eval --strict --json` with it, and it uses `builtins.fetchGit` to
-return each source revision and NAR hash.
+`nix/agent.nix` builds the vendored Go agent with `buildGoModule` and no module download. `nix/build.nix`
+reads manifest JSON and writes bundle JSON. It builds `rootfs`, `entrypoint`, `shell_entrypoint`, and
+one environment file. `loadEnvironment` is the one secret-loading rule: it loads the bundle
+environment, then entry-specific variables, then files under `/biot/secrets`. `cleanEnvironment` is
+the one clean-environment rule.
 
-The entry point loads the generated environment and starts `supervisord`. The
-runner fits several services and the `always`, `on-failure`, and `never` restart
-rules without root or an init system. The bundle does not create a control
-socket.
+Each program gets a restart wrapper with `restartAttemptLimit = 5`,
+`restartBackoffInitialSeconds = 1`, `restartBackoffMaximumSeconds = 4`, and
+`restartHealthyRunSeconds = 60`. It owns the `always`, `on-failure`, and `never` rules, resets the
+attempt count after a healthy run, and exits 70 when it exhausts attempts. The reserved `biot-agent`
+program always runs the agent with the two required flags. The final `bundle.json` has seven fields:
+`format`, `closure_root`, `rootfs`, `entrypoint`, `shell_entrypoint`, `environment_file`, and
+`config_root`. `nix/pin.nix` remains the source-resolution artifact used by `Host.SourceResolver`.
 
-The container uses an empty, read-only root filesystem with read-only
-`/nix/store`. It mounts writable `/biot/checkout`, `/biot/home`, and
-`/biot/service-data`. The no-base-image invariant keeps all executables in the
-Nix store and makes missing private mounts fail instead of creating temporary
+`nix/module.nix` defines `biot.shell` and service `directory = { root, path }`, where `root` is
+`checkout` or `service_data`. The reserved service name is `biot-agent`; `BIOT_CONFIG_ROOT`, `HOME`,
+`PATH`, and `TERM` are reserved environment names. Compatible module definitions merge; conflicting
+definitions fail with their source locations.
+
+The entry point starts `supervisord`. The container uses the bundle's empty, read-only rootfs with
+read-only `/nix/store`, writable `/biot/checkout`, `/biot/home`, `/biot/service-data`, and `/biot/run`,
+read-only `/biot/secrets`, plus writable `/tmp` and `/run` tmpfs mounts. The no-base-image invariant
+keeps executables in the Nix store and makes missing private mounts fail instead of creating temporary
 state.
 
 The `stateful-counter` example composes base and service layers. Its service
@@ -668,15 +699,19 @@ real Linux effects, and the controller shell:
 - `reconcile_sequences_test.exs` covers running, stopped, and destroyed convergence sequences.
 - `support/reconcile_fixtures.ex` defines diagnostic-bearing inspection failures and current state shapes; `support/reconcile_generators.ex` defines property generators.
 
-The server's Linux controller test is self-contained under `test/support` and is Linux-only.
-`support/step14_controller_proof.exs` covers durable attempts, backoff, revision races, destruction, event wakeups, network isolation, diagnostic retention, and runtime-log capture lifecycle.
-`support/step9_controller_runner.exs` starts both controller proofs in the Linux test process.
-`support/step9_full_proof.exs` covers command capture settings, process cleanup, lost responses, controller startup and retry, cancellation, reconnects, and orphan reporting.
-`biot_controller_linux_integration_test.exs` runs that server and node proof with real resources.
-`control_protocol_integration_test.exs` covers diagnostics, runtime-log authorization, request deadlines, disconnect cleanup, destruction report replay, and snapshot omission.
+The Go tests cover `protocol/request_test.go`, `protocol/frame_test.go`,
+`shellsession/session_test.go`, and `cmd/biot-agent/main_test.go`. They include fuzz targets for
+requests, frames, and frame round trips, plus real Unix-socket, TCP-relay, and PTY tests.
 
-`docker/linux-host/run-tests.sh` builds or reuses the privileged Linux test image
-and runs the full Mix test suite inside it.
+The node tests cover the rewritten bundle, path, Nix, and Linux host tests. The Nix suite checks the
+seven-field bundle, rootfs, environment loading, reserved names, directories, restart limits, and
+service state. `host_linux_integration_test.exs` checks real Podman mounts, rootfs, ownership, and
+container effects. The server's Linux controller proof is marked skipped: it is a single unlabelled
+result for dozens of assertions and will be replaced by bounded per-contract tests. Its support
+files remain available for that replacement.
+
+`docker/linux-host/run-tests.sh` runs `go test ./...` in `agent/` before the full Mix test suite
+inside the Linux host image.
 
 ## Releases
 
@@ -692,7 +727,8 @@ Build them with `MIX_ENV=prod mix release server` and `MIX_ENV=prod mix release 
 networks and uses `usermod` to assign subordinate user and group IDs.
 `/result` and `/result-*` are ignored.
 
-`.mise.toml` pins Erlang 28.5 and Elixir 1.20.4 with OTP 28.
+`.mise.toml` pins Erlang 28.5 and Elixir 1.20.4 with OTP 28. The Linux host image includes Go
+1.26.4, and the image tests use that toolchain.
 Run Elixir commands through mise:
 
 ```sh

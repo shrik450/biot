@@ -2,12 +2,14 @@ defmodule Biot.Node.Host.Paths do
   @moduledoc """
   Owns the node-private layout below the configured data root.
 
-  Each Biot has `checkout`, `home`, and `service-data` writable mounts. Its completion marker and
-  container identity sit beside those mounts. Each environment has a derived build manifest and a
-  `root` symlink into the Nix store. Inspection reads `bundle.json` through that root. The SQLite journal and `flock` file sit directly below the data root. A Podman
-  module selects the configured rootless network helper. Each Biot also has an empty root
-  filesystem owned by its UID range. Diagnostics and runtime logs are node-private siblings of
-  the runtime and environment directories, so no container mount includes them.
+  Each Biot has writable checkout, home, service data, and run mounts. Its secrets mount is read
+  only in the container. The completion marker and container identity sit beside these mounts.
+  Each environment has a derived build manifest and a `root` symlink into the Nix store.
+  Inspection reads `bundle.json` through that root. The container-side mount targets listed here
+  match the mount points and entries that `nix/build.nix` builds into the bundle.
+  The SQLite journal and `flock` file sit below the data root. A Podman module selects the configured
+  rootless network helper. Diagnostics and
+  runtime logs are node-private siblings, so no container mount includes them.
   """
 
   alias Biot.Node.Host.Config
@@ -64,12 +66,32 @@ defmodule Biot.Node.Host.Paths do
   @spec service_data(Config.t(), BiotId.t()) :: String.t()
   def service_data(config, biot_id), do: Path.join(biot(config, biot_id), "service-data")
 
-  @spec mounts(Config.t(), BiotId.t()) :: [{String.t(), String.t()}]
+  @spec run(Config.t(), BiotId.t()) :: String.t()
+  def run(config, biot_id), do: Path.join(biot(config, biot_id), "run")
+
+  @spec secrets(Config.t(), BiotId.t()) :: String.t()
+  def secrets(config, biot_id), do: Path.join(biot(config, biot_id), "secrets")
+
+  @type mount_mode :: :rw | :ro
+  @type mount :: {String.t(), String.t(), mount_mode()}
+
+  @spec mounts(Config.t(), BiotId.t()) :: [mount()]
   def mounts(config, biot_id) do
     [
-      {checkout(config, biot_id), "/biot/checkout"},
-      {home(config, biot_id), "/biot/home"},
-      {service_data(config, biot_id), "/biot/service-data"}
+      {checkout(config, biot_id), "/biot/checkout", :rw}
+      | mounts_created_at_allocation(config, biot_id)
+    ]
+  end
+
+  # The checkout is missing here because a present checkout directory is what marks the clone
+  # done: if `allocate` created it, every Biot would initialize with an empty checkout.
+  @spec mounts_created_at_allocation(Config.t(), BiotId.t()) :: [mount()]
+  def mounts_created_at_allocation(config, biot_id) do
+    [
+      {home(config, biot_id), "/biot/home", :rw},
+      {service_data(config, biot_id), "/biot/service-data", :rw},
+      {run(config, biot_id), "/biot/run", :rw},
+      {secrets(config, biot_id), "/biot/secrets", :ro}
     ]
   end
 
@@ -103,7 +125,4 @@ defmodule Biot.Node.Host.Paths do
   @spec environment_root(Config.t(), EnvironmentId.t()) :: String.t()
   def environment_root(config, environment_id),
     do: Path.join(environment(config, environment_id), "root")
-
-  @spec rootfs(Config.t(), BiotId.t()) :: String.t()
-  def rootfs(config, biot_id), do: Path.join(biot(config, biot_id), "rootfs")
 end
