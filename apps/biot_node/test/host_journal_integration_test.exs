@@ -225,7 +225,7 @@ defmodule Biot.Node.HostJournalIntegrationTest do
     assert {:ok, _allocation} = Journal.put_allocation(caller)
     assert {:ok, _resolution} = Journal.put_resolution(owner.biot_id, e1(), manifest())
 
-    action = {:release_environment, e1()}
+    action = {:release_environment, e1(), caller}
     host_context = %Context{biot_id: caller.biot_id, config: config(context.data_root)}
 
     assert {:error, %Biot.Node.Host.Outcome{outcome: :ownership_mismatch}} =
@@ -281,8 +281,6 @@ defmodule Biot.Node.HostJournalIntegrationTest do
       uid_range_count: 1_024,
       uid_range_limit: 165_536,
       git_executable: "git",
-      nix_executable: "nix",
-      nix_instantiate_executable: "nix-instantiate",
       podman_executable: "podman",
       setsid_executable: "setsid",
       mkfifo_executable: "mkfifo",
@@ -290,11 +288,14 @@ defmodule Biot.Node.HostJournalIntegrationTest do
       cat_executable: "cat",
       sleep_executable: "sleep",
       podman_network_command: "slirp4netns",
-      nix_build_file: Path.join(project_root, "nix/build.nix"),
-      nix_pin_file: Path.join(project_root, "nix/pin.nix"),
+      builder_image: "example.test/nix@sha256:#{String.duplicate("a", 64)}",
+      build_support_dir: project_root,
+      binary_cache_urls: ["https://cache.example.test"],
+      binary_cache_keys: ["cache.example.test:key"],
       nixpkgs_repository: "https://github.com/NixOS/nixpkgs",
       nixpkgs_ref: "nixos-unstable",
       command_timeout_ms: 120_000,
+      worker_timeout_ms: 120_000,
       command_max_output_bytes: 64_000,
       command_max_stderr_bytes: 64_000,
       runtime_log_max_bytes: 64_000,

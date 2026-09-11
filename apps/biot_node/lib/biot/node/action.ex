@@ -17,18 +17,20 @@ defmodule Biot.Node.Action do
   alias Biot.Protocol.RepositorySource
 
   @typedoc """
-  `release_environment` gives back both the prepared artifact and the resolution snapshot of one
-  environment, because a released environment needs neither.
+  `release_environment` gives back both the prepared artifact and the staged inputs of one
+  environment, because a released environment needs neither. It names the allocation because both
+  live under it, and because reclaiming the store space is work only that allocation's build
+  worker may do.
   """
   @type t ::
           {:allocate, BiotId.t()}
           | {:initialize, Allocation.t(), RepositorySource.t()}
           | {:resolve, EnvironmentId.t(), EnvironmentSelection.t(), Allocation.t()}
-          | {:prepare, EnvironmentId.t(), Manifest.t()}
+          | {:prepare, EnvironmentId.t(), Manifest.t(), Allocation.t()}
           | {:retire, IncarnationId.t()}
           | {:install, Allocation.t(), ArtifactId.t(), EnvironmentId.t()}
           | {:start, Allocation.t(), Installation.t()}
-          | {:release_environment, EnvironmentId.t()}
+          | {:release_environment, EnvironmentId.t(), Allocation.t()}
           | {:remove_data, Allocation.t()}
           | {:release_allocation, Allocation.t()}
 
@@ -53,7 +55,10 @@ defmodule Biot.Node.Action do
     %{stage: :resolve, cancellable?: true}
   end
 
-  def metadata({:prepare, _environment_id, _manifest}), do: %{stage: :prepare, cancellable?: true}
+  def metadata({:prepare, _environment_id, _manifest, _allocation}) do
+    %{stage: :prepare, cancellable?: true}
+  end
+
   def metadata({:retire, _incarnation_id}), do: %{stage: :retire, cancellable?: false}
 
   def metadata({:install, _allocation, _artifact_id, _environment_id}) do
@@ -62,7 +67,7 @@ defmodule Biot.Node.Action do
 
   def metadata({:start, _allocation, _installation}), do: %{stage: :start, cancellable?: true}
 
-  def metadata({:release_environment, _environment_id}) do
+  def metadata({:release_environment, _environment_id, _allocation}) do
     %{stage: :release_environment, cancellable?: false}
   end
 

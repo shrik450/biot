@@ -191,17 +191,21 @@ defmodule Step9Run do
       uid_range_count: 1_024,
       uid_range_limit: 165_536,
       git_executable: "git",
-      nix_executable: "nix",
-      nix_instantiate_executable: "nix-instantiate",
       podman_executable: "podman",
       podman_network_command: "slirp4netns",
       flock_executable: "flock",
       setsid_executable: "setsid",
-      nix_build_file: Path.join(project_root, "nix/build.nix"),
-      nix_pin_file: Path.join(project_root, "nix/pin.nix"),
+      builder_image:
+        "docker.io/nixos/nix@sha256:238dfe9a743a6e276e8e04d1db13b978c9bd91741445dec5d733c579596fea79",
+      build_support_dir: project_root,
+      binary_cache_urls: ["https://cache.nixos.org"],
+      binary_cache_keys: [
+        "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+      ],
       nixpkgs_repository: "https://github.com/NixOS/nixpkgs",
       nixpkgs_ref: "nixos-unstable",
       host_command_timeout_ms: 600_000,
+      worker_timeout_ms: 600_000,
       host_command_max_output_bytes: 256_000,
       host_command_max_stderr_bytes: 256_000,
       runtime_log_max_bytes: 4_096,
@@ -325,7 +329,9 @@ defmodule Step9Run do
 
     IO.puts(await(fn -> service_processes(config, name) end, 60_000))
 
-    {:ok, bundle} = HostEnvironment.bundle(config, observation.installed_environment_id)
+    {:ok, bundle} =
+      HostEnvironment.bundle(config, biot_id, observation.installed_environment_id)
+
     environment = File.read!(StorePath.to_string(bundle.environment_file))
 
     IO.inspect(

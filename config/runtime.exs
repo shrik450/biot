@@ -99,6 +99,11 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
     System.get_env(name) || raise "environment variable #{name} is missing"
   end
 
+  # A cache list is whitespace separated, the same way Nix itself writes one.
+  node_list_env = fn name ->
+    name |> node_required_env.() |> String.split(~r/\s+/, trim: true)
+  end
+
   node_fingerprint = node_required_env.("BIOT_SERVER_FINGERPRINT")
 
   unless Regex.match?(~r/\A[0-9a-f]{64}\z/, node_fingerprint) do
@@ -124,9 +129,6 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
         uid_range_limit:
           node_integer_env.("BIOT_NODE_UID_RANGE_LIMIT", uid_range_base + 65_536, 1),
         git_executable: System.get_env("BIOT_NODE_GIT", "git"),
-        nix_executable: System.get_env("BIOT_NODE_NIX", "nix"),
-        nix_instantiate_executable:
-          System.get_env("BIOT_NODE_NIX_INSTANTIATE", "nix-instantiate"),
         podman_executable: System.get_env("BIOT_NODE_PODMAN", "podman"),
         podman_network_command: System.get_env("BIOT_NODE_PODMAN_NETWORK_COMMAND", "slirp4netns"),
         flock_executable: System.get_env("BIOT_NODE_FLOCK", "flock"),
@@ -135,8 +137,10 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
         head_executable: System.get_env("BIOT_NODE_HEAD", "head"),
         cat_executable: System.get_env("BIOT_NODE_CAT", "cat"),
         sleep_executable: System.get_env("BIOT_NODE_SLEEP", "sleep"),
-        nix_build_file: node_required_env.("BIOT_NODE_NIX_BUILD_FILE"),
-        nix_pin_file: node_required_env.("BIOT_NODE_NIX_PIN_FILE"),
+        builder_image: node_required_env.("BIOT_NODE_BUILDER_IMAGE"),
+        build_support_dir: node_required_env.("BIOT_NODE_BUILD_SUPPORT_DIR"),
+        binary_cache_urls: node_list_env.("BIOT_NODE_BINARY_CACHE_URLS"),
+        binary_cache_keys: node_list_env.("BIOT_NODE_BINARY_CACHE_KEYS"),
         nixpkgs_repository:
           System.get_env("BIOT_NODE_NIXPKGS_REPOSITORY", "https://github.com/NixOS/nixpkgs"),
         nixpkgs_ref: System.get_env("BIOT_NODE_NIXPKGS_REF", "nixos-unstable"),
@@ -146,6 +150,7 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
           node_integer_env.("BIOT_NODE_HOST_COMMAND_MAX_OUTPUT_BYTES", 256_000, 1),
         host_command_max_stderr_bytes:
           node_integer_env.("BIOT_NODE_HOST_COMMAND_MAX_STDERR_BYTES", 256_000, 1),
+        worker_timeout_ms: node_integer_env.("BIOT_NODE_WORKER_TIMEOUT_MS", 3_600_000, 1),
         server_host: node_required_env.("BIOT_SERVER_HOST"),
         server_port: node_integer_env.("BIOT_SERVER_PORT", 4443, 1),
         server_fingerprint: node_fingerprint,

@@ -71,18 +71,11 @@ defmodule Biot.Protocol.TestGenerators do
 
   def repository_source do
     gen all(
-          kind <- member_of([:https, :ssh, :scp]),
           host <- alphanumeric_text(1, 12),
           path <- list_of(alphanumeric_text(1, 12), min_length: 1, max_length: 4)
         ) do
       joined_path = Enum.join(path, "/")
-
-      url =
-        case kind do
-          :https -> "https://#{host}.example/#{joined_path}.git"
-          :ssh -> "ssh://git@#{host}.example/#{joined_path}.git"
-          :scp -> "git@#{host}.example:#{joined_path}.git"
-        end
+      url = "https://#{host}.example/#{joined_path}.git"
 
       {:ok, repository} = RepositorySource.parse(url)
       repository

@@ -2,17 +2,13 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
   use ExUnit.Case, async: false
 
   alias Biot.Node.EnvironmentBundle
+  alias Biot.Node.Host.StagedInputs
   alias Biot.Node.StorePath
-  alias Biot.Protocol.Manifest
-  alias Biot.Protocol.PinnedSource
-  alias Biot.Protocol.RepositorySource
-  alias Biot.Protocol.SourceSelector
 
   @moduletag :nix
   @moduletag timeout: 900_000
 
   @nixpkgs_revision "ac62194c3917d5f474c1a844b6fd6da2db95077d"
-  @nixpkgs_nar_hash "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w="
   @wrong_nar_hash "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
   setup_all do
@@ -20,6 +16,16 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
     root = temporary_directory("biot-step7-nix")
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf!(root) end)
+
+    invalid_directories = [
+      "",
+      "/tmp",
+      "nested//path",
+      "./nested",
+      "nested/./path",
+      "../path",
+      "nested/../path"
+    ]
 
     sources = %{
       base:
@@ -69,14 +75,49 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
             };
           }
           '''
-        )
+        ),
+      invalid_directories:
+        Enum.with_index(invalid_directories, fn path, index ->
+          git_source(
+            root,
+            "invalid-directory-#{index}",
+            ~s({ pkgs, ... }: { biot.services.bad = { command = [ "${pkgs.coreutils}/bin/true" ]; directory.path = #{inspect(path)}; }; }\n)
+          )
+        end)
     }
 
-    manifest = manifest([sources.base.pin, sources.service.pin])
-    manifest_path = write_manifest(root, "compatible", Manifest.encode(manifest))
+    named_sources = [
+      base: sources.base,
+      service: sources.service,
+      conflict: sources.conflict,
+      home: sources.home,
+      path: sources.path,
+      term: sources.term,
+      config_root: sources.config_root,
+      reserved_service: sources.reserved_service,
+      default: sources.default,
+      directories: sources.directories
+    ]
+
+    layer_sources = Keyword.values(named_sources) ++ sources.invalid_directories
+    staged_link = Path.join(root, "staged")
+    assert {output, 0} = fetch_inputs(project_root, layer_sources, staged_link)
+
+    pins_document = staged_link |> Path.join("pins.json") |> File.read!() |> Jason.decode!()
+    assert {:ok, _staged_inputs} = StagedInputs.parse(pins_document), output
+
+    layer_inputs = pins_document["layers"]
+    {named_inputs, invalid_directory_inputs} = Enum.split(layer_inputs, length(named_sources))
+    inputs = named_sources |> Keyword.keys() |> Enum.zip(named_inputs) |> Map.new()
+
     out_link = Path.join(root, "artifact")
 
-    assert {output, 0} = nix_build(project_root, manifest_path, out_link)
+    assert {output, 0} =
+             nix_build(
+               pins_document,
+               [inputs.base, inputs.service],
+               out_link
+             )
 
     bundle_document = out_link |> Path.join("bundle.json") |> File.read!() |> Jason.decode!()
     assert {:ok, bundle} = EnvironmentBundle.parse(bundle_document), output
@@ -84,8 +125,9 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
     {:ok,
      project_root: project_root,
      root: root,
-     sources: sources,
-     manifest: manifest,
+     inputs: inputs,
+     invalid_directory_inputs: invalid_directory_inputs,
+     pins_document: pins_document,
      out_link: out_link,
      bundle_document: bundle_document,
      bundle: bundle}
@@ -191,16 +233,8 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
   end
 
   test "conflicting layers fail with both source files", context do
-    manifest_path =
-      write_manifest(
-        context.root,
-        "conflict",
-        context.sources
-        |> then(&manifest([&1.base.pin, &1.conflict.pin]))
-        |> Manifest.encode()
-      )
-
-    {output, status} = nix_build(context.project_root, manifest_path)
+    {output, status} =
+      nix_build(context.pins_document, [context.inputs.base, context.inputs.conflict])
 
     assert status != 0
     assert output =~ "stateful-counter"
@@ -217,17 +251,7 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
 
   test "reserved shared environment variables name the option authors must use", context do
     for name <- [:home, :path, :term, :config_root] do
-      manifest_path =
-        write_manifest(
-          context.root,
-          "reserved-#{name}",
-          context.sources
-          |> Map.fetch!(name)
-          |> then(&manifest([&1.pin]))
-          |> Manifest.encode()
-        )
-
-      {output, status} = nix_build(context.project_root, manifest_path)
+      {output, status} = nix_build(context.pins_document, [Map.fetch!(context.inputs, name)])
 
       assert status != 0
       assert output =~ String.upcase(to_string(name))
@@ -237,7 +261,7 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
   end
 
   test "the reserved agent service name is rejected with its source", context do
-    {output, status} = build_source(context, "reserved-service", context.sources.reserved_service)
+    {output, status} = build_source(context, context.inputs.reserved_service)
 
     assert status != 0
     assert output =~ ~s(service name "biot-agent" is reserved)
@@ -245,25 +269,8 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
   end
 
   test "service directories reject every unsafe path with its source", context do
-    invalid = [
-      "",
-      "/tmp",
-      "nested//path",
-      "./nested",
-      "nested/./path",
-      "../path",
-      "nested/../path"
-    ]
-
-    for {path, index} <- Enum.with_index(invalid) do
-      source =
-        git_source(
-          context.root,
-          "invalid-directory-#{index}",
-          ~s({ pkgs, ... }: { biot.services.bad = { command = [ "${pkgs.coreutils}/bin/true" ]; directory.path = #{inspect(path)}; }; }\n)
-        )
-
-      {output, status} = build_source(context, "invalid-directory-#{index}", source)
+    for input <- context.invalid_directory_inputs do
+      {output, status} = build_source(context, input)
       assert status != 0
       assert output =~ "directory.path"
       assert output =~ "default.nix"
@@ -271,7 +278,7 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
   end
 
   test "service directories default to checkout and resolve both roots", context do
-    {bundle, _document} = build_bundle(context, "directories", [context.sources.directories.pin])
+    {bundle, _document} = build_bundle(context, "directories", [context.inputs.directories])
     requisites = requisites(bundle)
     checkout = executable_text(requisites, "biot-service-checkout", "biot-service-checkout")
     data = executable_text(requisites, "biot-service-data", "biot-service-data")
@@ -282,7 +289,7 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
 
   test "the shell defaults to bash and accepts a zsh override", context do
     {default_bundle, _document} =
-      build_bundle(context, "default-shell", [context.sources.default.pin])
+      build_bundle(context, "default-shell", [context.inputs.default])
 
     default_shell =
       executable_text(requisites(default_bundle), "biot-shell-command", "biot-shell-command")
@@ -295,49 +302,26 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
   end
 
   test "a wrong layer NAR hash fails the build", context do
-    source = context.sources.base
-    wrong_pin = pin_git(source.url, source.revision, @wrong_nar_hash)
-
-    manifest_path =
-      write_manifest(context.root, "wrong-hash", manifest([wrong_pin]) |> Manifest.encode())
-
-    {output, status} = nix_build(context.project_root, manifest_path)
+    wrong_input = Map.put(context.inputs.base, "nar_hash", @wrong_nar_hash)
+    {output, status} = nix_build(context.pins_document, [wrong_input])
 
     assert status != 0
     assert output =~ "NAR hash mismatch"
     assert output =~ @wrong_nar_hash
   end
 
-  test "an extra manifest key is rejected with its name", context do
-    manifest_path =
-      write_manifest(
-        context.root,
-        "extra-key",
-        context.manifest
-        |> Manifest.encode()
-        |> Map.put("unexpected_field", true)
-      )
+  test "an extra staged-input key is rejected", context do
+    document = Map.put(context.pins_document, "unexpected_field", true)
 
-    {output, status} = nix_build(context.project_root, manifest_path)
-
-    assert status != 0
-    assert output =~ "unexpected_field"
+    assert Map.has_key?(document, "unexpected_field")
+    assert {:error, :invalid_format} = StagedInputs.parse(document)
   end
 
-  test "a missing manifest key is rejected with its name", context do
-    manifest_path =
-      write_manifest(
-        context.root,
-        "missing-key",
-        context.manifest
-        |> Manifest.encode()
-        |> Map.delete("layers")
-      )
+  test "a missing staged-input key is rejected", context do
+    document = Map.delete(context.pins_document, "layers")
 
-    {output, status} = nix_build(context.project_root, manifest_path)
-
-    assert status != 0
-    assert output =~ "layers"
+    refute Map.has_key?(document, "layers")
+    assert {:error, :invalid_format} = StagedInputs.parse(document)
   end
 
   test "the stateful service keeps private state across a container restart", context do
@@ -416,17 +400,13 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
     assert mounts =~ "/biot/secrets false"
   end
 
-  defp build_source(context, name, source) do
-    manifest_path =
-      write_manifest(context.root, name, manifest([source.pin]) |> Manifest.encode())
-
-    nix_build(context.project_root, manifest_path)
+  defp build_source(context, input) do
+    nix_build(context.pins_document, [input])
   end
 
-  defp build_bundle(context, name, pins) do
-    manifest_path = write_manifest(context.root, name, manifest(pins) |> Manifest.encode())
+  defp build_bundle(context, name, inputs) do
     out_link = Path.join(context.root, "artifact-#{name}")
-    assert {output, 0} = nix_build(context.project_root, manifest_path, out_link)
+    assert {output, 0} = nix_build(context.pins_document, inputs, out_link)
     document = out_link |> Path.join("bundle.json") |> File.read!() |> Jason.decode!()
     assert {:ok, bundle} = EnvironmentBundle.parse(document), output
     {bundle, document}
@@ -456,13 +436,6 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
     |> is_integer()
   end
 
-  defp manifest(layers) do
-    {:ok, base_nixpkgs} =
-      PinnedSource.pin(SourceSelector.nixpkgs(), @nixpkgs_revision, @nixpkgs_nar_hash)
-
-    Manifest.build(base_nixpkgs, layers, nil)
-  end
-
   defp git_source(root, name, contents) do
     path = Path.join(root, name)
     File.mkdir_p!(path)
@@ -476,9 +449,7 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
 
     revision = git!(path, ["rev-parse", "HEAD"])
     url = "file://#{path}"
-    nar_hash = source_nar_hash(url, revision)
-
-    %{url: url, revision: revision, nar_hash: nar_hash, pin: pin_git(url, revision, nar_hash)}
+    %{url: url, revision: revision}
   end
 
   defp git!(path, args) do
@@ -488,63 +459,78 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
     end
   end
 
-  defp source_nar_hash(url, revision) do
-    expression =
-      "(builtins.fetchGit { url = #{Jason.encode!(url)}; rev = #{Jason.encode!(revision)}; }).narHash"
+  defp fetch_inputs(project_root, sources, out_link) do
+    selection = %{
+      "base_nixpkgs" => %{
+        "url" => "https://github.com/NixOS/nixpkgs",
+        "ref" => @nixpkgs_revision
+      },
+      "layers" =>
+        Enum.map(sources, fn source ->
+          %{"url" => source.url, "ref" => source.revision}
+        end)
+    }
 
-    case System.cmd(
-           "nix",
-           [
-             "eval",
-             "--extra-experimental-features",
-             "nix-command",
-             "--impure",
-             "--raw",
-             "--expr",
-             expression
-           ],
-           stderr_to_stdout: true
-         ) do
-      {output, 0} -> String.trim(output)
-      {output, status} -> raise "nix eval exited with #{status}: #{output}"
-    end
-  end
-
-  defp pin_git(url, revision, nar_hash) do
-    {:ok, selector} = SourceSelector.new(%RepositorySource{url: url}, "main")
-    {:ok, pinned} = PinnedSource.pin(selector, revision, nar_hash)
-    pinned
-  end
-
-  defp write_manifest(root, name, encoded) do
-    path = Path.join(root, "#{name}.json")
-    File.write!(path, Jason.encode!(encoded))
-    path
-  end
-
-  defp nix_build(project_root, manifest_path, out_link \\ nil) do
     args = [
       "build",
       "--extra-experimental-features",
-      "nix-command",
-      "--file",
-      Path.join(project_root, "nix/build.nix"),
+      "nix-command flakes",
+      "--impure",
+      "--expr",
+      "import #{Path.join(project_root, "nix/fetch.nix")}",
       "--argstr",
-      "manifest",
-      manifest_path,
+      "selection",
+      Jason.encode!(selection),
+      "--arg",
+      "buildSupport",
+      project_root,
+      "--argstr",
+      "system",
+      nix_system(),
+      "--out-link",
+      out_link
+    ]
+
+    System.cmd("nix", args, cd: project_root, stderr_to_stdout: true)
+  end
+
+  defp nix_build(pins_document, layer_inputs, out_link \\ nil) do
+    build_support = pins_document["build_support"]
+
+    staged = %{
+      "nixpkgs" => encode_input(pins_document["base_nixpkgs"]),
+      "layers" => Enum.map(layer_inputs, &encode_input/1)
+    }
+
+    args = [
+      "build",
+      "--extra-experimental-features",
+      "nix-command flakes",
+      "--option",
+      "pure-eval",
+      "true",
+      "--expr",
+      build_expression(build_support),
+      "--argstr",
+      "staged",
+      Jason.encode!(staged),
       "--argstr",
       "system",
       nix_system()
     ]
 
-    args =
-      if out_link do
-        args ++ ["--out-link", out_link]
-      else
-        args ++ ["--no-link"]
-      end
+    args = if out_link, do: args ++ ["--out-link", out_link], else: args ++ ["--no-link"]
 
-    System.cmd("nix", args, cd: project_root, stderr_to_stdout: true)
+    System.cmd("nix", args, stderr_to_stdout: true)
+  end
+
+  defp build_expression(input) do
+    ~s|import (builtins.fetchTree { type = "path"; path = "#{input["store_path"]}"; | <>
+      ~s|narHash = "#{input["nar_hash"]}"; } + "/nix/build.nix")|
+  end
+
+  defp encode_input(input) do
+    %{"path" => input["store_path"], "narHash" => input["nar_hash"]}
   end
 
   defp nix_system do

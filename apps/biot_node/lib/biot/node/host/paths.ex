@@ -4,12 +4,20 @@ defmodule Biot.Node.Host.Paths do
 
   Each Biot has writable checkout, home, service data, and run mounts. Its secrets mount is read
   only in the container. The completion marker and container identity sit beside these mounts.
-  Each environment has a derived build manifest and a `root` symlink into the Nix store.
-  Inspection reads `bundle.json` through that root. The container-side mount targets listed here
-  match the mount points and entries that `nix/build.nix` builds into the bundle.
-  The SQLite journal and `flock` file sit below the data root. A Podman module selects the configured
-  rootless network helper. Diagnostics and
-  runtime logs are node-private siblings, so no container mount includes them.
+  Everything Nix owns for that Biot is under the same root: `store` holds its private Nix store
+  and database, `build` holds worker scratch and the staged build support, and `environments`
+  holds one directory per environment with the `staged` and `root` out-links a build worker
+  writes. The container-side mount targets listed here match the mount points that
+  `nix/build.nix` builds into the bundle.
+
+  Invariant: `/nix/store` names a different physical directory in every Biot. The logical path
+  inside a worker and a runtime is always `/nix/store`, which is what keeps binary cache
+  substitutes usable; `Biot.Node.Host.PrivateStore` owns the translation back to a host path, and
+  `Biot.Node.Host.Worker.Layout` owns what a worker sees.
+
+  The SQLite journal, `flock` file, Podman module, worker Nix configuration, and the empty Git
+  template sit below the data root. Diagnostics and runtime logs are node-private siblings, so no
+  container mount includes them.
   """
 
   alias Biot.Node.Host.Config
@@ -31,6 +39,14 @@ defmodule Biot.Node.Host.Paths do
 
   @spec podman_config(Config.t()) :: String.t()
   def podman_config(%Config{data_root: root}), do: Path.join(root, "podman.conf")
+
+  @doc "The Nix configuration every build worker reads. Operator policy lives in one file."
+  @spec worker_nix_config(Config.t()) :: String.t()
+  def worker_nix_config(%Config{data_root: root}), do: Path.join(root, "nix.conf")
+
+  @doc "The empty template directory every Biot-managed Git call uses instead of the user's."
+  @spec git_template(Config.t()) :: String.t()
+  def git_template(%Config{data_root: root}), do: Path.join(root, "git-template")
 
   @spec diagnostics(Config.t()) :: String.t()
   def diagnostics(%Config{data_root: root}), do: Path.join(root, "diagnostics")
@@ -72,13 +88,58 @@ defmodule Biot.Node.Host.Paths do
   @spec secrets(Config.t(), BiotId.t()) :: String.t()
   def secrets(config, biot_id), do: Path.join(biot(config, biot_id), "secrets")
 
+  @doc "The root of the Biot's private Nix store and database, as a Nix store root."
+  @spec store_root(Config.t(), BiotId.t()) :: String.t()
+  def store_root(config, biot_id), do: Path.join(biot(config, biot_id), "store")
+
+  @spec store(Config.t(), BiotId.t()) :: String.t()
+  def store(config, biot_id), do: Path.join(store_root(config, biot_id), "nix/store")
+
+  @doc "Worker scratch: the build directory, the Nix fetcher cache, and the worker's home."
+  @spec scratch(Config.t(), BiotId.t()) :: String.t()
+  def scratch(config, biot_id), do: Path.join(biot(config, biot_id), "build")
+
+  @doc """
+  The copy of this release's Nix build support that a worker evaluates.
+
+  It stays owned by the node, because the node rewrites it on every resolution so a node upgrade
+  is picked up without retaining the old one, and a worker only ever reads it.
+  """
+  @spec build_support(Config.t(), BiotId.t()) :: String.t()
+  def build_support(config, biot_id), do: Path.join(biot(config, biot_id), "support")
+
+  @spec environments(Config.t(), BiotId.t()) :: String.t()
+  def environments(config, biot_id), do: Path.join(biot(config, biot_id), "environments")
+
+  @spec environment(Config.t(), BiotId.t(), EnvironmentId.t()) :: String.t()
+  def environment(config, biot_id, environment_id) do
+    Path.join(environments(config, biot_id), EnvironmentId.to_string(environment_id))
+  end
+
+  @doc "The fetch phase's out-link: the staged inputs of one environment, and its GC root."
+  @spec staged(Config.t(), BiotId.t(), EnvironmentId.t()) :: String.t()
+  def staged(config, biot_id, environment_id) do
+    Path.join(environment(config, biot_id, environment_id), "staged")
+  end
+
+  @doc "The build phase's out-link: the prepared bundle of one environment, and its GC root."
+  @spec environment_root(Config.t(), BiotId.t(), EnvironmentId.t()) :: String.t()
+  def environment_root(config, biot_id, environment_id) do
+    Path.join(environment(config, biot_id, environment_id), "root")
+  end
+
   @type mount_mode :: :rw | :ro
   @type mount :: {String.t(), String.t(), mount_mode()}
 
-  @spec mounts(Config.t(), BiotId.t()) :: [mount()]
-  def mounts(config, biot_id) do
+  @doc """
+  What a runtime container mounts. It sees its own store read only and nothing Nix writes: no
+  `/nix/var`, no daemon socket, no scratch, and no other Biot.
+  """
+  @spec runtime_mounts(Config.t(), BiotId.t()) :: [mount()]
+  def runtime_mounts(config, biot_id) do
     [
-      {checkout(config, biot_id), "/biot/checkout", :rw}
+      {checkout(config, biot_id), "/biot/checkout", :rw},
+      {store(config, biot_id), "/nix/store", :ro}
       | mounts_created_at_allocation(config, biot_id)
     ]
   end
@@ -95,6 +156,23 @@ defmodule Biot.Node.Host.Paths do
     ]
   end
 
+  @doc """
+  Every private directory `allocate` creates and hands to the allocation's own user range.
+
+  The store directory is listed as well as its root so a runtime's mount source exists before the
+  first build writes anything. `environments/` is not here: the node creates and removes one
+  directory per environment inside it, and hands each of those to the allocation on its own.
+  """
+  @spec allocation_owned_directories(Config.t(), BiotId.t()) :: [String.t()]
+  def allocation_owned_directories(config, biot_id) do
+    Enum.map(mounts_created_at_allocation(config, biot_id), &elem(&1, 0)) ++
+      [
+        store_root(config, biot_id),
+        store(config, biot_id),
+        scratch(config, biot_id)
+      ]
+  end
+
   @spec marker(Config.t(), BiotId.t()) :: String.t()
   def marker(config, biot_id), do: Path.join(biot(config, biot_id), "marker")
 
@@ -109,20 +187,4 @@ defmodule Biot.Node.Host.Paths do
   def container_identity(config, biot_id) do
     Path.join(biot(config, biot_id), "container-id")
   end
-
-  @spec environments(Config.t()) :: String.t()
-  def environments(%Config{data_root: root}), do: Path.join(root, "environments")
-
-  @spec environment(Config.t(), EnvironmentId.t()) :: String.t()
-  def environment(config, environment_id) do
-    Path.join(environments(config), EnvironmentId.to_string(environment_id))
-  end
-
-  @spec manifest(Config.t(), EnvironmentId.t()) :: String.t()
-  def manifest(config, environment_id),
-    do: Path.join(environment(config, environment_id), "manifest.json")
-
-  @spec environment_root(Config.t(), EnvironmentId.t()) :: String.t()
-  def environment_root(config, environment_id),
-    do: Path.join(environment(config, environment_id), "root")
 end

@@ -3,14 +3,14 @@ defmodule Biot.Node.Host.EnvironmentInspection do
 
   alias Biot.Node.ArtifactId
   alias Biot.Node.Diagnostic
-  alias Biot.Node.Host.FileSystem
   alias Biot.Node.Host.Outcome
   alias Biot.Node.Installation
   alias Biot.Node.NodeState
   alias Biot.Node.Resolution
   alias Biot.Protocol.EnvironmentId
 
-  @type resolution_fact :: :not_needed | FileSystem.fact(:directory)
+  @typedoc "Whether one environment's staged inputs are still readable in the private store."
+  @type resolution_fact :: :present | :absent
   @type artifact_fact :: :absent | {:present, ArtifactId.t()} | {:error, {term(), String.t()}}
 
   @spec resolutions([{Resolution.t(), resolution_fact()}]) :: %{
@@ -64,21 +64,9 @@ defmodule Biot.Node.Host.EnvironmentInspection do
     {:unknown, installation, failure}
   end
 
-  defp resolution_state(%Resolution{} = resolution, :not_needed), do: {:present, resolution}
+  defp resolution_state(%Resolution{} = resolution, :present), do: {:present, resolution}
 
-  defp resolution_state(%Resolution{} = resolution, {:present, :directory}),
-    do: {:present, resolution}
-
+  # Staged inputs the private store no longer holds make this resolution lost: the pins are still
+  # true, but nothing can be built from them until the fetch phase stages their content again.
   defp resolution_state(%Resolution{} = resolution, :absent), do: {:lost, resolution}
-
-  defp resolution_state(%Resolution{} = resolution, {:error, reason}) do
-    failure =
-      Outcome.inspection(
-        :resolution,
-        reason,
-        Diagnostic.text("the project snapshot could not be inspected")
-      )
-
-    {:unknown, resolution, failure}
-  end
 end

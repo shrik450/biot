@@ -9,9 +9,12 @@ defmodule Biot.Node.Host.Allocation do
   alias Biot.Node.Host.Context
   alias Biot.Node.Host.DataInspection
   alias Biot.Node.Host.FileSystem
+  alias Biot.Node.Host.Git
   alias Biot.Node.Host.Network
   alias Biot.Node.Host.Outcome
   alias Biot.Node.Host.Paths
+  alias Biot.Node.Host.Podman
+  alias Biot.Node.Host.Worker
   alias Biot.Node.Journal
   alias Biot.Node.NetworkId
   alias Biot.Node.NodePrivatePath
@@ -46,7 +49,7 @@ defmodule Biot.Node.Host.Allocation do
       ) do
     with {:ok, _network} <- ensure_network(config, allocation),
          {:ok, _checkout} <- ensure_checkout(config, biot_id, repository),
-         {:ok, _mounts} <- ensure_mounts(config, allocation, Paths.mounts(config, biot_id)),
+         {:ok, _mounts} <- ensure_owned(config, allocation, owned_directories(config, biot_id)),
          {:ok, _marker} <- write_marker(config, biot_id),
          {:ok, _record} <- complete_initialization(allocation) do
       :ok
@@ -58,22 +61,32 @@ defmodule Biot.Node.Host.Allocation do
         %Context{biot_id: biot_id, config: config},
         %Allocation{biot_id: biot_id} = allocation
       ) do
-    with {:ok, _ownership} <- reclaim_data(config, allocation),
+    with :ok <- Worker.cancel(config, biot_id),
+         :ok <- Podman.reclaim(config, Paths.biot(config, biot_id)),
          {:ok, _removed} <- remove_tree(Paths.biot(config, biot_id)),
          {:ok, _record} <- reset_initialization(allocation) do
       :ok
     end
   end
 
+  @doc """
+  Gives back the UID range once nothing can still be using it.
+
+  The worker comes first: a range whose build worker is still running is a range a new allocation
+  would share, so release ends that worker and confirms its absence before it looks at anything
+  else.
+  """
   @spec release(Context.t(), Allocation.t()) :: :ok | {:error, Outcome.t()}
   def release(
         %Context{biot_id: biot_id, config: config},
         %Allocation{biot_id: biot_id} = allocation
       ) do
-    directory = FileSystem.directory(Paths.biot(config, biot_id))
-    container = Container.state(config, biot_id)
+    with :ok <- Worker.cancel(config, biot_id) do
+      directory = FileSystem.directory(Paths.biot(config, biot_id))
+      container = Container.state(config, biot_id)
 
-    release_if_absent(config, allocation, directory, container)
+      release_if_absent(config, allocation, directory, container)
+    end
   end
 
   defp allocate_new(config, biot_id) do
@@ -140,16 +153,22 @@ defmodule Biot.Node.Host.Allocation do
   end
 
   defp prepare(config, allocation) do
+    biot_id = allocation.biot_id
+
     with {:ok, _root} <- make_directory(NodePrivatePath.to_string(allocation.data_root)),
+         {:ok, _support} <- make_directory(Paths.build_support(config, biot_id)),
+         {:ok, _environments} <- make_directory(Paths.environments(config, biot_id)),
          {:ok, _mounts} <-
-           ensure_mounts(
-             config,
-             allocation,
-             Paths.mounts_created_at_allocation(config, allocation.biot_id)
-           ),
+           ensure_owned(config, allocation, Paths.allocation_owned_directories(config, biot_id)),
          {:ok, _network} <- ensure_network(config, allocation) do
       {:ok, :prepared}
     end
+  end
+
+  # The checkout joins the owned set only once it exists, because its absence is what marks the
+  # clone still to do.
+  defp owned_directories(config, biot_id) do
+    [Paths.checkout(config, biot_id) | Paths.allocation_owned_directories(config, biot_id)]
   end
 
   defp make_directory(path) do
@@ -169,9 +188,7 @@ defmodule Biot.Node.Host.Allocation do
   defp mount_facts(_config, %Allocation{initialization: :uninitialized}), do: []
 
   defp mount_facts(config, allocation) do
-    Enum.map(Paths.mounts(config, allocation.biot_id), fn {path, _target, _mode} ->
-      FileSystem.directory(path)
-    end)
+    Enum.map(owned_directories(config, allocation.biot_id), &FileSystem.directory/1)
   end
 
   defp marker_fact(_config, %Allocation{initialization: :uninitialized}), do: :absent
@@ -205,8 +222,8 @@ defmodule Biot.Node.Host.Allocation do
       command(
         config,
         config.git_executable,
-        ["clone", "--", RepositorySource.to_string(repository), staging],
-        env: [{"GIT_TERMINAL_PROMPT", "0"}]
+        Git.clone_arguments(config, repository, staging),
+        env: Git.environment()
       )
 
     case result do
@@ -241,70 +258,13 @@ defmodule Biot.Node.Host.Allocation do
     end
   end
 
-  defp ensure_mounts(config, allocation, mounts) do
-    paths = Enum.map(mounts, &elem(&1, 0))
-
-    case FileSystem.ensure_directories(paths) do
-      :ok -> chown(config, allocation, paths)
+  defp ensure_owned(config, allocation, paths) do
+    with :ok <- FileSystem.ensure_directories(paths),
+         :ok <- Podman.grant(config, allocation, paths) do
+      {:ok, :owned}
+    else
+      {:error, %Outcome{} = outcome} -> {:error, outcome}
       {:error, reason} -> {:error, Outcome.from_reason(reason)}
-    end
-  end
-
-  defp chown(config, allocation, paths) do
-    case owned_by_all?(paths, allocation.uid_range.start) do
-      {:ok, true} -> {:ok, :owned}
-      {:ok, false} -> change_ownership(config, allocation, paths)
-      {:error, reason} -> {:error, Outcome.from_reason(reason)}
-    end
-  end
-
-  defp owned_by_all?(paths, owner) do
-    Enum.reduce_while(paths, {:ok, true}, fn path, {:ok, true} ->
-      case File.stat(path) do
-        {:ok, %File.Stat{uid: ^owner, gid: ^owner}} -> {:cont, {:ok, true}}
-        {:ok, %File.Stat{}} -> {:halt, {:ok, false}}
-        {:error, reason} -> {:halt, {:error, {reason, path}}}
-      end
-    end)
-  end
-
-  defp change_ownership(config, allocation, paths) do
-    mapped_start = Allocation.subordinate_start(allocation, config.uid_range_base)
-    owner = "#{mapped_start}:#{mapped_start}"
-
-    case command(config, config.podman_executable, ["unshare", "chown", "-R", owner | paths]) do
-      {:ok, %Command.Result{status: 0}} ->
-        {:ok, :owned}
-
-      {:ok, %Command.Result{} = result} ->
-        {:error, Outcome.from_command(:host_unavailable, result)}
-
-      {:error, reason} ->
-        {:error, Outcome.from_reason(reason)}
-    end
-  end
-
-  defp reclaim_data(config, allocation) do
-    path = Paths.biot(config, allocation.biot_id)
-
-    case FileSystem.directory(path) do
-      :absent ->
-        {:ok, :absent}
-
-      {:present, :directory} ->
-        case command(config, config.podman_executable, ["unshare", "chown", "-R", "0:0", path]) do
-          {:ok, %Command.Result{status: 0}} ->
-            {:ok, :owned}
-
-          {:ok, %Command.Result{} = result} ->
-            {:error, Outcome.from_command(:host_unavailable, result)}
-
-          {:error, reason} ->
-            {:error, Outcome.from_reason(reason)}
-        end
-
-      {:error, reason} ->
-        {:error, Outcome.from_reason(reason)}
     end
   end
 
@@ -391,7 +351,7 @@ defmodule Biot.Node.Host.Allocation do
     end
   end
 
-  defp command(config, executable, arguments, options \\ []) do
+  defp command(config, executable, arguments, options) do
     Command.run(
       config.setsid_executable,
       Config.capture_tools(config),

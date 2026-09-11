@@ -70,7 +70,7 @@ defmodule Biot.Node.ReconcileImportantCasesTest do
       }
 
       assert Reconcile.next(spec(environment_id: e2(), revision: 2), state, nil) ==
-               {:run, {:prepare, e2(), manifest()}}
+               {:run, {:prepare, e2(), manifest(), allocation()}}
     end
 
     test "an unknown sibling does not block installing and starting the desired environment" do
@@ -118,7 +118,8 @@ defmodule Biot.Node.ReconcileImportantCasesTest do
           }
       }
 
-      assert Reconcile.next(spec(), running, nil) == {:run, {:release_environment, e2()}}
+      assert Reconcile.next(spec(), running, nil) ==
+               {:run, {:release_environment, e2(), allocation()}}
 
       stopped = %{running | container: :absent, prepared: %{e1() => {:unknown, failure}}}
       assert Reconcile.next(spec(state: :stopped), stopped, nil) == :settled
@@ -145,7 +146,7 @@ defmodule Biot.Node.ReconcileImportantCasesTest do
       assert Reconcile.next(
                spec(state: :destroyed, revision: 3),
                settled(e1()),
-               {:prepare, e1(), manifest()}
+               {:prepare, e1(), manifest(), allocation()}
              ) == :cancel_current
     end
 
@@ -311,7 +312,8 @@ defmodule Biot.Node.ReconcileImportantCasesTest do
     test "prepares, retires, installs after absence, then starts" do
       lost = %{settled(e1()) | installation: {:lost, installation(e1())}, prepared: %{}}
 
-      assert Reconcile.next(spec(), lost, nil) == {:run, {:prepare, e1(), manifest()}}
+      assert Reconcile.next(spec(), lost, nil) ==
+               {:run, {:prepare, e1(), manifest(), allocation()}}
 
       prepared_again = %{lost | prepared: %{e1() => {:present, artifact(e1())}}}
 

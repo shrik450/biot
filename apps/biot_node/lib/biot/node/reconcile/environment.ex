@@ -39,13 +39,27 @@ defmodule Biot.Node.Reconcile.Environment do
   def release(%ExecutionSpec{}, %NodeState{container: {:unknown, _failure}}), do: :ready
 
   def release(%ExecutionSpec{} = spec, %NodeState{} = state) do
+    case allocation(state.data) do
+      nil -> :ready
+      allocation -> release_from(spec, state, allocation)
+    end
+  end
+
+  defp release_from(%ExecutionSpec{} = spec, %NodeState{} = state, allocation) do
     retained = retained(spec, state)
 
     case Enum.find(candidates(state), &(not MapSet.member?(retained, &1))) do
       nil -> :ready
-      environment_id -> {:run, {:release_environment, environment_id}}
+      environment_id -> {:run, {:release_environment, environment_id, allocation}}
     end
   end
+
+  # Environments live under the allocation, so a biot without one is holding nothing to give back.
+  defp allocation(:no_allocation), do: nil
+  defp allocation({:unknown, allocation, _failure}), do: allocation
+  defp allocation({:uninitialized, allocation}), do: allocation
+  defp allocation({:present, allocation}), do: allocation
+  defp allocation({:lost, allocation}), do: allocation
 
   defp desired_installation(
          %ExecutionSpec{} = spec,
@@ -130,9 +144,9 @@ defmodule Biot.Node.Reconcile.Environment do
   defp resolution_step(
          {:ok, {:present, %Resolution{manifest: manifest}}},
          %ExecutionSpec{desired: %Desired{environment_id: environment_id}},
-         _allocation
+         allocation
        ),
-       do: {:run, {:prepare, environment_id, manifest}}
+       do: {:run, {:prepare, environment_id, manifest, allocation}}
 
   defp resolution_step({:ok, {:unknown, %Resolution{}, failure}}, %ExecutionSpec{}, _allocation) do
     {:blocked, {:inspection, failure}}

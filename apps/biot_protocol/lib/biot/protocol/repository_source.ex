@@ -1,5 +1,11 @@
 defmodule Biot.Protocol.RepositorySource do
-  @moduledoc "A credential-free Git repository URL."
+  @moduledoc """
+  A credential-free HTTPS Git repository URL.
+
+  HTTPS is the only scheme Biot fetches over, so it is the only scheme that parses. Rejecting the
+  rest here is what makes the rule hold everywhere: a local path, an `ssh://` URL, or an
+  `scp`-like address that never becomes a value cannot reach a clone, a pin, or a layer fetch.
+  """
 
   alias Biot.Protocol.Limits
 
@@ -19,9 +25,6 @@ defmodule Biot.Protocol.RepositorySource do
       not String.valid?(value) or Regex.match?(~r/\s/u, value) or String.contains?(value, "#") ->
         {:error, :invalid_format}
 
-      scp_like?(value) ->
-        {:ok, %__MODULE__{url: value}}
-
       true ->
         parse_uri(value)
     end
@@ -36,30 +39,19 @@ defmodule Biot.Protocol.RepositorySource do
     uri = URI.parse(value)
 
     with :ok <- validate_scheme(uri.scheme),
-         :ok <- validate_userinfo(uri.scheme, uri.userinfo),
+         :ok <- validate_userinfo(uri.userinfo),
          :ok <- validate_host(uri),
          :ok <- validate_query(uri.query) do
       {:ok, %__MODULE__{url: value}}
     end
   end
 
-  defp validate_scheme(scheme) when scheme in ["https", "ssh"], do: :ok
+  defp validate_scheme("https"), do: :ok
   defp validate_scheme(_scheme), do: {:error, :invalid_format}
 
-  defp validate_userinfo("https", userinfo) when not is_nil(userinfo),
-    do: {:error, :embedded_credentials}
-
-  defp validate_userinfo(_scheme, ""), do: {:error, :embedded_credentials}
-
-  defp validate_userinfo(_scheme, userinfo) when is_binary(userinfo) do
-    if String.contains?(URI.decode(userinfo), ":") do
-      {:error, :embedded_credentials}
-    else
-      :ok
-    end
-  end
-
-  defp validate_userinfo(_scheme, nil), do: :ok
+  # An HTTPS URL carrying any userinfo is carrying a credential, whether or not it has a password.
+  defp validate_userinfo(nil), do: :ok
+  defp validate_userinfo(_userinfo), do: {:error, :embedded_credentials}
 
   defp validate_host(%URI{host: host, path: path})
        when is_binary(host) and host != "" and path not in [nil, ""],
@@ -69,10 +61,6 @@ defmodule Biot.Protocol.RepositorySource do
 
   defp validate_query(nil), do: :ok
   defp validate_query(_query), do: {:error, :invalid_format}
-
-  defp scp_like?(value) do
-    Regex.match?(~r{\Agit@[^:/\s]+:[^\s].*\z}u, value)
-  end
 end
 
 defimpl String.Chars, for: Biot.Protocol.RepositorySource do

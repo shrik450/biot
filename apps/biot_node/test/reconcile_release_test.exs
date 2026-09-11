@@ -38,7 +38,8 @@ defmodule Biot.Node.ReconcileReleaseTest do
           prepared: %{e2() => {:present, artifact(e2())}}
         )
 
-      assert Environment.release(spec(), state) == {:run, {:release_environment, e2()}}
+      assert Environment.release(spec(), state) ==
+               {:run, {:release_environment, e2(), allocation()}}
     end
 
     test "nothing is given back while the container is unknown" do
@@ -85,7 +86,8 @@ defmodule Biot.Node.ReconcileReleaseTest do
           }
       }
 
-      assert Environment.release(spec(), state) == {:run, {:release_environment, e2()}}
+      assert Environment.release(spec(), state) ==
+               {:run, {:release_environment, e2(), allocation()}}
     end
 
     test "a stale resolution snapshot with no artifact of its own" do
@@ -97,7 +99,8 @@ defmodule Biot.Node.ReconcileReleaseTest do
           }
       }
 
-      assert Environment.release(spec(), state) == {:run, {:release_environment, e2()}}
+      assert Environment.release(spec(), state) ==
+               {:run, {:release_environment, e2(), allocation()}}
     end
 
     test "a stale resolution snapshot whose artifact nobody could inspect" do
@@ -109,13 +112,15 @@ defmodule Biot.Node.ReconcileReleaseTest do
           resolutions: %{e2() => {:present, resolution(e2())}}
       }
 
-      assert Environment.release(spec(), state) == {:run, {:release_environment, e2()}}
+      assert Environment.release(spec(), state) ==
+               {:run, {:release_environment, e2(), allocation()}}
     end
 
     test "a lost resolution snapshot" do
       state = %{settled(e1()) | resolutions: %{e2() => {:lost, resolution(e2())}}}
 
-      assert Environment.release(spec(), state) == {:run, {:release_environment, e2()}}
+      assert Environment.release(spec(), state) ==
+               {:run, {:release_environment, e2(), allocation()}}
     end
   end
 

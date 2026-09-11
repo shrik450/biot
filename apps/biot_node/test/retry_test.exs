@@ -62,7 +62,7 @@ defmodule Biot.Node.RetryTest do
           policy != :automatic,
           attempt <- 1..4,
           budget <- 1..3 do
-        action = {:prepare, e1(), manifest()}
+        action = {:prepare, e1(), manifest(), allocation()}
 
         assert Retry.classify(action, outcome, attempt, budget).retry == policy,
                "#{name} at attempt #{attempt} of #{budget}"
@@ -76,11 +76,11 @@ defmodule Biot.Node.RetryTest do
         {{:allocate, biot_id()}, :allocate},
         {{:initialize, fresh_allocation(), repository()}, :initialize},
         {{:resolve, e1(), selection(), allocation()}, :resolve},
-        {{:prepare, e1(), manifest()}, :prepare},
+        {{:prepare, e1(), manifest(), allocation()}, :prepare},
         {{:retire, incarnation()}, :retire},
         {{:install, allocation(), artifact(e1()), e1()}, :install},
         {{:start, allocation(), installation(e1())}, :start},
-        {{:release_environment, e1()}, :release_environment},
+        {{:release_environment, e1(), allocation()}, :release_environment},
         {{:remove_data, allocation()}, :remove_data},
         {{:release_allocation, allocation()}, :release_allocation}
       ]
@@ -92,7 +92,7 @@ defmodule Biot.Node.RetryTest do
 
     test "every report carries a message and no diagnostic of its own" do
       for {name, outcome, _code, _policy} <- @outcomes do
-        failure = Retry.classify({:prepare, e1(), manifest()}, outcome, 1, 3)
+        failure = Retry.classify({:prepare, e1(), manifest(), allocation()}, outcome, 1, 3)
 
         assert failure.message != "", "#{name}: empty message"
         assert failure.diagnostic_ref == nil, "#{name}: unexpected diagnostic"
@@ -107,14 +107,16 @@ defmodule Biot.Node.RetryTest do
     end
 
     test "an unnamed host error keeps the original term inside a bounded message" do
-      failure = Retry.classify({:prepare, e1(), manifest()}, {:error, :enospc}, 1, 3)
+      failure =
+        Retry.classify({:prepare, e1(), manifest(), allocation()}, {:error, :enospc}, 1, 3)
 
       assert failure.message == "the host reported an error: :enospc"
     end
 
     property "a report stays bounded however large the host's term is" do
       check all(term <- StreamData.term()) do
-        failure = Retry.classify({:prepare, e1(), manifest()}, {:error, term}, 1, 3)
+        failure =
+          Retry.classify({:prepare, e1(), manifest(), allocation()}, {:error, term}, 1, 3)
 
         assert String.length(failure.message) <= 300
         assert String.valid?(failure.message)
@@ -127,7 +129,8 @@ defmodule Biot.Node.RetryTest do
               attempt <- StreamData.integer(1..5),
               budget <- StreamData.integer(1..5)
             ) do
-        failure = Retry.classify({:prepare, e1(), manifest()}, outcome, attempt, budget)
+        failure =
+          Retry.classify({:prepare, e1(), manifest(), allocation()}, outcome, attempt, budget)
 
         assert Failure.parse(Failure.encode(failure)) == {:ok, failure}
       end

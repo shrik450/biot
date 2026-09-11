@@ -16,6 +16,14 @@ defmodule Biot.Node.BiotController do
 
   One `phase` field says what the controller is doing, and what may wake it:
 
+  - `{:recovering, task}` is where a started controller begins, and where a killed effect leaves
+    it. A build worker that outlived its owner holds the store the next action would write, so
+    recovery ends it and confirms its absence before anything is inspected or decided.
+  - `{:recovery_blocked, wake}` could not find out whether that worker is gone. The model says
+    unknown inspection blocks the work, so the controller waits and looks again rather than acting
+    around a worker it cannot see. Why it could not find out is logged when the phase is entered,
+    where an operator can read it; the phase itself carries only the wake, because that is all any
+    transition out of it reads.
   - `:idle` waits for a message. Nothing is scheduled, because only a new intent, a container
     exit, or the next synchronization can change what a recorded failure decides.
   - `{:running, effect}` has one action in flight. The loop does not ask `Reconcile.next/3` for
@@ -38,6 +46,8 @@ defmodule Biot.Node.BiotController do
 
   use GenServer, restart: :transient
 
+  require Logger
+
   alias Biot.Node.Action
   alias Biot.Node.Backoff
   alias Biot.Node.BlockReason
@@ -56,6 +66,7 @@ defmodule Biot.Node.BiotController do
   alias Biot.Node.Retry
   alias Biot.Node.RetryState
   alias Biot.Node.RuntimeLogs
+  alias Biot.Protocol.BiotId
   alias Biot.Protocol.BiotSpec
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Failure
@@ -95,6 +106,8 @@ defmodule Biot.Node.BiotController do
 
     @type phase ::
             :idle
+            | {:recovering, Task.t()}
+            | {:recovery_blocked, Wake.t()}
             | {:running, Effect.t()}
             | {:cancelling, Effect.t(), Wake.t()}
             | {:backing_off, Wake.t()}
@@ -130,6 +143,8 @@ defmodule Biot.Node.BiotController do
   end
 
   @impl true
+  def handle_continue(:recover, %State{} = state), do: recover(state)
+
   def handle_continue(:converge, state), do: converge(state)
 
   @impl true
@@ -142,6 +157,21 @@ defmodule Biot.Node.BiotController do
   @impl true
   def handle_info(
         {reference, result},
+        %State{phase: {:recovering, %Task{ref: reference}}} = state
+      ) do
+    Process.demonitor(reference, [:flush])
+
+    case result do
+      :ok ->
+        after_recovery(put_phase(state, :idle))
+
+      {:error, %Outcome{} = outcome} ->
+        {:noreply, block_recovery(state, outcome)}
+    end
+  end
+
+  def handle_info(
+        {reference, result},
         %State{phase: {:running, %Effect{task: %Task{ref: reference}} = effect}} = state
       ) do
     Process.demonitor(reference, [:flush])
@@ -150,23 +180,29 @@ defmodule Biot.Node.BiotController do
   end
 
   # A cancelled effect's result says nothing worth recording: the controller cancelled it because
-  # the biot's intent changed, and the next inspection decides what it left behind.
+  # the biot's intent changed, and the next inspection decides what it left behind. What it does
+  # not say either is whether the effect's build worker is gone, because the cleanup that ends it
+  # can fail as easily as the work could. Every path that ends an effect confirms that here.
   def handle_info(
         {reference, _result},
         %State{phase: {:cancelling, %Effect{task: %Task{ref: reference}}, _wake}} = state
       ) do
     Process.demonitor(reference, [:flush])
-    reload(put_phase(state, :idle))
+    recover(put_phase(state, :idle))
   end
 
-  # The task ignored its cancellation, so the failure group ends here and the next inspection says
-  # what the half-finished effect left behind.
+  # The task ignored its cancellation, so the failure group ends here. Killing it skips the clause
+  # that would have ended the effect's build worker, which is exactly the case recovery exists for.
   def handle_info(
         {:wake, token},
         %State{phase: {:cancelling, effect, %Wake{token: token}}} = state
       ) do
     Task.shutdown(effect.task, :brutal_kill)
-    reload(put_phase(state, :idle))
+    recover(put_phase(state, :idle))
+  end
+
+  def handle_info({:wake, token}, %State{phase: {:recovery_blocked, %Wake{token: token}}} = state) do
+    recover(put_phase(state, :idle))
   end
 
   def handle_info({:wake, token}, %State{phase: {:backing_off, %Wake{token: token}}} = state) do
@@ -193,8 +229,7 @@ defmodule Biot.Node.BiotController do
   defp start_state(%LocalIntent{biot_id: biot_id, biot_spec: spec}, options) do
     case Host.context(biot_id) do
       {:ok, context} ->
-        state = build_state(biot_id, context, spec, options)
-        {:ok, resume_backoff(state), {:continue, :converge}}
+        {:ok, build_state(biot_id, context, spec, options), {:continue, :recover}}
 
       {:error, reason} ->
         {:stop, {:host_not_configured, reason}}
@@ -222,12 +257,32 @@ defmodule Biot.Node.BiotController do
     biot_id |> Journal.retry_state() |> RetryState.for_revision(biot_id, revision)
   end
 
+  # The one thing that stops this biot making progress is the one thing an operator has to be able
+  # to see, and the controller has no report shape for a state no action produced.
+  defp block_recovery(%State{} = state, %Outcome{} = outcome) do
+    Logger.warning(
+      "biot #{BiotId.to_string(state.biot_id)} cannot confirm its build worker is gone " <>
+        "(#{inspect(outcome.outcome)}); looking again in #{state.inspection_retry_ms} ms"
+    )
+
+    put_phase(state, {:recovery_blocked, wake(state.inspection_retry_ms)})
+  end
+
+  defp recover(%State{} = state) do
+    task = Task.async(fn -> Host.recover(state.context) end)
+    {:noreply, put_phase(state, {:recovering, task})}
+  end
+
+  # Recovery runs in a task, and the intent that follows it may have changed while it ran: an
+  # `intent_changed` cast and this result come from different processes. Reading the journal here
+  # is what stops the first action after a recovery from being one the current spec never asked
+  # for.
+  defp after_recovery(%State{retry: %RetryState{next_attempt_at: nil}} = state), do: reload(state)
+
   # The backoff a crashed controller owed is still owed, so the restart serves the rest of it
   # rather than retrying at once and spending the budget faster than the delay allows.
-  defp resume_backoff(%State{retry: %RetryState{next_attempt_at: nil}} = state), do: state
-
-  defp resume_backoff(%State{retry: %RetryState{next_attempt_at: due}} = state) do
-    put_phase(state, {:backing_off, wake(remaining_ms(state, due))})
+  defp after_recovery(%State{retry: %RetryState{next_attempt_at: due}} = state) do
+    {:noreply, put_phase(state, {:backing_off, wake(remaining_ms(state, due))})}
   end
 
   # A saved wake outlives the process that scheduled it, and the clock can move under it. Clamping
@@ -268,6 +323,9 @@ defmodule Biot.Node.BiotController do
     end
   end
 
+  # A new revision says nothing about whether the old revision's build worker is gone.
+  defp drop_stale_wake(%State{phase: {:recovering, _task}} = state), do: state
+  defp drop_stale_wake(%State{phase: {:recovery_blocked, _wake}} = state), do: state
   defp drop_stale_wake(%State{phase: {:running, _effect}} = state), do: state
   defp drop_stale_wake(%State{phase: {:cancelling, _effect, _wake}} = state), do: state
   defp drop_stale_wake(%State{} = state), do: put_phase(state, :idle)
@@ -326,9 +384,18 @@ defmodule Biot.Node.BiotController do
     end
   end
 
-  # A cancelling task and a backing-off retry are both promises not to act yet, so the loop reports
-  # what it inspected and stops there.
+  # A recovering controller, a cancelling task, and a backing-off retry are all promises not to act
+  # yet, so the loop reports what it inspected and stops there.
   defp decide(%State{phase: {:cancelling, _effect, _wake}} = state, _node_state, _report) do
+    {:noreply, state}
+  end
+
+  # Nothing may act until the allocation's build worker is known to be gone.
+  defp decide(%State{phase: {:recovering, _task}} = state, _node_state, _report) do
+    {:noreply, state}
+  end
+
+  defp decide(%State{phase: {:recovery_blocked, _wake}} = state, _node_state, _report) do
     {:noreply, state}
   end
 

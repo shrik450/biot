@@ -201,7 +201,9 @@ defmodule Biot.Node.ReconcileGenerators do
     map(environment_id(), &{:resolve, &1, Fixtures.selection(), Fixtures.allocation()})
   end
 
-  defp tagged_action(:prepare), do: map(environment_id(), &{:prepare, &1, Fixtures.manifest()})
+  defp tagged_action(:prepare),
+    do: map(environment_id(), &{:prepare, &1, Fixtures.manifest(), Fixtures.allocation()})
+
   defp tagged_action(:retire), do: constant({:retire, Fixtures.incarnation()})
 
   defp tagged_action(:install) do
@@ -212,7 +214,9 @@ defmodule Biot.Node.ReconcileGenerators do
     map(environment_id(), &{:start, Fixtures.allocation(), Fixtures.installation(&1)})
   end
 
-  defp tagged_action(:release_environment), do: map(environment_id(), &{:release_environment, &1})
+  defp tagged_action(:release_environment),
+    do: map(environment_id(), &{:release_environment, &1, Fixtures.allocation()})
+
   defp tagged_action(:remove_data), do: constant({:remove_data, Fixtures.allocation()})
 
   defp tagged_action(:release_allocation),
@@ -236,12 +240,12 @@ defmodule Biot.Node.ReconcileGenerators do
   def valid_action?({:resolve, %EnvironmentId{}, %EnvironmentSelection{}, %Allocation{}}),
     do: true
 
-  def valid_action?({:prepare, %EnvironmentId{}, %Manifest{}}), do: true
+  def valid_action?({:prepare, %EnvironmentId{}, %Manifest{}, %Allocation{}}), do: true
   def valid_action?({:retire, %IncarnationId{}}), do: true
 
   def valid_action?({:install, %Allocation{}, %ArtifactId{}, %EnvironmentId{}}), do: true
   def valid_action?({:start, %Allocation{}, %Installation{}}), do: true
-  def valid_action?({:release_environment, %EnvironmentId{}}), do: true
+  def valid_action?({:release_environment, %EnvironmentId{}, %Allocation{}}), do: true
   def valid_action?({:remove_data, %Allocation{}}), do: true
   def valid_action?({:release_allocation, %Allocation{}}), do: true
   def valid_action?(_other), do: false

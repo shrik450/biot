@@ -26,15 +26,21 @@ defmodule Biot.Node.Host.ContainerEvents do
   alias Biot.Node.Host.Names
   alias Biot.Node.Host.Podman
 
-  @arguments [
-    "events",
-    "--format",
-    "json",
-    "--filter",
-    "type=container",
-    "--filter",
-    "event=died"
-  ]
+  # A build worker dies on every build, so the stream asks for runtimes only: an exit a controller
+  # should hear about is always a runtime's.
+  defp arguments do
+    [
+      "events",
+      "--format",
+      "json",
+      "--filter",
+      "type=container",
+      "--filter",
+      "event=died",
+      "--filter",
+      Names.role_filter(:runtime)
+    ]
+  end
 
   defmodule State do
     @moduledoc false
@@ -95,7 +101,7 @@ defmodule Biot.Node.Host.ContainerEvents do
 
   defp opened_stream do
     case Config.from_application() do
-      {:ok, config} -> Podman.open(config, @arguments)
+      {:ok, config} -> Podman.open(config, arguments())
       {:error, reason} -> {:error, {:host_not_configured, reason}}
     end
   end

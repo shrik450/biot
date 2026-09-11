@@ -14,11 +14,12 @@ defmodule Biot.Node.ActionTest do
       {"allocate", {:allocate, biot_id()}, :allocate, false},
       {"initialize", {:initialize, fresh_allocation(), repository()}, :initialize, false},
       {"resolve", {:resolve, e1(), selection(), allocation()}, :resolve, true},
-      {"prepare", {:prepare, e1(), manifest()}, :prepare, true},
+      {"prepare", {:prepare, e1(), manifest(), allocation()}, :prepare, true},
       {"retire", {:retire, incarnation()}, :retire, false},
       {"install", {:install, allocation(), artifact(e1()), e1()}, :install, false},
       {"start", {:start, allocation(), installation(e1())}, :start, true},
-      {"release_environment", {:release_environment, e2()}, :release_environment, false},
+      {"release_environment", {:release_environment, e2(), allocation()}, :release_environment,
+       false},
       {"remove_data", {:remove_data, allocation()}, :remove_data, false},
       {"release_allocation", {:release_allocation, allocation()}, :release_allocation, false}
     ]
@@ -48,7 +49,7 @@ defmodule Biot.Node.ActionTest do
   test "giving resources back is never cancelled" do
     for action <- [
           {:retire, incarnation()},
-          {:release_environment, e1()},
+          {:release_environment, e1(), allocation()},
           {:remove_data, allocation()},
           {:release_allocation, allocation()}
         ] do

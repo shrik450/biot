@@ -31,6 +31,18 @@ defmodule Biot.Node.StorePath do
   @spec to_string(t()) :: String.t()
   def to_string(%__MODULE__{value: value}), do: value
 
+  @doc """
+  The store object's own name, without the hash that precedes it.
+
+  Nix derives a fixed-output path from a NAR hash and this name, so a copy of the same bytes kept
+  under this name is the same store path.
+  """
+  @spec object_name(t()) :: String.t()
+  def object_name(%__MODULE__{value: value}) do
+    [object | _rest] = value |> Path.relative_to(@store_root) |> Path.split()
+    String.slice(object, 33..-1//1)
+  end
+
   defp parse_segments(value, store_object, rest) do
     if Regex.match?(@store_object, store_object) and canonical?(value, store_object, rest) do
       {:ok, %__MODULE__{value: value}}

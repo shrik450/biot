@@ -101,9 +101,9 @@ defmodule Biot.Protocol.PinnedSourceTest do
     assert PinnedSource.parse(value) == {:error, :embedded_credentials}
   end
 
-  test "pin accepts a parsed git selector" do
+  test "pin accepts a parsed HTTPS selector" do
     assert {:ok, repository} =
-             RepositorySource.parse("git@github.com:example/project.git")
+             RepositorySource.parse("https://github.com/example/project.git")
 
     assert {:ok, selector} = SourceSelector.new(repository, "main")
     assert {:ok, _pinned_source} = PinnedSource.pin(selector, @revision, @nar_hash)

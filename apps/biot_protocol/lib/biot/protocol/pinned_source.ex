@@ -1,6 +1,7 @@
 defmodule Biot.Protocol.PinnedSource do
   @moduledoc ~S|A resolved source with a commit revision and Nix NAR hash. Canonical form is "nixpkgs#<rev>#<nar_hash>" or "<url>#<rev>#<nar_hash>".|
 
+  alias Biot.Protocol.NarHash
   alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.SourceSelector
 
@@ -69,7 +70,7 @@ defmodule Biot.Protocol.PinnedSource do
 
   defp build(source, revision, nar_hash) do
     with {:ok, revision} <- parse_revision(revision),
-         {:ok, nar_hash} <- parse_nar_hash(nar_hash) do
+         {:ok, nar_hash} <- NarHash.parse(nar_hash) do
       {:ok, %__MODULE__{source: pin_source(source, revision, nar_hash)}}
     end
   end
@@ -92,19 +93,6 @@ defmodule Biot.Protocol.PinnedSource do
   end
 
   defp parse_revision(_value), do: {:error, :invalid_format}
-
-  defp parse_nar_hash(value) when is_binary(value) do
-    with "sha256-" <> encoded <- value,
-         {:ok, bytes} <- Base.decode64(encoded),
-         true <- byte_size(bytes) == 32,
-         ^value <- "sha256-" <> Base.encode64(bytes) do
-      {:ok, value}
-    else
-      _ -> {:error, :invalid_format}
-    end
-  end
-
-  defp parse_nar_hash(_value), do: {:error, :invalid_format}
 end
 
 defimpl String.Chars, for: Biot.Protocol.PinnedSource do

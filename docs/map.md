@@ -341,7 +341,9 @@ The node owns host reconciliation and reports inspected state to the server.
   retry policies.
   `Retry.failure/2` builds failures found without an action.
 - `Action.metadata/1` holds only an action's stage and `cancellable?` flag.
-  Release never runs while an action is in flight.
+  The environment actions are `{:prepare, env, manifest, allocation}` and
+  `{:release_environment, env, allocation}`; the allocation is already the resource both actions
+  need. Release never runs while an action is in flight.
 - `InspectionFailure` keeps an unreadable resource distinct from an absent one.
 
 #### BiotController
@@ -360,6 +362,8 @@ The controller's `phase` makes its waiting state explicit:
 
 ```text
 :idle
+{:recovering, task}
+{:recovery_blocked, wake}
 {:running, effect}
 {:cancelling, effect, wake}
 {:backing_off, wake}
@@ -367,10 +371,14 @@ The controller's `phase` makes its waiting state explicit:
 {:settled, wake}
 ```
 
-`:idle` waits for intent or synchronization. `:running` has one host effect in
-flight. `:cancelling` waits for the cancellation grace period before killing an
-effect that did not stop. `:backing_off` waits for an automatic retry.
-`:waiting` retries an inspection block. `:settled` re-inspects on the observation
+`recover/1` is the one entry to the worker check. `{:recovering, task}` is entered at startup and
+again after cancellation or a killed effect; it calls `Host.recover/1`, which confirms that the
+private worker is absent before inspection or reconciliation. `{:recovery_blocked, wake}` retries
+when absence is unknown and logs the reason. After recovery, the controller reloads current intent
+before converging, so a queued revision cannot be acted on as stale state. `:idle` waits for intent
+or synchronization. `:running` has one host effect in flight. `:cancelling` waits for the
+cancellation grace period before killing an effect that did not stop. `:backing_off` waits for an
+automatic retry. `:waiting` retries an inspection block. `:settled` re-inspects on the observation
 interval.
 
 A destroyed Biot writes its final report to the journal, hands it to the outbox, and exits normally.
@@ -435,67 +443,97 @@ policies stay unchanged.
 ### Host layer
 
 `Biot.Node.Host` is the plain inspection and effect boundary called by reconciliation.
-`inspect_state/2` accepts a Biot ID and `Host.Context`, and returns `Host.Inspection`
-with five host facts: `data`, `resolutions`, `installation`, `container`, and
-`prepared`. The controller owns `pending_exit` and `failure`, and builds the
-`NodeState` that reconciliation consumes. `run/2` returns `:ok | {:error,
-Host.Outcome.t()}` and dispatches totally over every `Biot.Node.Action` variant.
+`inspect_state/2` accepts a Biot ID and `Host.Context`, and returns `Host.Inspection` with five host
+facts: `data`, `resolutions`, `installation`, `container`, and `prepared`. The controller owns
+`pending_exit` and `failure`, and builds the `NodeState` that reconciliation consumes. `run/2`
+returns `:ok | {:error, Host.Outcome.t()}` and dispatches totally over every `Biot.Node.Action`
+variant. The pure core has no worker state: workers are never desired or adopted, and recovery is
+an imperative precondition.
 
 The effect modules own host resources:
 
-- `Host.Allocation` creates or repairs an allocation, its network, checkout, mounts, and
-  initialization marker. `Allocation.ensure_mounts/3` creates and chowns the selected mount set.
-  It also removes data and releases the allocation; the bundle owns the container rootfs.
-- `Host.Environment` resolves sources, persists manifests, builds bundles, records
-  installations, and releases environment resources.
+- `Host.Allocation` creates or repairs an allocation, its network, checkout, mounts, private Nix
+  root, scratch, and initialization marker. It grants and reclaims mapped ownership, removes data,
+  and releases the allocation only after its worker is absent.
+- `Host.Environment` resolves, prepares, installs, and releases environment resources. Every Nix
+  command runs in `Host.Worker`; release confirms worker absence, removes the environment, collects
+  the private store, and deletes the resolution record last.
 - `Host.Container` starts and retires rootless Podman containers. `run_container` uses the bundle's
-  `--rootfs`, `--read-only`, `/tmp` and `/run` tmpfs mounts, and the five allocation mounts.
-  `Host.Network` creates, inspects, and removes their
-  named private networks.
-- `Host.SourceResolver` pins Nixpkgs and Git selectors through the configured Nix
-  boundary and returns resolved source values.
+  physical `--rootfs`, `--read-only`, `/tmp` and `/run` tmpfs mounts, the five allocation mounts,
+  and a read-only `/nix/store` mount. `Host.Network` creates, inspects, and removes named private
+  networks.
+- `Host.Worker` owns the disposable build worker. `run/4` cancels any existing worker, runs one
+  phase command, and cancels again on every exit; `cancel/2` is destructive and confirms absence;
+  `state/2` is the read-only inspection; and `probe/2` runs the startup sandbox check. A private
+  claim keyed by `{:worker, biot_id}` or `:probe` gives workers and the probe the same lifecycle.
+  `Host.Worker.Spec` is the one worker description: name, labels, UID/GID map, network, mounts,
+  tmpfs, and command. `Host.Worker.Layout` owns every container-side path and phase capability.
+  `{:fetch, env}` mounts that environment read-write, release build support read-only, the private
+  store and scratch read-write, and `nix.conf` read-only. `{:build, env, staged}` mounts that
+  environment read-write, only its staged store inputs read-only, and the common store, scratch,
+  and configuration. `:collect` mounts all environments read-only plus the common mounts.
+  Its worker environment sets `NIX_PATH` empty, `TMPDIR=/build`, and scratch `HOME` and
+  `XDG_CACHE_HOME`. Its tmpfs set is `/tmp`, `/root`, `/var`, and `/nix/var`. The UID/GID map
+  confines files to the allocation's range; the isolated network confines traffic to the Biot;
+  `--read-only` confines writes to explicit mounts and tmpfs; `unmask=/proc/*` lets Nix create its
+  nested sandbox; `SYS_ADMIN` lets that sandbox mount its namespace; `--rm` and log driver `none`
+  keep the disposable worker from retaining a root or logs. The probe uses the same boundary with
+  no allocation, no network, and a throwaway store.
+- `Host.SourceStaging` owns trusted fetch, copying `nix/` and `agent/` support, running
+  `nix/fetch.nix`, and reading the staged out-link. `pins.json` is the one output contract.
+  `Host.StagedInputs` is its pure, strict value: build support, Nixpkgs, layers, store paths,
+  hashes, and revisions. The staged out-link is the GC root for that complete input set.
+- `Host.PrivateStore` owns `host_path/3`, which maps a logical `/nix/store` object into the Biot's
+  physical store, and `object_at/3`, which follows an out-link through that mapping.
+- `Host.Git` is the one hardened Git shape: HTTPS-only transport, disabled system and global
+  configuration and credentials, no prompt or askpass, no submodule recursion, and an empty
+  template. `Biot.Protocol.RepositorySource` enforces HTTPS before a repository reaches Git.
+
+The two environment phases are deliberately separate. Trusted fetch stages moving refs and writes
+`pins.json`; `Host.Environment.prepare/4` invokes `nix build` with `--pure-eval` through `--expr`
+and `fetchTree` over the staged mounts, passing `{staged, system}` to `nix/build.nix`. Pure
+`Host.StagedInputs` turns the fetch output into the manifest and the exact inputs the build may
+see. Release order is confirm worker absence, remove the environment and roots, collect, then
+delete the resolution record last.
 
 Pure derivations keep host facts separate from effects:
 
-- `Host.DataInspection` derives allocation data state from journal ownership and
-  filesystem facts.
-- `Host.EnvironmentInspection` derives resolution and installation states.
-  `EnvironmentInspection.prepared/1` returns one resource entry per environment.
+- `Host.DataInspection` derives allocation data state from journal ownership and filesystem facts.
+- `Host.EnvironmentInspection` derives resolution and installation states. `EnvironmentInspection.prepared/1`
+  returns one resource entry per environment.
 - `Host.ContainerInspection` parses Podman JSON into the owned container value.
-- `Host.Outcome` maps expected effect failures and bounded command diagnostics to
-  retry reasons.
+- `Host.Outcome` maps expected effect failures and bounded command diagnostics to retry reasons.
 
 Support modules provide the smaller boundaries:
 
-- `Host.Command` runs one executable through `setsid` with a timeout and bounded
-  stdout and stderr. Its handshake announces the process group, registers that
-  group with `Host.Command.Reaper`, sends the go line, and then lets the shell
-  `exec` the command. No command runs before the reaper owns its group.
-  `run/5` returns `Result` with `status`, `stdout`, `stderr`, `stdout_truncated`, and
-  `stderr_truncated`. The stderr capture creates a FIFO in Elixir. One `head` process reads the
-  configured bound plus one byte while the command writes. An `exec cat` process drains the FIFO.
-  A grace guard ends a reader held open by a grandchild. `stderr_truncated` comes from the capture
-  size. `capture_tools` comes from `Host.Config`. A failed FIFO setup returns
-  `:stderr_capture_failed`. `open/5` returns a `Command.Stream` for a long-running command, and
-  `close/1` releases its reaper record. `Host.Command.Reaper` owns stderr and FIFO cleanup.
-  `Host.Podman` adds the configured Podman module and recognizes absent resources.
-- `Host.ContainerEvents` reads Podman's `events` stream through `Command.open/5` and
-  `Command.Stream`. It calls `Command.close/1` when a stream ends and reopens it after
-  `container_events_retry_ms`. `Names.owner/1` parses the owning Biot ID from a container label.
-- `Host.Paths` owns every node-private path. Its moduledoc is the authority for
-  the data-root layout. `Paths.run/2`, `Paths.secrets/2`, and `Paths.mounts/2` define the five
-  container mounts and their modes; `Paths.mounts_created_at_allocation/2` defines the four
-  mounts created before checkout. The checkout is excluded because its presence marks a completed
-  clone. `Paths.checkout_staging/2` names the per-Biot staging path.
-  The root holds node-wide coordination and configuration plus per-Biot writable
-  data and per-environment build state.
-- `Host.Names` derives stable network and container names and ownership labels.
-  `Host.Names.owner/1` parses the owning Biot ID from those labels.
-  `Host.Network` creates isolated networks with Podman's `--opt isolate=true` option.
-  `Host.FileSystem` provides tri-state inspection, atomic writes, and tree removal.
-- `Host.Config` parses and validates operator settings. `Host.Context` binds that
-  configuration to one Biot ID, and `Host.Setup` creates the node-wide directories
-  and Podman configuration.
+- `Host.Command` runs one executable through `setsid` with a timeout and bounded stdout and stderr.
+  Its process-group handshake and `Host.Command.Reaper` ensure commands stop when their caller dies.
+  `run/5` returns bounded output and truncation flags; `open/5` returns a `Command.Stream` for a
+  long-running command. `Host.Podman` adds the configured Podman module and recognizes absent resources.
+- `Host.ContainerEvents` reads Podman's `events` stream through `Command.open/5`, closes and
+  reopens it after `container_events_retry_ms`, and uses `Names.owner/1` for ownership.
+- `Host.Paths` owns the node-private layout. Everything Nix owns is below the Biot: `store_root`,
+  `store`, `scratch`, `build_support`, `environments`, `environment`, `staged`, `environment_root`,
+  `runtime_mounts`, and `allocation_owned_directories`. It also owns `worker_nix_config` and
+  `git_template`. `Host.PrivateStore` maps the logical store into the physical one; `Paths` no
+  longer owns a generic `mounts/2` API.
+- `Host.Names` derives worker and probe names, network names, and labels. Workers use one stable
+  `biot-worker-<id>` name with `io.biot.biot-id`, `io.biot.role=worker`, and a phase label; the
+  startup probe is `biot-worker-probe` with `io.biot.role=probe`. `Host.Network` creates isolated
+  networks with Podman's `--opt isolate=true` option. `Host.FileSystem` provides tri-state
+  inspection, atomic writes, and tree removal.
+- `Host.Podman.grant/3` gives a tree to the mapped allocation user. `reclaim/2` uses `podman unshare`
+  to restore node ownership and write permission before removal. `Host.Config` parses and validates
+  operator settings, while `Host.Context` binds them to one Biot ID.
+- `Host.Setup` creates the node layout, the empty Git template, and the worker `nix.conf`. That
+  configuration contains operator substituters and trusted keys, `sandbox = true`,
+  `sandbox-fallback = false`, and `require-sigs = true`. Its startup sandbox probe rejects a host
+  without nested isolation rather than allowing Nix to build unsandboxed.
+
+The step removes `Host.SourceResolver`, `nix/pin.nix`, node-wide environment storage, and the
+host's former `/nix/store` runtime mount. Environment storage and the runtime store now belong to
+the Biot's private allocation; the runtime still receives that private store read-only at
+`/nix/store`.
 
 `Host.Command.Reaper` monitors the command caller. It ends the whole process
 group and removes the stderr file when the caller dies. Normal completion calls
@@ -536,7 +574,7 @@ its retry row. A later `put_intent/1` keeps that report.
 `clear_failure/2` return `{:ok, state}` or `:superseded`.
 
 `Biot.Node.DataRootLock` owns a long-lived `flock` port on the data-root lock file.
-`application.ex` starts `Host.Command.Reaper` before host processes.
+`application.ex` starts `Host.Command.Reaper` before host effects.
 When host configuration exists, it then starts `DataRootLock`, `Host.Setup`,
 `Repo`, journal migration, `Control.RequestSupervisor`, `RuntimeLogs`, `Controllers`,
 `Host.ContainerEvents`, and finally the configured control connection. The lock exists before
@@ -567,7 +605,7 @@ Each program gets a restart wrapper with `restartAttemptLimit = 5`,
 attempt count after a healthy run, and exits 70 when it exhausts attempts. The reserved `biot-agent`
 program always runs the agent with the two required flags. The final `bundle.json` has seven fields:
 `format`, `closure_root`, `rootfs`, `entrypoint`, `shell_entrypoint`, `environment_file`, and
-`config_root`. `nix/pin.nix` remains the source-resolution artifact used by `Host.SourceResolver`.
+`config_root`.
 
 `nix/module.nix` defines `biot.shell` and service `directory = { root, path }`, where `root` is
 `checkout` or `service_data`. The reserved service name is `biot-agent`; `BIOT_CONFIG_ROOT`, `HOME`,
@@ -617,12 +655,20 @@ and diagnostic settings are:
 | `diagnostic_max_entry_bytes` | `65_536` | `BIOT_NODE_DIAGNOSTIC_MAX_ENTRY_BYTES` |
 | `max_staged_specs` | `1_000` | `BIOT_NODE_MAX_STAGED_SPECS` |
 | `max_frame_bytes` | `1_000_000` | `BIOT_MAX_FRAME_BYTES` |
+| `builder_image` | pinned digest | `BIOT_NODE_BUILDER_IMAGE` |
+| `binary_cache_urls` | `https://cache.nixos.org` | `BIOT_NODE_BINARY_CACHE_URLS` |
+| `binary_cache_keys` | cache.nixos.org key | `BIOT_NODE_BINARY_CACHE_KEYS` |
+| `build_support_dir` | release support directory | `BIOT_NODE_BUILD_SUPPORT_DIR` |
+| `worker_timeout_ms` | `3_600_000` | `BIOT_NODE_WORKER_TIMEOUT_MS` |
 
 `max_frame_bytes` is read from application configuration only by the node
-connection. `config/runtime.exs` also reads the data root, UID/GID range, executable,
-connection, heartbeat, reconnect, Nix, Podman, and TLS settings. The numeric
-`BIOT_NODE_*` overrides must be positive integers. `Host.Config.from_application!/0`
-requires complete, valid host configuration before node effects use it.
+connection. `config/runtime.exs` also reads the data root, UID/GID range, executable, connection, heartbeat,
+reconnect, Podman, and TLS settings. The node's build settings are `builder_image` (required to
+include a digest), `binary_cache_urls`, `binary_cache_keys`, `build_support_dir`, and
+`worker_timeout_ms`; the node no longer needs Nix installed. The removed settings are
+`nix_executable`, `nix_instantiate_executable`, `nix_build_file`, and `nix_pin_file`. The numeric
+`BIOT_NODE_*` overrides must be positive integers. `Host.Config.from_application!/0` requires
+complete, valid host configuration before node effects use it.
 
 ### Diagnostics, runtime logs, and control
 
@@ -691,7 +737,7 @@ real Linux effects, and the controller shell:
 - `host_command_ownership_test.exs` covers bounded stderr capture, overflow flags, FIFO drain cleanup, cancellation, and reaper ownership.
 - `host_journal_integration_test.exs` covers diagnostic indexing, same-key replacement, retention order, omitted Biot IDs, retry rows, intent replacement, and destruction reports.
 - `host_linux_integration_test.exs` covers Podman log-driver bounds and stream cleanup with real Linux commands.
-- `host_pure_test.exs` covers diagnostic selection, data markers, per-environment prepared resources, owner labels, and retry map types.
+- `host_pure_test.exs` covers diagnostic selection, data markers, per-environment prepared resources, strict staged-input parsing, private-store mapping, exact worker layouts, Git hardening, owner labels, and retry map types.
 - `node_values_test.exs` covers node-owned parsed values, including `NetworkId`.
 - `reconcile_important_cases_test.exs` covers unknown desired and sibling environments.
 - `reconcile_invariants_test.exs` covers `Reconcile.next/3` result shapes and safety invariants.
@@ -703,12 +749,15 @@ The Go tests cover `protocol/request_test.go`, `protocol/frame_test.go`,
 `shellsession/session_test.go`, and `cmd/biot-agent/main_test.go`. They include fuzz targets for
 requests, frames, and frame round trips, plus real Unix-socket, TCP-relay, and PTY tests.
 
-The node tests cover the rewritten bundle, path, Nix, and Linux host tests. The Nix suite checks the
-seven-field bundle, rootfs, environment loading, reserved names, directories, restart limits, and
-service state. `host_linux_integration_test.exs` checks real Podman mounts, rootfs, ownership, and
-container effects. The server's Linux controller proof is marked skipped: it is a single unlabelled
-result for dozens of assertions and will be replaced by bounded per-contract tests. Its support
-files remain available for that replacement.
+The node tests cover the rewritten pure and Linux suites. The protocol suite property-tests
+HTTPS-only `RepositorySource` parsing. `host_linux_integration_test.exs` covers real worker
+cancellation, Podman inspection, mounts, rootfs, ownership, private-store use, and environment
+release; its stateful environment fixture is skipped because the worker has no operator CA trust
+for its self-signed test Git server until step 18. The two server proof scripts are skipped while
+that large stateful evidence is replaced by bounded per-contract tests. The strict staged-input
+parser test remains red for the production gap it exposes: extra keys and invalid NAR hashes are
+not yet rejected. The evidence driver still covers worker isolation, hostile reads, cache use,
+recovery, release, and startup sandboxing.
 
 `docker/linux-host/run-tests.sh` runs `go test ./...` in `agent/` before the full Mix test suite
 inside the Linux host image.
@@ -755,8 +804,8 @@ It runs `mix deps.get`, `mix check`, `mix test`, `go build ./...`, and `go vet .
 ## Configuration and tests
 
 `config/test.exs` uses `_build/test/biot_server_test.sqlite3` and the Ecto SQL sandbox.
-`config/runtime.exs` also reads node data-root, UID-range, command, Nix, Podman,
-and control settings for the production node release.
+`config/runtime.exs` also reads node data-root, UID-range, command, Podman, and control settings
+for the production node release.
 
 Server configuration includes `publication_domain`, `ssh_advertised_host`,
 integer `ssh_port`, and `desired_sweep_interval_ms`. Production reads them from

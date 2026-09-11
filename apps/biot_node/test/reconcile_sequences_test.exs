@@ -25,7 +25,8 @@ defmodule Biot.Node.ReconcileSequencesTest do
 
       resolved = %{initialized | resolutions: %{e1() => {:present, resolution(e1())}}}
 
-      assert Reconcile.next(spec, resolved, nil) == {:run, {:prepare, e1(), manifest()}}
+      assert Reconcile.next(spec, resolved, nil) ==
+               {:run, {:prepare, e1(), manifest(), allocation()}}
 
       prepared = %{resolved | prepared: %{e1() => {:present, artifact(e1())}}}
 
@@ -83,7 +84,7 @@ defmodule Biot.Node.ReconcileSequencesTest do
       }
 
       assert Reconcile.next(spec, resolved_both, nil) ==
-               {:run, {:prepare, e2(), manifest()}}
+               {:run, {:prepare, e2(), manifest(), allocation()}}
 
       prepared_both = %{
         resolved_both
@@ -108,7 +109,8 @@ defmodule Biot.Node.ReconcileSequencesTest do
       running = %{installed | container: running(e2())}
 
       # Only once every desired-state step is ready does the cleanup phase give e1 back.
-      assert Reconcile.next(spec, running, nil) == {:run, {:release_environment, e1()}}
+      assert Reconcile.next(spec, running, nil) ==
+               {:run, {:release_environment, e1(), allocation()}}
 
       released = %{
         running
@@ -127,7 +129,9 @@ defmodule Biot.Node.ReconcileSequencesTest do
       assert Reconcile.next(spec, settled(e1()), nil) == {:run, {:retire, incarnation()}}
 
       retired = %{settled(e1()) | container: :absent}
-      assert Reconcile.next(spec, retired, nil) == {:run, {:release_environment, e1()}}
+
+      assert Reconcile.next(spec, retired, nil) ==
+               {:run, {:release_environment, e1(), allocation()}}
 
       released = %{retired | prepared: %{}, resolutions: %{}}
       assert Reconcile.next(spec, released, nil) == {:run, {:remove_data, allocation()}}

@@ -12,12 +12,18 @@ defmodule Biot.Node.HostPureTest do
   alias Biot.Node.Host.DataInspection
   alias Biot.Node.Host.Diagnostic, as: HostDiagnostic
   alias Biot.Node.Host.EnvironmentInspection
+  alias Biot.Node.Host.Git
   alias Biot.Node.Host.Names
   alias Biot.Node.Host.Outcome
   alias Biot.Node.Host.Paths
+  alias Biot.Node.Host.PrivateStore
+  alias Biot.Node.Host.StagedInputs
+  alias Biot.Node.Host.Worker.Layout
   alias Biot.Node.InspectionFailure
   alias Biot.Node.Journal.Ecto.Attempts
+  alias Biot.Node.StorePath
   alias Biot.Protocol.Platform
+  alias Biot.Protocol.RepositorySource
 
   describe "data inspection" do
     test "covers every data state from host facts" do
@@ -97,18 +103,15 @@ defmodule Biot.Node.HostPureTest do
     test "covers every resolution state" do
       present = resolution(e1())
       lost = resolution(e2())
-      unknown = resolution(e3())
 
       states =
         EnvironmentInspection.resolutions([
-          {present, :not_needed},
-          {lost, :absent},
-          {unknown, {:error, :eacces}}
+          {present, :present},
+          {lost, :absent}
         ])
 
       assert states[e1()] == {:present, present}
       assert states[e2()] == {:lost, lost}
-      assert {:unknown, ^unknown, %InspectionFailure{reason: :denied}} = states[e3()]
     end
 
     test "covers absent, present, and unknown prepared resources" do
@@ -242,25 +245,189 @@ defmodule Biot.Node.HostPureTest do
     end
   end
 
-  test "paths distinguish allocation mounts from the initialized mount set" do
+  test "paths keep runtime and build storage under the Biot" do
     config = config("/var/lib/biot")
     biot = biot_id()
 
-    assert Paths.mounts(config, biot) == [
+    assert Paths.runtime_mounts(config, biot) == [
              {"/var/lib/biot/biots/#{biot}/checkout", "/biot/checkout", :rw},
+             {"/var/lib/biot/biots/#{biot}/store/nix/store", "/nix/store", :ro},
              {"/var/lib/biot/biots/#{biot}/home", "/biot/home", :rw},
              {"/var/lib/biot/biots/#{biot}/service-data", "/biot/service-data", :rw},
              {"/var/lib/biot/biots/#{biot}/run", "/biot/run", :rw},
              {"/var/lib/biot/biots/#{biot}/secrets", "/biot/secrets", :ro}
            ]
 
-    assert Paths.mounts_created_at_allocation(config, biot) == tl(Paths.mounts(config, biot))
+    root = Paths.biot(config, biot)
 
-    assert Paths.mounts(config, biot) -- Paths.mounts_created_at_allocation(config, biot) ==
-             [{"/var/lib/biot/biots/#{biot}/checkout", "/biot/checkout", :rw}]
+    assert Enum.all?(
+             [
+               Paths.store_root(config, biot),
+               Paths.store(config, biot),
+               Paths.scratch(config, biot),
+               Paths.build_support(config, biot),
+               Paths.environments(config, biot),
+               Paths.environment(config, biot, e1()),
+               Paths.staged(config, biot, e1()),
+               Paths.environment_root(config, biot, e1())
+             ],
+             &String.starts_with?(&1, root <> "/")
+           )
+
+    refute Paths.environments(config, biot) in Paths.allocation_owned_directories(config, biot)
 
     assert Paths.marker(config, biot) == "/var/lib/biot/biots/#{biot}/marker"
-    refute Paths.marker(config, biot) in Enum.map(Paths.mounts(config, biot), &elem(&1, 0))
+
+    refute Paths.marker(config, biot) in Enum.map(
+             Paths.runtime_mounts(config, biot),
+             &elem(&1, 0)
+           )
+  end
+
+  describe "staged inputs" do
+    test "parse accepts the complete closed pins document" do
+      assert {:ok, staged} = StagedInputs.parse(staged_document())
+
+      assert Enum.map(StagedInputs.entries(staged), &elem(&1, 0)) == [
+               "build-support",
+               "nixpkgs",
+               "layer-0"
+             ]
+    end
+
+    test "parse rejects every missing required key" do
+      document = staged_document()
+
+      invalid = [
+        Map.delete(document, "build_support"),
+        Map.delete(document, "base_nixpkgs"),
+        Map.delete(document, "layers"),
+        put_in(document, ["build_support"], Map.delete(document["build_support"], "store_path")),
+        put_in(document, ["build_support"], Map.delete(document["build_support"], "nar_hash")),
+        put_in(document, ["base_nixpkgs"], Map.delete(document["base_nixpkgs"], "revision")),
+        put_in(document, ["base_nixpkgs"], Map.delete(document["base_nixpkgs"], "store_path")),
+        put_in(document, ["base_nixpkgs"], Map.delete(document["base_nixpkgs"], "nar_hash")),
+        update_in(document, ["layers"], fn [layer] -> [Map.delete(layer, "revision")] end),
+        update_in(document, ["layers"], fn [layer] -> [Map.delete(layer, "store_path")] end),
+        update_in(document, ["layers"], fn [layer] -> [Map.delete(layer, "nar_hash")] end)
+      ]
+
+      assert Enum.all?(invalid, &(StagedInputs.parse(&1) == {:error, :invalid_format}))
+    end
+
+    test "parse rejects extra keys, non-store paths, and invalid NAR hashes" do
+      document = staged_document()
+
+      invalid = [
+        Map.put(document, "extra", true),
+        put_in(document, ["build_support", "extra"], true),
+        put_in(document, ["base_nixpkgs", "extra"], true),
+        update_in(document, ["layers"], fn [layer] -> [Map.put(layer, "extra", true)] end),
+        put_in(document, ["build_support", "store_path"], "/tmp/support"),
+        put_in(document, ["base_nixpkgs", "nar_hash"], "not-a-nar-hash"),
+        update_in(document, ["layers"], fn [layer] ->
+          [Map.put(layer, "nar_hash", "sha256-short")]
+        end)
+      ]
+
+      assert Enum.all?(invalid, &(StagedInputs.parse(&1) == {:error, :invalid_format}))
+    end
+
+    test "manifest rejects a layer count that differs from the selection" do
+      assert {:ok, staged} = StagedInputs.parse(staged_document())
+      assert StagedInputs.manifest(staged, selection()) == {:error, :invalid_format}
+    end
+
+    property "parse is total over random maps and binaries" do
+      values =
+        StreamData.one_of([
+          StreamData.binary(max_length: 512),
+          StreamData.map_of(StreamData.term(), StreamData.term(), max_length: 12)
+        ])
+
+      check all(value <- values) do
+        assert match?({:ok, %StagedInputs{}}, StagedInputs.parse(value)) or
+                 StagedInputs.parse(value) == {:error, :invalid_format}
+      end
+    end
+  end
+
+  test "worker layout grants each phase only its required mounts" do
+    config = config("/var/lib/biot")
+    biot = biot_id()
+    env = e1()
+    staged = [{"layer-0", "layer", "/private/store/layer"}]
+
+    common = [
+      {Paths.store_root(config, biot), "/biot/store", :rw},
+      {Paths.scratch(config, biot), "/build", :rw},
+      {Paths.worker_nix_config(config), "/etc/nix/nix.conf", :ro}
+    ]
+
+    assert Layout.mounts(config, biot, {:fetch, env}) == [
+             {Paths.environment(config, biot, env), Layout.environment(env), :rw},
+             {Paths.build_support(config, biot), Layout.build_support(), :ro}
+             | common
+           ]
+
+    assert Layout.mounts(config, biot, {:build, env, staged}) == [
+             {Paths.environment(config, biot, env), Layout.environment(env), :rw},
+             {"/private/store/layer", Layout.staged_input("layer-0", "layer"), :ro}
+             | common
+           ]
+
+    assert Layout.mounts(config, biot, :collect) == [
+             {Paths.environments(config, biot), "/biot/environments", :ro}
+             | common
+           ]
+  end
+
+  test "worker layout fixes the environment, tmpfs, and logical store" do
+    assert Layout.variables() == [
+             {"NIX_PATH", ""},
+             {"TMPDIR", "/build"},
+             {"HOME", "/build/home"},
+             {"XDG_CACHE_HOME", "/build/cache"}
+           ]
+
+    assert Layout.image_tmpfs() == ["/tmp", "/root", "/var", "/nix/var"]
+    assert Layout.store_arguments() == ["--store", "/biot/store"]
+  end
+
+  test "private store maps logical paths below the allocation store root" do
+    config = config("/var/lib/biot")
+    {:ok, store_path} = StorePath.parse(store_path("bundle"))
+
+    assert PrivateStore.host_path(config, biot_id(), store_path) ==
+             "/var/lib/biot/biots/#{biot_id()}/store/nix/store/#{Path.basename(store_path("bundle"))}"
+  end
+
+  test "Git hardening and clone arguments have one exact shape" do
+    config = config("/var/lib/biot")
+    {:ok, repository} = RepositorySource.parse("https://example.com/project.git")
+
+    assert Git.environment() == [
+             {"GIT_ALLOW_PROTOCOL", "https"},
+             {"GIT_CONFIG_NOSYSTEM", "1"},
+             {"GIT_CONFIG_GLOBAL", "/dev/null"},
+             {"GIT_TERMINAL_PROMPT", "0"},
+             {"GIT_ASKPASS", ""},
+             {"SSH_ASKPASS", ""}
+           ]
+
+    assert Git.clone_arguments(config, repository, "/checkout") == [
+             "-c",
+             "credential.helper=",
+             "-c",
+             "submodule.recurse=false",
+             "clone",
+             "--no-recurse-submodules",
+             "--template",
+             Paths.git_template(config),
+             "--",
+             "https://example.com/project.git",
+             "/checkout"
+           ]
   end
 
   test "names include every owner and stable resource identity" do
@@ -374,8 +541,6 @@ defmodule Biot.Node.HostPureTest do
       uid_range_count: 1_024,
       uid_range_limit: 165_536,
       git_executable: "git",
-      nix_executable: "nix",
-      nix_instantiate_executable: "nix-instantiate",
       podman_executable: "podman",
       setsid_executable: "setsid",
       mkfifo_executable: "mkfifo",
@@ -383,11 +548,14 @@ defmodule Biot.Node.HostPureTest do
       cat_executable: "cat",
       sleep_executable: "sleep",
       podman_network_command: "slirp4netns",
-      nix_build_file: "/source/nix/build.nix",
-      nix_pin_file: "/source/nix/pin.nix",
+      builder_image: "example.test/nix@sha256:#{String.duplicate("a", 64)}",
+      build_support_dir: "/source",
+      binary_cache_urls: ["https://cache.example.test"],
+      binary_cache_keys: ["cache.example.test:key"],
       nixpkgs_repository: "https://github.com/NixOS/nixpkgs",
       nixpkgs_ref: "nixos-unstable",
       command_timeout_ms: 1_000,
+      worker_timeout_ms: 2_000,
       command_max_output_bytes: 1_000,
       command_max_stderr_bytes: 1_000,
       runtime_log_max_bytes: 1_000,
@@ -407,4 +575,25 @@ defmodule Biot.Node.HostPureTest do
       overrides
     )
   end
+
+  defp staged_document do
+    %{
+      "build_support" => %{"store_path" => store_path("support"), "nar_hash" => nar_hash(1)},
+      "base_nixpkgs" => %{
+        "store_path" => store_path("nixpkgs"),
+        "nar_hash" => nar_hash(2),
+        "revision" => String.duplicate("a", 40)
+      },
+      "layers" => [
+        %{
+          "store_path" => store_path("layer"),
+          "nar_hash" => nar_hash(3),
+          "revision" => String.duplicate("b", 40)
+        }
+      ]
+    }
+  end
+
+  defp store_path(name), do: "/nix/store/#{String.duplicate("a", 32)}-#{name}"
+  defp nar_hash(byte), do: "sha256-" <> Base.encode64(:binary.copy(<<byte>>, 32))
 end

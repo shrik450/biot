@@ -199,13 +199,13 @@ defmodule Biot.Step14Evidence do
     {:ok, host} = Host.context(biot_id)
     :ok = Host.run({:allocate, biot_id}, host)
 
-    Enum.each(Paths.mounts(host.config, biot_id), fn {source, _target, _mode} ->
+    Enum.each(Paths.runtime_mounts(host.config, biot_id), fn {source, _target, _mode} ->
       File.mkdir_p!(source)
     end)
 
     allocation = Journal.allocation(biot_id)
     first_runner = runtime_runner("first")
-    write_runtime_bundle(host.config, environment_id, first_runner)
+    write_runtime_bundle(host.config, biot_id, environment_id, first_runner)
     {:ok, first_artifact} = ArtifactId.parse(first_runner.closure_root)
 
     installation = %Installation{
@@ -249,7 +249,10 @@ defmodule Biot.Step14Evidence do
     :ok = Container.retire(host, first_container.incarnation_id)
     after_retire = RuntimeLogs.fetch(biot_id, 10_000)
     metadata_before_failure = File.read!(Paths.runtime_log_metadata(host.config, biot_id))
-    bundle_path = Path.join(Paths.environment_root(host.config, environment_id), "bundle.json")
+
+    bundle_path =
+      Path.join(Paths.environment_root(host.config, biot_id, environment_id), "bundle.json")
+
     valid_bundle = File.read!(bundle_path)
     invalid_rootfs = "/nix/store/00000000000000000000000000000000-missing-rootfs"
     invalid_bundle = valid_bundle |> Jason.decode!() |> Map.put("rootfs", invalid_rootfs)
@@ -266,7 +269,7 @@ defmodule Biot.Step14Evidence do
     metadata_after_failure = File.read!(Paths.runtime_log_metadata(host.config, biot_id))
 
     second_runner = runtime_runner("second")
-    write_runtime_bundle(host.config, environment_id, second_runner)
+    write_runtime_bundle(host.config, biot_id, environment_id, second_runner)
     {:ok, second_artifact} = ArtifactId.parse(second_runner.closure_root)
     second_installation = %{installation | artifact_id: second_artifact}
     :ok = Container.start(host, allocation, second_installation)
@@ -345,8 +348,8 @@ defmodule Biot.Step14Evidence do
     end
   end
 
-  defp write_runtime_bundle(config, environment_id, runner) do
-    root = Paths.environment_root(config, environment_id)
+  defp write_runtime_bundle(config, biot_id, environment_id, runner) do
+    root = Paths.environment_root(config, biot_id, environment_id)
     File.mkdir_p!(root)
 
     File.write!(
@@ -545,7 +548,9 @@ defmodule Biot.Step14Evidence do
   end
 
   defp curl_executable(biot) do
-    {:ok, bundle} = HostEnvironment.bundle(biot.host.config, biot.environment_id)
+    {:ok, bundle} =
+      HostEnvironment.bundle(biot.host.config, biot.biot_id, biot.environment_id)
+
     environment = bundle.environment_file |> StorePath.to_string() |> File.read!()
     [path] = Regex.run(~r{/nix/store/[^\s:'"]*curl[^\s:'"]*/bin}, environment)
     Path.join(path, "curl")
@@ -1704,9 +1709,15 @@ defmodule Biot.Step14Evidence do
       uid_range_base: 100_000,
       uid_range_count: 1_024,
       uid_range_limit: 165_536,
-      nix_build_file: Path.join(@project_root, "nix/build.nix"),
-      nix_pin_file: Path.join(@project_root, "nix/pin.nix"),
+      builder_image:
+        "docker.io/nixos/nix@sha256:238dfe9a743a6e276e8e04d1db13b978c9bd91741445dec5d733c579596fea79",
+      build_support_dir: @project_root,
+      binary_cache_urls: ["https://cache.nixos.org"],
+      binary_cache_keys: [
+        "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+      ],
       host_command_timeout_ms: 600_000,
+      worker_timeout_ms: 600_000,
       host_command_max_stderr_bytes: 256_000,
       runtime_log_max_bytes: 4_096,
       observation_interval_ms: @observation_interval_ms,

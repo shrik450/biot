@@ -1,50 +1,21 @@
-{ manifest, system }:
+# The user evaluation phase. It runs in a build worker under `--pure-eval`, so the only paths it
+# can name are the ones `fetch.nix` staged and the node mounted for this evaluation. Every input
+# arrives as a path and the NAR hash that names its bytes; nothing here fetches, and there is no
+# second way for a source to enter a build.
+{ staged, system }:
 
 let
-  manifestValue = builtins.fromJSON (builtins.readFile manifest);
-  manifestFields = [ "base_nixpkgs" "digest" "layers" "project_snapshot" ];
-  unexpectedFields = builtins.filter
-    (name: !(builtins.elem name manifestFields))
-    (builtins.attrNames manifestValue);
-  missingFields = builtins.filter
-    (name: !(builtins.elem name (builtins.attrNames manifestValue)))
-    manifestFields;
-  fieldErrors =
-    (map (name: "manifest has unexpected field ${name}") unexpectedFields)
-    ++ map (name: "manifest is missing field ${name}") missingFields;
-  parsedManifest =
-    if !builtins.isAttrs manifestValue then
-      throw "manifest must be an attribute set"
-    else if fieldErrors != [ ] then
-      throw (builtins.concatStringsSep "\n" fieldErrors)
-    else if !builtins.isString manifestValue.base_nixpkgs then
-      throw "manifest field base_nixpkgs must be a string"
-    else if !builtins.isList manifestValue.layers then
-      throw "manifest field layers must be a list"
-    else if !builtins.all builtins.isString manifestValue.layers then
-      throw "manifest field layers must contain only strings"
-    else
-      manifestValue;
+  parsed = builtins.fromJSON staged;
 
-  sourceParts = source:
-    let
-      parts = builtins.filter builtins.isString (builtins.split "#" source);
-    in
-    if builtins.length parts == 3 then parts
-    else throw "each pinned source must have the form <source>#<revision>#<NAR hash>";
+  # The mount's last path segment is the staged store object's own name, which is what makes this
+  # resolve to the path the fetch phase already retained instead of copying it again.
+  materialise = entry: builtins.fetchTree {
+    type = "path";
+    inherit (entry) path narHash;
+  };
 
-  fetchPinnedSource = source:
-    let
-      parts = sourceParts source;
-      sourceName = builtins.elemAt parts 0;
-      rev = builtins.elemAt parts 1;
-      narHash = builtins.elemAt parts 2;
-      url = if sourceName == "nixpkgs" then "https://github.com/NixOS/nixpkgs" else sourceName;
-    in
-    builtins.fetchGit { inherit url rev narHash; shallow = true; };
-
-  nixpkgsPath = fetchPinnedSource parsedManifest.base_nixpkgs;
-  layerPaths = map fetchPinnedSource parsedManifest.layers;
+  nixpkgsPath = materialise parsed.nixpkgs;
+  layerPaths = map materialise parsed.layers;
   layerModules = map modulePath layerPaths;
   pkgs = import nixpkgsPath { inherit system; config = { }; overlays = [ ]; };
   inherit (pkgs) lib;

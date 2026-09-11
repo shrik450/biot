@@ -15,6 +15,7 @@ defmodule Biot.Node.Host.Container do
   alias Biot.Node.Host.Outcome
   alias Biot.Node.Host.Paths
   alias Biot.Node.Host.Podman
+  alias Biot.Node.Host.PrivateStore
   alias Biot.Node.Installation
   alias Biot.Node.StorePath
   alias Biot.Protocol.BiotId
@@ -43,7 +44,7 @@ defmodule Biot.Node.Host.Container do
         %Allocation{biot_id: biot_id} = allocation,
         %Installation{biot_id: biot_id} = installation
       ) do
-    with {:ok, bundle} <- Environment.bundle(config, installation.environment_id),
+    with {:ok, bundle} <- Environment.bundle(config, biot_id, installation.environment_id),
          {:ok, _network} <- ensure_network(config, allocation),
          {:ok, incarnation_id} <- start_identity(config, biot_id),
          {:ok, _container} <- create(config, allocation, installation, bundle, incarnation_id),
@@ -69,10 +70,20 @@ defmodule Biot.Node.Host.Container do
     end
   end
 
+  # The role filter matters: a build worker carries the same owner label, and it is not a runtime.
   defp state_for_owner(config, biot_id) do
-    filter = "label=#{Names.biot_label()}=#{BiotId.to_string(biot_id)}"
+    arguments = [
+      "ps",
+      "--all",
+      "--filter",
+      Names.owner_filter(biot_id),
+      "--filter",
+      Names.role_filter(:runtime),
+      "--format",
+      "json"
+    ]
 
-    case Podman.run(config, ["ps", "--all", "--filter", filter, "--format", "json"]) do
+    case Podman.run(config, arguments) do
       {:ok, %Command.Result{status: 0, stdout: stdout}} ->
         parse_owned_list(config, stdout)
 
@@ -176,8 +187,11 @@ defmodule Biot.Node.Host.Container do
         runtime_log_arguments(config) ++
         volume_arguments(config, allocation.biot_id) ++
         [
+          # The last two arguments are the container's root filesystem and the program in it that
+          # runs. The bundle names both by their logical store path, which only the container sees,
+          # so the root filesystem is given as the host directory holding it.
           "--rootfs",
-          StorePath.to_string(bundle.rootfs),
+          PrivateStore.host_path(config, allocation.biot_id, bundle.rootfs),
           StorePath.to_string(bundle.entrypoint)
         ]
 
@@ -322,10 +336,9 @@ defmodule Biot.Node.Host.Container do
   end
 
   defp volume_arguments(config, biot_id) do
-    ["--volume", "/nix/store:/nix/store:ro"] ++
-      Enum.flat_map(Paths.mounts(config, biot_id), fn {source, target, mode} ->
-        ["--volume", "#{source}:#{target}:#{mode}"]
-      end)
+    Enum.flat_map(Paths.runtime_mounts(config, biot_id), fn {source, target, mode} ->
+      ["--volume", "#{source}:#{target}:#{mode}"]
+    end)
   end
 
   defp runtime_log_arguments(config) do

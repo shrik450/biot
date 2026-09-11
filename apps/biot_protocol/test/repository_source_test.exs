@@ -12,17 +12,10 @@ defmodule Biot.Protocol.RepositorySourceTest do
     end
   end
 
-  test "parse accepts supported credential-free repository forms" do
-    valid_urls = [
-      "https://github.com/example/project.git",
-      "ssh://git@github.com/example/project.git",
-      "git@github.com:example/project.git"
-    ]
-
-    for url <- valid_urls do
-      assert {:ok, repository} = RepositorySource.parse(url)
-      assert RepositorySource.to_string(repository) == url
-    end
+  test "parse accepts a credential-free HTTPS repository" do
+    url = "https://github.com/example/project.git"
+    assert {:ok, repository} = RepositorySource.parse(url)
+    assert RepositorySource.to_string(repository) == url
   end
 
   test "parse rejects embedded HTTPS credentials" do
@@ -35,15 +28,30 @@ defmodule Biot.Protocol.RepositorySourceTest do
     end
   end
 
-  test "parse permits an SSH user but rejects an SSH password" do
-    assert {:ok, _repository} =
-             RepositorySource.parse("ssh://git@github.com/example/project.git")
+  property "parse rejects every non-HTTPS URI scheme" do
+    check all(
+            scheme <-
+              StreamData.one_of([
+                StreamData.member_of(["http", "ssh", "git", "file", "ftp"]),
+                StreamData.string(:alphanumeric, min_length: 1, max_length: 12)
+              ]),
+            scheme = String.downcase(scheme),
+            scheme != "https"
+          ) do
+      assert RepositorySource.parse("#{scheme}://example.com/project.git") ==
+               {:error, :invalid_format}
+    end
+  end
 
-    assert RepositorySource.parse("ssh://git:secret@github.com/example/project.git") ==
-             {:error, :embedded_credentials}
-
-    assert RepositorySource.parse("ssh://git%3Asecret@github.com/example/project.git") ==
-             {:error, :embedded_credentials}
+  property "parse rejects scp-like repository addresses" do
+    check all(
+            user <- StreamData.string(:alphanumeric, min_length: 1, max_length: 12),
+            host <- StreamData.string(:alphanumeric, min_length: 1, max_length: 12),
+            path <- StreamData.string(:alphanumeric, min_length: 1, max_length: 20)
+          ) do
+      assert RepositorySource.parse("#{user}@#{host}.example:#{path}.git") ==
+               {:error, :invalid_format}
+    end
   end
 
   test "parse rejects fragments, queries, whitespace, and incomplete URLs" do
@@ -53,6 +61,9 @@ defmodule Biot.Protocol.RepositorySourceTest do
       "https://github.com",
       "https:///example/project.git",
       "git://github.com/example/project.git",
+      "ssh://git@github.com/example/project.git",
+      "file:///tmp/project.git",
+      "/tmp/project.git",
       "git@github.com:",
       "github.com/example/project.git",
       "https://github.com/example/my project.git",

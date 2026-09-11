@@ -337,7 +337,7 @@ defmodule Biot.Node.ReconcileInvariantsTest do
 
   defp assert_no_install_while_present(_container, _result), do: assert(true)
 
-  defp assert_release_is_unretained({:run, {:release_environment, id}}, spec, state) do
+  defp assert_release_is_unretained({:run, {:release_environment, id, _allocation}}, spec, state) do
     refute id in retained_by_intent(spec.desired.state, spec.desired.environment_id, state)
   end
 
@@ -368,14 +368,17 @@ defmodule Biot.Node.ReconcileInvariantsTest do
   defp needed_inputs({:allocate, _biot_id}), do: [:data]
   defp needed_inputs({:initialize, _allocation, _source}), do: [:data]
   defp needed_inputs({:resolve, _id, _selection, _allocation}), do: [:installation, :prepared]
-  defp needed_inputs({:prepare, _id, _manifest}), do: [:installation, :prepared, :resolution]
+
+  defp needed_inputs({:prepare, _id, _manifest, _allocation}),
+    do: [:installation, :prepared, :resolution]
+
   defp needed_inputs({:retire, _incarnation}), do: [:container]
 
   defp needed_inputs({:install, _alloc, _artifact, _id}),
     do: [:installation, :prepared, :container]
 
   defp needed_inputs({:start, _allocation, _installation}), do: [:installation, :container]
-  defp needed_inputs({:release_environment, _id}), do: [:container]
+  defp needed_inputs({:release_environment, _id, _allocation}), do: [:container]
   defp needed_inputs({:remove_data, _allocation}), do: [:data]
   defp needed_inputs({:release_allocation, _allocation}), do: [:data]
 

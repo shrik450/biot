@@ -1,5 +1,15 @@
 defmodule Biot.Node.Host.Environment do
-  @moduledoc "Inspects, resolves, prepares, installs, and releases Biot-owned environments."
+  @moduledoc """
+  Inspects, resolves, prepares, installs, and releases one Biot's environments.
+
+  Every Nix action runs in that Biot's own build worker, so nothing here starts Nix on the node.
+  Resolution stages the inputs, preparation evaluates them, and release gives back both the
+  directory that held them and the store space the collection frees.
+
+  An environment lives under the allocation, so releasing one is removing a directory inside the
+  Biot's own root. Ownership is still checked against the journal, because the records outlive the
+  directory and a cross-Biot selection must fail before anything is removed.
+  """
 
   alias Biot.Node.Allocation
   alias Biot.Node.ArtifactId
@@ -12,31 +22,36 @@ defmodule Biot.Node.Host.Environment do
   alias Biot.Node.Host.FileSystem
   alias Biot.Node.Host.Outcome
   alias Biot.Node.Host.Paths
-  alias Biot.Node.Host.SourceResolver
+  alias Biot.Node.Host.Podman
+  alias Biot.Node.Host.PrivateStore
+  alias Biot.Node.Host.SourceStaging
+  alias Biot.Node.Host.StagedInputs
+  alias Biot.Node.Host.Worker
+  alias Biot.Node.Host.Worker.Layout
   alias Biot.Node.Installation
   alias Biot.Node.Journal
-  alias Biot.Node.NodePrivatePath
   alias Biot.Node.NodeState
   alias Biot.Node.Resolution
   alias Biot.Node.StorePath
+  alias Biot.Protocol.BiotId
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.EnvironmentSelection
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.Platform
 
-  @spec resolutions(Config.t(), [Resolution.t()]) :: %{
+  @spec resolutions(Config.t(), BiotId.t(), [Resolution.t()]) :: %{
           EnvironmentId.t() => NodeState.resolution_state()
         }
-  def resolutions(_config, rows) do
+  def resolutions(config, biot_id, rows) do
     rows
-    |> Enum.map(&{&1, resolution_fact(&1)})
+    |> Enum.map(&{&1, SourceStaging.staged_fact(config, biot_id, &1.environment_id)})
     |> EnvironmentInspection.resolutions()
   end
 
-  @spec prepared(Config.t(), [Resolution.t()]) :: NodeState.prepared()
-  def prepared(config, rows) do
+  @spec prepared(Config.t(), BiotId.t(), [Resolution.t()]) :: NodeState.prepared()
+  def prepared(config, biot_id, rows) do
     rows
-    |> Enum.map(&{&1.environment_id, artifact(config, &1.environment_id)})
+    |> Enum.map(&{&1.environment_id, artifact(config, biot_id, &1.environment_id)})
     |> EnvironmentInspection.prepared()
   end
 
@@ -54,21 +69,40 @@ defmodule Biot.Node.Host.Environment do
         %Context{biot_id: biot_id} = context,
         environment_id,
         selection,
-        %Allocation{biot_id: biot_id}
+        %Allocation{biot_id: biot_id} = allocation
       ) do
     case Journal.resolution(biot_id, environment_id) do
       %Resolution{} -> :ok
-      nil -> create_resolution(context, environment_id, selection)
+      nil -> create_resolution(context, allocation, environment_id, selection)
     end
   end
 
-  @spec prepare(Context.t(), EnvironmentId.t(), Manifest.t()) ::
+  @doc """
+  Builds one environment's bundle from the inputs its resolution staged, and nothing else.
+
+  The manifest the action carries says what the server believes was resolved; the staged inputs
+  say what this Biot's store actually holds. Only the second can be built from, so only the second
+  reaches the worker.
+  """
+  @spec prepare(Context.t(), EnvironmentId.t(), Manifest.t(), Allocation.t()) ::
           :ok | {:error, Outcome.t()}
-  def prepare(%Context{config: config}, environment_id, manifest) do
-    with {:ok, _directory} <- ensure_environment_directory(config, environment_id),
-         {:ok, _manifest} <- persist_manifest(config, environment_id, manifest),
-         {:ok, _build} <- build(config, environment_id),
-         {:ok, _artifact_id} <- built_artifact(config, environment_id) do
+  def prepare(
+        %Context{biot_id: biot_id, config: config} = context,
+        environment_id,
+        %Manifest{},
+        %Allocation{biot_id: biot_id} = allocation
+      ) do
+    with {:ok, staged} <- SourceStaging.read(config, biot_id, environment_id),
+         mounts = staged_mounts(config, biot_id, staged),
+         {:ok, result} <-
+           Worker.run(
+             context,
+             allocation,
+             {:build, environment_id, mounts},
+             build_arguments(config, environment_id, staged)
+           ),
+         :ok <- built(result),
+         {:ok, _artifact_id} <- built_artifact(config, biot_id, environment_id) do
       :ok
     end
   end
@@ -87,14 +121,28 @@ defmodule Biot.Node.Host.Environment do
     end
   end
 
-  @spec release(Context.t(), EnvironmentId.t()) :: :ok | {:error, Outcome.t()}
-  def release(%Context{biot_id: biot_id, config: config}, environment_id) do
+  @doc """
+  Gives back one environment's staged inputs, prepared artifact, and store space.
+
+  The order is the only thing that makes a crash survivable. A surviving build worker can still be
+  writing this directory, so it goes first. The resolution record goes last, because until the
+  collection has run it is the only durable reason to run this action again: remove and collect
+  both converge when repeated, but a deleted row leaves nothing to repeat from.
+  """
+  @spec release(Context.t(), EnvironmentId.t(), Allocation.t()) :: :ok | {:error, Outcome.t()}
+  def release(
+        %Context{biot_id: biot_id, config: config} = context,
+        environment_id,
+        %Allocation{biot_id: biot_id} = allocation
+      ) do
     case Journal.resolution_owner(environment_id) do
       nil ->
-        release_unrecorded_environment(config, environment_id)
+        release_unrecorded_environment(config, biot_id, environment_id)
 
       ^biot_id ->
-        with {:ok, _removed} <- remove_environment(config, environment_id),
+        with :ok <- Worker.cancel(config, biot_id),
+             {:ok, _removed} <- remove_environment(config, biot_id, environment_id),
+             {:ok, _collected} <- collect(context, allocation),
              {:ok, _records} <- delete_environment_records(biot_id, environment_id) do
           :ok
         end
@@ -108,12 +156,10 @@ defmodule Biot.Node.Host.Environment do
     end
   end
 
-  @spec bundle(Config.t(), EnvironmentId.t()) ::
+  @spec bundle(Config.t(), BiotId.t(), EnvironmentId.t()) ::
           {:ok, EnvironmentBundle.t()} | {:error, Outcome.t()}
-  def bundle(config, environment_id) do
-    path = Path.join(Paths.environment_root(config, environment_id), "bundle.json")
-
-    case FileSystem.read(path) do
+  def bundle(config, biot_id, environment_id) do
+    case read_bundle(config, biot_id, environment_id) do
       {:present, content} ->
         parse_bundle(content)
 
@@ -125,32 +171,27 @@ defmodule Biot.Node.Host.Environment do
     end
   end
 
-  defp create_resolution(context, environment_id, selection) do
-    with {:ok, manifest} <- pin_manifest(context.config, selection),
+  defp create_resolution(context, allocation, environment_id, selection) do
+    with {:ok, staged} <- SourceStaging.fetch(context, allocation, environment_id, selection),
+         {:ok, manifest} <- manifest(staged, selection),
          {:ok, _resolution} <- record_resolution(context.biot_id, environment_id, manifest) do
       :ok
     end
   end
 
-  defp pin_manifest(config, selection) do
-    with {:ok, base_nixpkgs} <- SourceResolver.pin(config, selection.base_nixpkgs),
-         {:ok, layers} <- pin_layers(config, selection.layers) do
-      {:ok, Manifest.build(base_nixpkgs, layers, nil)}
+  defp manifest(staged, selection) do
+    case StagedInputs.manifest(staged, selection) do
+      {:ok, manifest} ->
+        {:ok, manifest}
+
+      {:error, :invalid_format} ->
+        {:error,
+         Outcome.new(
+           :resolution_failed,
+           Diagnostic.text("the fetch phase staged inputs the selection does not describe")
+         )}
     end
   end
-
-  defp pin_layers(config, selectors) do
-    Enum.reduce_while(selectors, {:ok, []}, fn selector, {:ok, pinned} ->
-      case SourceResolver.pin(config, selector) do
-        {:ok, source} -> {:cont, {:ok, [source | pinned]}}
-        {:error, %Outcome{} = outcome} -> {:halt, {:error, outcome}}
-      end
-    end)
-    |> reverse_pins()
-  end
-
-  defp reverse_pins({:ok, reversed}), do: {:ok, Enum.reverse(reversed)}
-  defp reverse_pins({:error, %Outcome{} = outcome}), do: {:error, outcome}
 
   defp record_resolution(biot_id, environment_id, manifest) do
     case Journal.put_resolution(biot_id, environment_id, manifest) do
@@ -172,63 +213,69 @@ defmodule Biot.Node.Host.Environment do
     end
   end
 
-  defp ensure_environment_directory(config, environment_id) do
-    case File.mkdir_p(Paths.environment(config, environment_id)) do
-      :ok -> {:ok, :directory}
-      {:error, reason} -> {:error, Outcome.from_reason(reason)}
-    end
+  # `--pure-eval` refuses every absolute path, so each staged input is named by the hash the fetch
+  # phase recorded for it, at the mount the node gave it.
+  defp build_arguments(config, environment_id, staged) do
+    [
+      "nix",
+      "build",
+      "--option",
+      "pure-eval",
+      "true",
+      "--expr",
+      build_expression(staged.build_support),
+      "--argstr",
+      "staged",
+      Jason.encode!(encode_staged(staged)),
+      "--argstr",
+      "system",
+      Platform.to_string(config.platform),
+      "--out-link",
+      Layout.bundle_link(environment_id)
+    ] ++ Layout.store_arguments()
   end
 
-  defp persist_manifest(config, environment_id, manifest) do
-    case FileSystem.write_atomic(
-           Paths.manifest(config, environment_id),
-           encoded_manifest(manifest)
-         ) do
-      :ok -> {:ok, :manifest}
-      {:error, reason} -> {:error, Outcome.from_reason(reason)}
-    end
+  defp build_expression(build_support) do
+    ~s|import (#{fetch_tree("build-support", build_support)} + "/nix/build.nix")|
   end
 
-  defp build(config, environment_id) do
-    result =
-      Command.run(
-        config.setsid_executable,
-        Config.capture_tools(config),
-        config.nix_executable,
-        [
-          "build",
-          "--extra-experimental-features",
-          "nix-command",
-          "--file",
-          config.nix_build_file,
-          "--argstr",
-          "manifest",
-          Paths.manifest(config, environment_id),
-          "--argstr",
-          "system",
-          Platform.to_string(config.platform),
-          "--out-link",
-          Paths.environment_root(config, environment_id)
-        ],
-        timeout_ms: config.command_timeout_ms,
-        max_output_bytes: config.command_max_output_bytes,
-        max_stderr_bytes: config.command_max_stderr_bytes
-      )
-
-    case result do
-      {:ok, %Command.Result{status: 0}} ->
-        {:ok, :built}
-
-      {:ok, %Command.Result{} = command_result} ->
-        {:error, Outcome.from_command(:build_failed, command_result)}
-
-      {:error, reason} ->
-        {:error, Outcome.from_reason(reason)}
-    end
+  defp encode_staged(staged) do
+    %{
+      "nixpkgs" => encode_input("nixpkgs", staged.base_nixpkgs.input),
+      "layers" =>
+        Enum.with_index(staged.layers, fn source, index ->
+          encode_input("layer-#{index}", source.input)
+        end)
+    }
   end
 
-  defp built_artifact(config, environment_id) do
-    case artifact(config, environment_id) do
+  defp encode_input(entry, input) do
+    %{"path" => staged_path(entry, input), "narHash" => input.nar_hash}
+  end
+
+  defp fetch_tree(entry, input) do
+    ~s|builtins.fetchTree { type = "path"; path = "#{staged_path(entry, input)}"; | <>
+      ~s|narHash = "#{input.nar_hash}"; }|
+  end
+
+  defp staged_path(entry, input) do
+    Layout.staged_input(entry, StorePath.object_name(input.store_path))
+  end
+
+  defp staged_mounts(config, biot_id, staged) do
+    Enum.map(StagedInputs.entries(staged), fn {entry, input} ->
+      {entry, StorePath.object_name(input.store_path),
+       PrivateStore.host_path(config, biot_id, input.store_path)}
+    end)
+  end
+
+  defp built(%Command.Result{status: 0}), do: :ok
+
+  defp built(%Command.Result{} = result),
+    do: {:error, Outcome.from_command(:build_failed, result)}
+
+  defp built_artifact(config, biot_id, environment_id) do
+    case artifact(config, biot_id, environment_id) do
       {:present, artifact_id} ->
         {:ok, artifact_id}
 
@@ -236,7 +283,7 @@ defmodule Biot.Node.Host.Environment do
         {:error,
          Outcome.new(
            :build_failed,
-           Diagnostic.text("nix build did not create its output link")
+           Diagnostic.text("the build worker did not create its output link")
          )}
 
       {:error, {_reason, detail}} ->
@@ -244,23 +291,21 @@ defmodule Biot.Node.Host.Environment do
     end
   end
 
-  defp artifact(config, environment_id) do
-    root = Paths.environment_root(config, environment_id)
-
-    case FileSystem.directory(root) do
-      {:present, :directory} -> parse_artifact(root)
+  defp artifact(config, biot_id, environment_id) do
+    case read_bundle(config, biot_id, environment_id) do
+      {:present, content} -> parse_artifact_content(content)
       :absent -> :absent
-      {:error, reason} -> {:error, {reason, "the environment root could not be inspected"}}
+      {:error, reason} -> {:error, {reason, "the environment bundle could not be read"}}
     end
   end
 
-  defp parse_artifact(root) do
-    path = Path.join(root, "bundle.json")
+  defp read_bundle(config, biot_id, environment_id) do
+    link = Paths.environment_root(config, biot_id, environment_id)
 
-    case FileSystem.read(path) do
-      {:present, content} -> parse_artifact_content(content)
-      :absent -> {:error, {:unreadable, "the environment bundle is absent"}}
-      {:error, reason} -> {:error, {reason, "the environment bundle could not be read"}}
+    case PrivateStore.object_at(config, biot_id, link) do
+      {:present, path} -> FileSystem.read(Path.join(path, "bundle.json"))
+      :absent -> :absent
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -288,21 +333,41 @@ defmodule Biot.Node.Host.Environment do
     end
   end
 
-  defp resolution_fact(%Resolution{snapshot_path: nil}), do: :not_needed
+  # The worker wrote this tree as the allocation's user, so the node takes ownership back before
+  # removing it, the same way it does for working data.
+  defp remove_environment(config, biot_id, environment_id) do
+    path = Paths.environment(config, biot_id, environment_id)
 
-  defp resolution_fact(%Resolution{snapshot_path: snapshot_path}) do
-    snapshot_path |> NodePrivatePath.to_string() |> FileSystem.directory()
-  end
-
-  defp remove_environment(config, environment_id) do
-    case FileSystem.remove_tree(Paths.environment(config, environment_id)) do
-      :ok -> {:ok, :removed}
+    with :ok <- Podman.reclaim(config, path),
+         :ok <- FileSystem.remove_tree(path) do
+      {:ok, :removed}
+    else
+      {:error, %Outcome{} = outcome} -> {:error, outcome}
       {:error, reason} -> {:error, Outcome.from_reason(reason)}
     end
   end
 
-  defp release_unrecorded_environment(config, environment_id) do
-    case FileSystem.directory(Paths.environment(config, environment_id)) do
+  # Removing the out-links leaves their closures unrooted, and only a worker may write the store.
+  defp collect(context, allocation) do
+    case Worker.run(
+           context,
+           allocation,
+           :collect,
+           ["nix", "store", "gc"] ++ Layout.store_arguments()
+         ) do
+      {:ok, %Command.Result{status: 0}} ->
+        {:ok, :collected}
+
+      {:ok, %Command.Result{} = result} ->
+        {:error, Outcome.from_command(:host_unavailable, result)}
+
+      {:error, %Outcome{} = outcome} ->
+        {:error, outcome}
+    end
+  end
+
+  defp release_unrecorded_environment(config, biot_id, environment_id) do
+    case FileSystem.directory(Paths.environment(config, biot_id, environment_id)) do
       :absent ->
         :ok
 
@@ -324,6 +389,4 @@ defmodule Biot.Node.Host.Environment do
       {:error, reason} -> {:error, Outcome.from_reason(reason)}
     end
   end
-
-  defp encoded_manifest(manifest), do: Jason.encode_to_iodata!(Manifest.encode(manifest))
 end
