@@ -18,6 +18,7 @@ defmodule Biot.Server.Application do
       # Startup needs the registry, while the listener must not accept a node before enrollment.
       {Registry, keys: :unique, name: Biot.Server.Control.Registry},
       Biot.Server.Nodes.Startup,
+      Biot.Server.Streams.Pending,
       Biot.Server.Control.Listener
     ]
 

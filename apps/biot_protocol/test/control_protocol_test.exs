@@ -108,7 +108,8 @@ defmodule Biot.Protocol.ControlProtocolTest do
              :unsupported_protocol_version,
              :registration_rejected,
              :registration_retired,
-             :registration_abandoned
+             :registration_abandoned,
+             :unknown_stream
            ]
 
     for reason <- Message.Reject.reasons() do

@@ -41,14 +41,21 @@ defmodule Biot.Server.NodeConnections do
   @doc "Returns the process that owns the node's current ready connection."
   @spec ready(NodeId.t()) :: {:ok, pid()} | {:error, :temporarily_unavailable}
   def ready(%NodeId{} = node_id) do
+    case ready_connection(node_id) do
+      {:ok, pid, _connection_id} -> {:ok, pid}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Returns the current ready connection's process and its connection id together."
+  @spec ready_connection(NodeId.t()) ::
+          {:ok, pid(), ConnectionId.t()} | {:error, :temporarily_unavailable}
+  def ready_connection(%NodeId{} = node_id) do
     case current(node_id) do
       %{connection_id: connection_id, state: :ready} ->
         ready_owner(node_id, connection_id)
 
-      nil ->
-        {:error, :temporarily_unavailable}
-
-      %{state: :synchronizing} ->
+      _other ->
         {:error, :temporarily_unavailable}
     end
   end
@@ -59,7 +66,7 @@ defmodule Biot.Server.NodeConnections do
 
   defp ready_owner(node_id, connection_id) do
     case Registry.lookup(Biot.Server.Control.Registry, node_id) do
-      [{pid, ^connection_id}] -> {:ok, pid}
+      [{pid, ^connection_id}] -> {:ok, pid, connection_id}
       [] -> {:error, :temporarily_unavailable}
       [{_pid, _other_connection_id}] -> {:error, :temporarily_unavailable}
     end

@@ -32,12 +32,21 @@ defmodule Biot.Node.Application do
         {Task.Supervisor, name: Biot.Node.Control.RequestSupervisor},
         Biot.Node.RuntimeLogs,
         Biot.Node.Controllers,
-        Biot.Node.Host.ContainerEvents
-      ] ++ control_connection_child()
+        Biot.Node.Host.ContainerEvents,
+        {Biot.Node.Streams.Supervisor, stream_children()}
+      ]
     else
       Logger.info("node host disabled because the data root is not configured")
       []
     end
+  end
+
+  defp stream_children do
+    [
+      {DynamicSupervisor, name: Biot.Node.Streams.Children, strategy: :one_for_one},
+      Biot.Node.Streams
+      | control_connection_child()
+    ]
   end
 
   defp control_connection_child do

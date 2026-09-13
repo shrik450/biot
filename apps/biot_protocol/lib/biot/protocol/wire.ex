@@ -21,6 +21,9 @@ defmodule Biot.Protocol.Wire do
   alias Biot.Protocol.SecretName
   alias Biot.Protocol.SecretOutcome
   alias Biot.Protocol.SecretValue
+  alias Biot.Protocol.StreamFailure
+  alias Biot.Protocol.StreamId
+  alias Biot.Protocol.StreamTarget
   alias Biot.Protocol.Version
 
   @modules %{
@@ -46,10 +49,18 @@ defmodule Biot.Protocol.Wire do
       Message.SecretResult,
       Message.SecretListResult,
       Message.FetchCredentialResult,
+      Message.OpenStream,
+      Message.StreamFailed,
       Message.Heartbeat,
       Message.HeartbeatResponse
     ],
-    handshake: [Message.Hello, Message.Connected, Message.Reject]
+    handshake: [
+      Message.Hello,
+      Message.Connected,
+      Message.Reject,
+      Message.Attach,
+      Message.Attached
+    ]
   }
 
   @type phase :: :handshake
@@ -97,10 +108,11 @@ defmodule Biot.Protocol.Wire do
   @spec min_frame_bytes(version()) :: pos_integer()
   def min_frame_bytes(version) do
     largest =
-      max(
+      Enum.max([
         Limits.max_biot_spec_bytes(version) + biot_spec_envelope_bytes(version),
-        encoded_secret_value_bytes(version) + secret_envelope_bytes(version)
-      )
+        encoded_secret_value_bytes(version) + secret_envelope_bytes(version),
+        Limits.max_agent_line_bytes() + envelope_bytes([Message.OpenStream], version)
+      ])
 
     largest + Frame.overhead_bytes()
   end
@@ -308,6 +320,35 @@ defmodule Biot.Protocol.Wire do
   defp encode_field(Message.Synchronized, :connection_id, value, _context),
     do: {:ok, ConnectionId.to_string(value)}
 
+  defp encode_field(Message.Attach, :registration_id, value, _context),
+    do: {:ok, RegistrationId.to_string(value)}
+
+  defp encode_field(Message.Attach, :connection_id, value, _context),
+    do: {:ok, ConnectionId.to_string(value)}
+
+  defp encode_field(Message.Attach, :stream_id, value, _context),
+    do: {:ok, StreamId.to_string(value)}
+
+  defp encode_field(Message.OpenStream, :connection_id, value, _context),
+    do: {:ok, ConnectionId.to_string(value)}
+
+  defp encode_field(Message.OpenStream, :access_revision, value, _context), do: {:ok, value}
+
+  defp encode_field(Message.OpenStream, :stream_id, value, _context),
+    do: {:ok, StreamId.to_string(value)}
+
+  defp encode_field(Message.OpenStream, :biot_id, value, _context),
+    do: {:ok, BiotId.to_string(value)}
+
+  defp encode_field(Message.OpenStream, :target, value, _context),
+    do: {:ok, StreamTarget.encode(value)}
+
+  defp encode_field(Message.StreamFailed, :stream_id, value, _context),
+    do: {:ok, StreamId.to_string(value)}
+
+  defp encode_field(Message.StreamFailed, :reason, value, _context),
+    do: {:ok, StreamFailure.to_string(value)}
+
   defp encode_field(Message.Observation, :biot_id, value, _context),
     do: {:ok, BiotId.to_string(value)}
 
@@ -455,6 +496,36 @@ defmodule Biot.Protocol.Wire do
 
   defp decode_field(Message.Synchronized, :connection_id, value, _context),
     do: ConnectionId.parse(value)
+
+  defp decode_field(Message.Attach, :registration_id, value, _context),
+    do: RegistrationId.parse(value)
+
+  defp decode_field(Message.Attach, :connection_id, value, _context),
+    do: ConnectionId.parse(value)
+
+  defp decode_field(Message.Attach, :stream_id, value, _context),
+    do: StreamId.parse(value)
+
+  defp decode_field(Message.OpenStream, :connection_id, value, _context),
+    do: ConnectionId.parse(value)
+
+  defp decode_field(Message.OpenStream, :access_revision, value, _context),
+    do: positive_integer(value)
+
+  defp decode_field(Message.OpenStream, :stream_id, value, _context),
+    do: StreamId.parse(value)
+
+  defp decode_field(Message.OpenStream, :biot_id, value, _context),
+    do: BiotId.parse(value)
+
+  defp decode_field(Message.OpenStream, :target, value, _context),
+    do: StreamTarget.parse(value)
+
+  defp decode_field(Message.StreamFailed, :stream_id, value, _context),
+    do: StreamId.parse(value)
+
+  defp decode_field(Message.StreamFailed, :reason, value, _context),
+    do: StreamFailure.parse(value)
 
   defp decode_field(Message.Observation, :biot_id, value, _context), do: BiotId.parse(value)
 

@@ -1866,6 +1866,12 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     start_supervised!({Task.Supervisor, name: Biot.Node.Control.RequestSupervisor})
     start_supervised!(Biot.Node.RuntimeLogs)
     start_supervised!(Biot.Node.Controllers)
+
+    start_supervised!(
+      {DynamicSupervisor, name: Biot.Node.Streams.Children, strategy: :one_for_one}
+    )
+
+    start_supervised!(Biot.Node.Streams)
     :ok
   end
 

@@ -31,13 +31,15 @@ defmodule Biot.Protocol.Message.Reject do
     :unsupported_protocol_version,
     :registration_rejected,
     :registration_retired,
-    :registration_abandoned
+    :registration_abandoned,
+    :unknown_stream
   ]
   @type reason ::
           :unsupported_protocol_version
           | :registration_rejected
           | :registration_retired
           | :registration_abandoned
+          | :unknown_stream
 
   @enforce_keys [:reason]
   defstruct [:reason]
@@ -45,6 +47,29 @@ defmodule Biot.Protocol.Message.Reject do
 
   def type, do: "reject"
   def reasons, do: @reasons
+end
+
+defmodule Biot.Protocol.Message.Attach do
+  @moduledoc "Binds one new stream connection to a stream waiting on a control connection."
+  @enforce_keys [:registration_id, :connection_id, :stream_id]
+  defstruct [:registration_id, :connection_id, :stream_id]
+
+  @type t :: %__MODULE__{
+          registration_id: Biot.Protocol.RegistrationId.t(),
+          connection_id: Biot.Protocol.ConnectionId.t(),
+          stream_id: Biot.Protocol.StreamId.t()
+        }
+
+  def type, do: "attach"
+end
+
+defmodule Biot.Protocol.Message.Attached do
+  @moduledoc "Confirms that a stream connection is bound to its stream."
+  defstruct []
+
+  @type t :: %__MODULE__{}
+
+  def type, do: "attached"
 end
 
 defmodule Biot.Protocol.Message.SynchronizeBegin do
@@ -188,6 +213,35 @@ defmodule Biot.Protocol.Message.RemoveFetchCredential do
         }
 
   def type, do: "remove_fetch_credential"
+end
+
+defmodule Biot.Protocol.Message.OpenStream do
+  @moduledoc "Asks a node to admit one stream under an access revision."
+  @enforce_keys [:connection_id, :access_revision, :stream_id, :biot_id, :target]
+  defstruct [:connection_id, :access_revision, :stream_id, :biot_id, :target]
+
+  @type t :: %__MODULE__{
+          connection_id: Biot.Protocol.ConnectionId.t(),
+          access_revision: pos_integer(),
+          stream_id: Biot.Protocol.StreamId.t(),
+          biot_id: Biot.Protocol.BiotId.t(),
+          target: Biot.Protocol.StreamTarget.t()
+        }
+
+  def type, do: "open_stream"
+end
+
+defmodule Biot.Protocol.Message.StreamFailed do
+  @moduledoc "Reports that one requested stream could not be opened or was ended."
+  @enforce_keys [:stream_id, :reason]
+  defstruct [:stream_id, :reason]
+
+  @type t :: %__MODULE__{
+          stream_id: Biot.Protocol.StreamId.t(),
+          reason: Biot.Protocol.StreamFailure.t()
+        }
+
+  def type, do: "stream_failed"
 end
 
 defmodule Biot.Protocol.Message.Synchronized do

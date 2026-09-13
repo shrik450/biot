@@ -41,11 +41,11 @@ This app owns shared parsed values and wire codecs.
 
 ### Protocol layer
 
-- `Message.*` defines the protocol message structs. Version 1 includes the five secret and fetch-credential requests—`DeliverSecret`, `RemoveSecret`, `ListSecrets`, `DeliverFetchCredential`, and `RemoveFetchCredential`—and the three results `SecretResult`, `SecretListResult`, and `FetchCredentialResult`, alongside diagnostics and runtime logs.
+- `Message.*` defines the protocol message structs. Version 1 includes the five secret and fetch-credential requests—`DeliverSecret`, `RemoveSecret`, `ListSecrets`, `DeliverFetchCredential`, and `RemoveFetchCredential`—and the three results `SecretResult`, `SecretListResult`, and `FetchCredentialResult`, alongside diagnostics and runtime logs. The stream messages are `Attach` and `Attached` in the handshake phase and `OpenStream` and `StreamFailed` in the main phase, and `Reject` adds `:unknown_stream`.
 - `SecretName`, `SecretValue`, and `AuthorizationValue` are parsed boundary values. Secret and authorization values redact themselves and expose bytes only through `reveal/1`; a bare value exists only in `parse/1` and the single file write that publishes it.
 - `SecretOutcome` owns one union and codec for `:ok`, `:no_allocation`, and `{:failure, :write_failed | :unavailable}`. The listing result uses the same codec with `{:ok, [SecretName]}`.
-- `Wire` lists all eight secret messages in the version 1 table and keeps strict field and value decoding. It enforces the 256 KiB version 1 `BiotSpec` bound and the `Limits.max_secret_value_bytes/1` bound. `Wire.min_frame_bytes/1` includes the largest base64-encoded secret delivery envelope, and `check_frame_limit!/1` is checked at boot by both applications.
-- `Frame` encodes and incrementally decodes length-prefixed frames.
+- `Wire` lists all eight secret messages in the version 1 table and keeps strict field and value decoding. It enforces the 256 KiB version 1 `BiotSpec` bound and the `Limits.max_secret_value_bytes/1` bound. It lists `OpenStream` and `StreamFailed` in the main phase and `Attach` and `Attached` in the handshake phase. `Wire.min_frame_bytes/1` includes the largest base64-encoded secret delivery envelope and the `OpenStream` envelope near the agent line bound, and `check_frame_limit!/1` is checked at boot by both applications.
+- `Frame` encodes and incrementally decodes length-prefixed frames. `take/2` takes exactly one frame and leaves every byte after it untouched.
 - `Version` selects the highest protocol version shared by both peers.
 - `Liveness` matches heartbeat responses.
 - `Platform` represents supported Linux host platforms.
@@ -53,7 +53,13 @@ This app owns shared parsed values and wire codecs.
 - `Certificates` and `mix biot.gen.certs` write deployment certificates and keys.
   The task writes CA, server, and node certificates, keys with mode 0600, and `fingerprints.json`.
 - `OrphanedAllocation` represents node allocations absent from server intent.
-- `Limits` owns the versioned spec bound and the shared component limits. Version 1 allows a 256 KiB spec, a 64 KiB secret or authorization value, a 2,048-byte repository URL, a 256-byte source ref, a 1,024-byte relative directory, and 16 layers.
+- `Limits` owns the versioned spec bound and the shared component limits. Version 1 allows a 256 KiB spec, a 64 KiB secret or authorization value, a 2,048-byte repository URL, a 256-byte source ref, a 1,024-byte relative directory, and 16 layers. `Limits.max_agent_line_bytes/0` is the agent's request-line bound, including the trailing newline.
+- `StreamId` is an opaque canonical UUID that identifies one stream a node holds.
+- `StreamTarget` is the one target encoder. It encodes either a port or a shell request, and its encoded form is the agent's own request line.
+- `ShellRequest` parses one shell's terminal, initial size, and optional command. A nil command runs the bundle's shell entry as a login shell; a list runs through that same entry. It refuses an empty term, an out-of-range or non-integer size, an empty or non-list command, a NUL byte, and text that is not valid UTF-8.
+- `StreamFailure` owns the closed node refusal reasons: `unknown_biot`, `stale_access`, `agent_unreachable`, `port_not_listening`, and `too_many_streams`.
+- `AgentReply` parses the agent's one reply line into `:ok` or `{:error, :invalid_request | :connection_refused}`.
+- `ShellFrame` is the shared shell frame codec. `encode/1`, `decode/2`, and `reframe/2` use one direction rule: data flows both ways, resize only toward the agent, and exit only toward the server. `reframe/2` stops after an exit frame and rejects bytes after it.
 
 ### Value modules
 
@@ -90,7 +96,9 @@ Their `to_string/1` output round-trips through `parse/1`.
 `Failure`, `Manifest`, `EnvironmentSelection`, and `ContainerState` provide `encode/1` and `parse/1`.
 Tests for this app are pure unit tests with StreamData property tests.
 `test/test_helper.exs` holds the generators.
-`test/control_protocol_test.exs` covers the version 1 runtime-log request pair and malformed result shapes.
+`test/control_protocol_test.exs` covers the version 1 runtime-log request pair and malformed result shapes, including the `:unknown_stream` reject reason.
+`test/stream_protocol_test.exs` covers `StreamId`, `StreamTarget`, `ShellRequest`, `StreamFailure`, `AgentReply`, `Frame.take/2`, and the new messages through `Wire`. It fuzzes every parser and codec with random binaries and terms.
+`test/shell_frame_test.exs` covers `ShellFrame` encode, decode, `reframe/2`, direction rules, payload bounds, partial frames, and the exit-last rule.
 `test/identity_values_test.exs` covers `CredentialId`, `SshKeyId`, `SshPublicKey`, `SameOriginPath`, and `Digest.sha256/1`.
 
 ## apps/biot_server
@@ -291,6 +299,27 @@ revision. Unpublish deletes the port's view grants in the same transaction.
 Destroy deactivates publications and removes shell and view grants in one
 transaction.
 
+#### `Biot.Server.Streams`
+
+`Biot.Server.Streams` is the owner's stream API. `open/4` finds a node's ready
+connection, registers the open with `Pending`, sends `OpenStream`, and waits for
+the attach. On success it returns a `Stream` the caller owns.
+
+`stream/2` turns one message into typed events. A port stream reports
+`{:data, bytes}`, `:closed`, or `:lost`. A shell stream decodes its frames and
+reports `{:data, bytes}`, `{:exit, status}`, `:closed`, or `:lost`, and a frame
+that does not decode closes the socket. Anything else returns `:unknown`, so a
+caller can pass every message it receives. `ask/1` re-arms one read, which is the
+backpressure: the node cannot send the next chunk until the owner asks. `write/2`
+sends port bytes or one shell data frame per 64 KiB. `resize/3` sends a resize
+frame, and `close/1` closes the socket.
+
+`Streams.Pending` owns the opens that were sent to a node but not yet attached.
+`register/6`, `attach/5`, `stream_failed/2`, `control_lost/1`, and `abandon/1`
+all run in one process, so exactly one of attach and abandon wins. It checks the
+node and connection identity against `NodeConnections`, and a control loss
+reports `:node_unavailable` to every caller on that connection.
+
 ### Control protocol
 
 - `Control.Listener` accepts mutually authenticated TLS node connections.
@@ -304,6 +333,11 @@ transaction.
   `SynchronizeItem` messages, and `SynchronizeEnd`. The connection schedules its first
   sweep one `desired_sweep_interval_ms` after ready and reschedules after each sweep.
   Wakes during synchronization are dropped because the next sweep repeats the comparison.
+- `Control.Connection.open_stream/3` sends `OpenStream` on a ready connection or returns
+  `:node_unavailable`. An `attach` frame authenticates the stream connection, rejects any byte
+  after the frame with `:unknown_stream`, claims the pending stream, sends `Attached`, and hands
+  the socket to the owner with `:ssl.controlling_process/2`. The handler then holds no socket data
+  and closes when the owner exits.
 - The server starts the Registry before `Nodes.Startup` and starts the listener after `Nodes.Startup`.
   The Registry enforces newest-wins connection replacement.
 - `Control.Synchronization.behind/2` runs one query. It returns Biots whose desired
@@ -397,6 +431,10 @@ Focused server evidence includes:
 - `principals/disabled_identities_test.exs` covers file and inline loading,
   malformed elements with their index, unknown keys, repeated identities, and
   typed file errors.
+- `streams_integration_test.exs` covers `Biot.Server.Streams.open/4` over a real
+  listener, a real node, and the real Go agent.
+- `streams_pending_test.exs` covers `Pending` claim order, timeouts, late attach,
+  node and connection identity, control loss, and `Streams.stream/2` events.
 
 Node enrollment and abandonment evidence includes:
 
@@ -790,6 +828,8 @@ documented in `Host.Config` and `nix/README.md`. The request, capture, controlle
 | `diagnostic_max_entries_per_biot` | `5` | `BIOT_NODE_DIAGNOSTIC_MAX_ENTRIES_PER_BIOT` |
 | `diagnostic_max_entry_bytes` | `65_536` | `BIOT_NODE_DIAGNOSTIC_MAX_ENTRY_BYTES` |
 | `max_staged_specs` | `1_000` | `BIOT_NODE_MAX_STAGED_SPECS` |
+| `max_streams` | `128` | `BIOT_NODE_MAX_STREAMS` |
+| `max_streams_per_biot` | `16` | `BIOT_NODE_MAX_STREAMS_PER_BIOT` |
 | `max_frame_bytes` | `1_000_000` | `BIOT_MAX_FRAME_BYTES` |
 | `builder_image` | pinned digest | `BIOT_NODE_BUILDER_IMAGE` |
 | `fetch_ca_bundle` | none | `BIOT_NODE_FETCH_CA_BUNDLE` |
@@ -806,6 +846,43 @@ include a digest), `binary_cache_urls`, `binary_cache_keys`, `build_support_dir`
 `nix_executable`, `nix_instantiate_executable`, `nix_build_file`, and `nix_pin_file`. The numeric
 `BIOT_NODE_*` overrides must be positive integers. `Host.Config.from_application!/0` requires
 complete, valid host configuration before node effects use it.
+
+### Stream boundary
+
+`Biot.Node.Streams` is the node's stream boundary. It holds one group per Biot,
+the current control connection, and the applied access revision, and it
+serializes revision changes with admission, so a child cannot join a closing
+group. `apply_revision/3` closes the old group and waits for every live child to
+exit before its caller acknowledges, and it ignores a lower revision.
+`admit/6` checks the group, its connection and revision, and both stream limits.
+`close_all/0` empties every group.
+
+`Streams.Groups` is the pure decision core. `apply_revision/4` returns
+`:applied` with terminate effects, or `:ignored`. `admit/5` refuses with
+`:unknown_biot`, `:stale_access`, or `:too_many_streams`. A group's child PIDs
+are its only membership record, and `child_down/2` deletes one. `close_all/1`
+returns every child to terminate.
+
+`Streams.Supervisor` owns the boundary and the control connection as one
+`:one_for_all` unit, so either crash restarts both and every stream closes.
+`Streams.Children` is the `DynamicSupervisor` under it. `Streams.Stream` is one
+admitted child. It does no IO in `init/1`; the agent connection, peer check, and
+server attach run in `handle_continue/2`, so a slow agent cannot stall revision
+application. It never restarts, its termination closes the sockets it owns, and
+two linked relays splice the agent and server sockets through one re-framing
+rule.
+
+`Streams.Agent` opens one Biot's agent socket and reads the connected peer's
+kernel credentials through `:socket.getopt_native/3` (`SO_PEERCRED`) before it
+writes any target byte. It requires the host UID to lie in the allocation's
+mapped range, so a replaced or symlinked socket cannot reach another Biot's
+agent. It sends the target line and parses the bounded reply into `AgentReply`.
+
+`Streams.Attach` dials the server through `Control.Dial` and completes the
+attach handshake. Its first frame is `attach`, not `hello`, and it returns the
+bytes that arrived with `attached` untouched. `Control.Dial` is the one mutual
+TLS dial for the control connection and every attach, and it verifies the server
+fingerprint. `Deadline` is a monotonic deadline for the node's bounded reads.
 
 ### Diagnostics, runtime logs, and control
 
@@ -854,8 +931,11 @@ staging also closes the connection with `:desired_during_snapshot`. Any snapshot
 staging before reconnecting.
 
 An individual desired message uses `Journal.put_intent/1`; a complete snapshot uses
-`Journal.replace_intents/1`. The node sends `access_applied` after either durable write, then hands
-controller starts to `Controllers` before it sends `synchronized`. After that acknowledgement, the
+`Journal.replace_intents/1`. After either durable write, the node applies the revision at the
+stream boundary, which closes the old group and waits for every live child to exit, and only then
+sends `access_applied`. A reconnected node closes every group before it applies the synchronized
+revisions. The node hands controller starts to `Controllers` before it sends `synchronized`.
+After that acknowledgement, the
 connection compares journal allocations with synchronized intents and puts orphan reports in the
 outbox. The connection replays stored destruction reports when it becomes ready and after each
 repeated `desired` message. The application starts this connection only after host configuration,
@@ -878,6 +958,11 @@ real Linux effects, and the controller shell:
 - `secrets_pure_test.exs` covers Git attribution, credential scopes, retry waiting, request phases, phase-aware layout, and allocation directories.
 - `secrets_integration_test.exs` covers server delivery, authorization, exposure-marker ordering, pending requests, failures, timeouts, and `waiting_for` projections.
 - `secrets_linux_integration_test.exs` covers real secret and credential publication, mapped ownership, Podman mounts, private Git fetches, queue ordering, and credential wakeup.
+- `streams_groups_test.exs` covers the pure `Streams.Groups` core: revision order (lower, equal, higher, and another connection), admission against every group state, both limits, child bookkeeping, and `close_all/1`.
+- `streams_boundary_integration_test.exs` covers the boundary with real children and a real Go agent: refusals, limits, live-child termination before `apply_revision/3` returns, `close_all/0`, and bytes that arrive with `attached`.
+- `streams_agent_integration_test.exs` covers the agent UID check against a real Unix socket, plus the stream child's refusal path.
+- `streams_supervisor_test.exs` covers `:one_for_all` restart: killing either child restarts both with an empty boundary.
+- `support/streams_fixture.ex` provides the real TLS attach server, a real Unix-socket fake agent, a real echo service, journal allocation seeding, and the real Go agent.
 - `host_pure_test.exs` covers diagnostic selection, data markers, per-environment prepared resources, strict staged-input parsing, private-store mapping, exact worker layouts, Git hardening, owner labels, and retry map types.
 - `node_values_test.exs` covers node-owned parsed values, including `NetworkId`.
 - `reconcile_important_cases_test.exs` covers unknown desired and sibling environments.
@@ -963,6 +1048,8 @@ setting remains. Step 19 adds `control_session_lifetime_ms`,
 (default 90), and `BIOT_DISABLED_PRINCIPALS` for the server release.
 Fix round 4 adds `expiry_sweep_interval_ms`, the interval for `ExpirySweep`. It
 has no environment variable, and `config/test.exs` sets it to nil.
+Step 20 adds `stream_open_timeout_ms`, the deadline for one `Streams.open/4`.
+Production reads `BIOT_STREAM_OPEN_TIMEOUT_MS` (default 30_000).
 
 ## Host tests in Docker
 

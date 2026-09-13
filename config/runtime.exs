@@ -63,6 +63,7 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "node" do
     desired_sweep_interval_ms: integer_env.("BIOT_DESIRED_SWEEP_INTERVAL_MS", 60_000),
     node_request_timeout_ms: integer_env.("BIOT_NODE_REQUEST_TIMEOUT_MS", 10_000),
     node_response_max_bytes: integer_env.("BIOT_NODE_RESPONSE_MAX_BYTES", 256_000),
+    stream_open_timeout_ms: integer_env.("BIOT_STREAM_OPEN_TIMEOUT_MS", 30_000),
     max_frame_bytes: integer_env.("BIOT_MAX_FRAME_BYTES", 1_000_000)
 
   secret_key_base =
@@ -189,7 +190,9 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "server" do
         reconnect_backoff_min_ms: node_integer_env.("BIOT_NODE_BACKOFF_MIN_MS", 250, 1),
         reconnect_backoff_max_ms: node_integer_env.("BIOT_NODE_BACKOFF_MAX_MS", 30_000, 1),
         max_frame_bytes: node_integer_env.("BIOT_MAX_FRAME_BYTES", 1_000_000, 1),
-        max_staged_specs: node_integer_env.("BIOT_NODE_MAX_STAGED_SPECS", 1_000, 1)
+        max_staged_specs: node_integer_env.("BIOT_NODE_MAX_STAGED_SPECS", 1_000, 1),
+        max_streams: node_integer_env.("BIOT_NODE_MAX_STREAMS", 128, 1),
+        max_streams_per_biot: node_integer_env.("BIOT_NODE_MAX_STREAMS_PER_BIOT", 16, 1)
 
     {:error, _reason} ->
       raise "BIOT_NODE_REGISTRATION_ID must be a canonical UUID"

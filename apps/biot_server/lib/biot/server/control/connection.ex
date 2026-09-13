@@ -20,6 +20,7 @@ defmodule Biot.Server.Control.Connection do
   alias Biot.Server.Repo
   alias Biot.Server.Reports
   alias Biot.Server.Schema.Node
+  alias Biot.Server.Streams.Pending
   alias ThousandIsland.Socket
 
   defmodule State do
@@ -38,8 +39,17 @@ defmodule Biot.Server.Control.Connection do
       version: nil,
       node_id: nil,
       connection_id: nil,
-      pending_requests: %{}
+      pending_requests: %{},
+      owner_monitor: nil
     ]
+  end
+
+  @spec open_stream(pid(), Message.OpenStream.t(), non_neg_integer()) ::
+          :ok | {:error, :node_unavailable}
+  def open_stream(pid, %Message.OpenStream{} = message, timeout_ms) do
+    GenServer.call(pid, {:open_stream, message}, timeout_ms)
+  catch
+    :exit, _reason -> {:error, :node_unavailable}
   end
 
   @spec request_diagnostic(
@@ -244,6 +254,30 @@ defmodule Biot.Server.Control.Connection do
   def handle_info(reason, {socket, %State{} = state})
       when reason in [:replaced, :registration_changed] do
     {:stop, {:shutdown, reason}, {socket, state}}
+  end
+
+  # The handler stays as a thin shell after it hands the socket to the owner. It holds no socket
+  # data, so it only has to close when the owner goes.
+  def handle_info(
+        {:DOWN, reference, :process, _pid, _reason},
+        {socket, %State{owner_monitor: reference} = state}
+      ) do
+    {:stop, :normal, {socket, state}}
+  end
+
+  @impl GenServer
+  def handle_call({:open_stream, message}, _from, {socket, %State{phase: :ready} = state}) do
+    case send_message(socket, message, state.version) do
+      :ok ->
+        {:reply, :ok, {socket, state}}
+
+      {:error, reason} ->
+        {:stop, {:shutdown, reason}, {:error, :node_unavailable}, {socket, state}}
+    end
+  end
+
+  def handle_call({:open_stream, _message}, _from, {socket, %State{} = state}) do
+    {:reply, {:error, :node_unavailable}, {socket, state}}
   end
 
   @impl GenServer
@@ -454,6 +488,24 @@ defmodule Biot.Server.Control.Connection do
     end
   end
 
+  defp handle_message(%Message.Attach{} = attach, socket, %State{phase: :handshake} = state) do
+    state = cancel_handshake_deadline(state)
+
+    with {:ok, node} <- authenticate(attach.registration_id, state.peer_identity),
+         :ok <- no_stream_bytes(state.buffer),
+         {:ok, owner, kind} <-
+           Pending.attach(node.id, attach.connection_id, attach.stream_id, self(), socket.socket),
+         :ok <- send_message(socket, %Message.Attached{}, :handshake),
+         :ok <- hand_off(socket, owner, attach.stream_id, kind) do
+      reference = Process.monitor(owner)
+
+      {:continue, %{state | phase: :stream, owner_monitor: reference}}
+    else
+      {:error, :unknown_stream} -> reject_and_close(socket, :unknown_stream, state)
+      {:error, reason} -> close(reason, state)
+    end
+  end
+
   defp handle_message(
          %Message.Synchronized{connection_id: connection_id},
          _socket,
@@ -505,6 +557,11 @@ defmodule Biot.Server.Control.Connection do
   defp handle_message(%Message.Resolution{} = message, _socket, %State{phase: :ready} = state) do
     result = Reports.resolution(state.node_id, message.environment_id, message.manifest)
     log_report_result(result, state.node_id, "resolution")
+    {:continue, state}
+  end
+
+  defp handle_message(%Message.StreamFailed{} = message, _socket, %State{phase: :ready} = state) do
+    Pending.stream_failed(message.stream_id, message.reason)
     {:continue, state}
   end
 
@@ -648,10 +705,28 @@ defmodule Biot.Server.Control.Connection do
     end
   end
 
+  defp hand_off(socket, owner, stream_id, kind) do
+    with :ok <- :ssl.controlling_process(socket.socket, owner) do
+      send(owner, {:stream_attached, stream_id, kind, socket.socket})
+      :ok
+    end
+  end
+
+  # The node sends nothing after `attach` until it reads `attached`, so a byte after the attach
+  # frame is a protocol violation rather than the start of a stream.
+  defp no_stream_bytes(<<>>), do: :ok
+  defp no_stream_bytes(_bytes), do: {:error, :unexpected_stream_bytes}
+
+  defp reject_and_close(socket, reason, state) do
+    _ = send_message(socket, %Message.Reject{reason: reason}, :handshake)
+    close(reason, state)
+  end
+
   defp cleanup(%State{node_id: nil}), do: :ok
 
   defp cleanup(%State{} = state) do
     NodeConnections.delete(state.node_id, state.connection_id)
+    Pending.control_lost(state.connection_id)
 
     Enum.each(state.pending_requests, fn {_request_id, {from, timer, _reply}} ->
       Process.cancel_timer(timer)

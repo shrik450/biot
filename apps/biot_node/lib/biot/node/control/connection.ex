@@ -15,6 +15,7 @@ defmodule Biot.Node.Control.Connection do
   require Logger
 
   alias Biot.Node.Control
+  alias Biot.Node.Control.Dial
   alias Biot.Node.Control.Outbox
   alias Biot.Node.Control.Staging
   alias Biot.Node.Controllers
@@ -24,11 +25,11 @@ defmodule Biot.Node.Control.Connection do
   alias Biot.Node.Orphans
   alias Biot.Node.RuntimeLogs
   alias Biot.Node.SecretRequest
+  alias Biot.Node.Streams
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.Frame
   alias Biot.Protocol.Liveness
   alias Biot.Protocol.Message
-  alias Biot.Protocol.PeerIdentity
   alias Biot.Protocol.Platform
   alias Biot.Protocol.RegistrationId
   alias Biot.Protocol.SecretOutcome
@@ -242,6 +243,12 @@ defmodule Biot.Node.Control.Connection do
 
   def handle_info({:heartbeat_timeout, _socket, _challenge}, state), do: {:noreply, state}
 
+  # The stream child reports through the connection pid it was admitted with, so this message has
+  # no module edge back to the boundary that started it.
+  def handle_info({:stream_failed, stream_id, reason}, state) do
+    {:noreply, send_stream_failed(state, stream_id, reason)}
+  end
+
   @impl true
   def terminate(_reason, %State{socket: nil}), do: :ok
   def terminate(_reason, %State{socket: socket}), do: :ssl.close(socket)
@@ -253,19 +260,21 @@ defmodule Biot.Node.Control.Connection do
   defp connect(%State{tls: nil} = state), do: {:noreply, state}
 
   defp connect(state) do
-    host = String.to_charlist(state.server_host)
+    dial = %{
+      server_host: state.server_host,
+      server_port: state.server_port,
+      server_fingerprint: state.server_fingerprint,
+      tls: state.tls
+    }
 
-    case :ssl.connect(host, state.server_port, tls_options(state.tls), 10_000) do
+    case Dial.connect(dial, 10_000) do
       {:ok, socket} -> authenticate_server(socket, state)
       {:error, reason} -> {:noreply, disconnect(state, reason)}
     end
   end
 
   defp authenticate_server(socket, state) do
-    with {:ok, certificate} <- :ssl.peercert(socket),
-         {:ok, fingerprint} <- PeerIdentity.from_certificate(certificate),
-         true <- fingerprints_match?(fingerprint, state.server_fingerprint),
-         :ok <- send_hello(socket, state.registration_id, state.platform),
+    with :ok <- send_hello(socket, state.registration_id, state.platform),
          :ok <- :ssl.setopts(socket, active: :once) do
       {:noreply,
        %{
@@ -277,10 +286,6 @@ defmodule Biot.Node.Control.Connection do
            heartbeat_challenge: nil
        }}
     else
-      false ->
-        :ssl.close(socket)
-        {:noreply, disconnect(%{state | socket: nil}, :server_fingerprint_mismatch)}
-
       {:error, reason} ->
         :ssl.close(socket)
         {:noreply, disconnect(%{state | socket: nil}, reason)}
@@ -426,6 +431,25 @@ defmodule Biot.Node.Control.Connection do
     queue(state, request, {:remove_fetch_credential, request.source})
   end
 
+  defp handle_message(%Message.OpenStream{} = request, %State{status: :ready} = state) do
+    case Streams.admit(
+           request.biot_id,
+           request.connection_id,
+           request.access_revision,
+           request.stream_id,
+           request.target,
+           dial_options(state)
+         ) do
+      :ok -> state
+      {:error, reason} -> send_stream_failed(state, request.stream_id, reason)
+    end
+  end
+
+  # A link that is not ready owns no stream group, so an open for it can only be stale.
+  defp handle_message(%Message.OpenStream{} = request, state) do
+    send_stream_failed(state, request.stream_id, :stale_access)
+  end
+
   defp handle_message(
          %Message.Heartbeat{challenge: challenge},
          %State{status: status} = state
@@ -470,7 +494,11 @@ defmodule Biot.Node.Control.Connection do
   end
 
   defp acknowledge_synchronization(specs, state) do
-    case send_access_applied(specs, state) do
+    # A reconnected node owns no stream from the previous link, so every group closes before the
+    # acknowledgement. Each spec then opens an empty group for the current connection.
+    :ok = Streams.close_all()
+
+    case apply_revisions(specs, state) do
       :ok -> finish_synchronization(specs, state)
       {:error, reason} -> disconnect(state, reason)
     end
@@ -495,7 +523,7 @@ defmodule Biot.Node.Control.Connection do
   end
 
   defp acknowledge_desired(spec, state) do
-    case send_access_applied([spec], state) do
+    case apply_revision(spec, state) do
       :ok ->
         warn_missing_controller(Controllers.intent_changed(spec.execution.biot_id))
         state
@@ -536,6 +564,7 @@ defmodule Biot.Node.Control.Connection do
 
   defp disconnect(state, reason) do
     Logger.info("node control connection disconnected: #{inspect(reason)}")
+    Streams.close_all()
     token = make_ref()
     Process.send_after(self(), {:reconnect, token}, state.backoff_ms)
     cancel_reads(state.pending_reads)
@@ -686,16 +715,6 @@ defmodule Biot.Node.Control.Connection do
     end)
   end
 
-  defp tls_options(tls) do
-    Keyword.merge(tls,
-      verify: :verify_peer,
-      active: false,
-      mode: :binary,
-      packet: :raw,
-      server_name_indication: :disable
-    )
-  end
-
   defp send_hello(socket, registration_id, platform) do
     send_message(
       socket,
@@ -726,17 +745,57 @@ defmodule Biot.Node.Control.Connection do
     end
   end
 
-  defp send_access_applied(specs, state) do
-    # The durable journal write is the honest acknowledgement until step 20 owns stream revisions.
-    messages =
-      Enum.map(specs, fn spec ->
-        %Message.AccessApplied{
-          biot_id: spec.execution.biot_id,
-          access_revision: spec.access_revision
-        }
-      end)
+  defp apply_revisions(specs, state) do
+    Enum.reduce_while(specs, :ok, fn spec, :ok ->
+      case apply_revision(spec, state) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
 
-    send_all(state.socket, messages, state.version)
+  # The stream boundary owns the revision: it closes the old group and waits for every child to
+  # exit before this sends the acknowledgement. A revision the node already applied is re-acked; a
+  # lower one is ignored so access progress never decreases.
+  defp apply_revision(spec, state) do
+    case Streams.apply_revision(spec.execution.biot_id, state.connection_id, spec.access_revision) do
+      :applied ->
+        send_message(
+          state.socket,
+          %Message.AccessApplied{
+            biot_id: spec.execution.biot_id,
+            access_revision: spec.access_revision
+          },
+          state.version
+        )
+
+      :ignored ->
+        :ok
+    end
+  end
+
+  defp send_stream_failed(%State{status: :ready} = state, stream_id, stream_reason) do
+    case send_message(
+           state.socket,
+           %Message.StreamFailed{stream_id: stream_id, reason: stream_reason},
+           state.version
+         ) do
+      :ok -> state
+      {:error, reason} -> disconnect(state, reason)
+    end
+  end
+
+  defp send_stream_failed(state, _stream_id, _stream_reason), do: state
+
+  defp dial_options(%State{} = state) do
+    %{
+      server_host: state.server_host,
+      server_port: state.server_port,
+      server_fingerprint: state.server_fingerprint,
+      registration_id: state.registration_id,
+      tls: state.tls,
+      connection_pid: self()
+    }
   end
 
   defp send_all(socket, messages, version) do
@@ -749,11 +808,4 @@ defmodule Biot.Node.Control.Connection do
   end
 
   defp random_token, do: :crypto.strong_rand_bytes(16) |> Base.url_encode64(padding: false)
-
-  defp fingerprints_match?(left, right)
-       when is_binary(left) and is_binary(right) and byte_size(left) == byte_size(right) do
-    :crypto.hash_equals(left, right)
-  end
-
-  defp fingerprints_match?(_left, _right), do: false
 end
