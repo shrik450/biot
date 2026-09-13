@@ -38,7 +38,7 @@ config :biot_node,
   cat_executable: "cat",
   sleep_executable: "sleep",
   builder_image:
-    "docker.io/nixos/nix@sha256:238dfe9a743a6e276e8e04d1db13b978c9bd91741445dec5d733c579596fea79",
+    "docker.io/nixos/nix@sha256:29fc5fe207f159ceb0143c25c19c774062fee02ce5eda118f3067547b3054894",
   build_support_dir: Path.expand("..", __DIR__),
   binary_cache_urls: ["https://cache.nixos.org"],
   binary_cache_keys: ["cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="],

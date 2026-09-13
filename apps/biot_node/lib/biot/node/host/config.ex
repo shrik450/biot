@@ -208,7 +208,7 @@ defmodule Biot.Node.Host.Config do
   defp builder_image do
     case Application.get_env(:biot_node, :builder_image) do
       value when is_binary(value) ->
-        if String.contains?(value, "@sha256:"),
+        if Regex.match?(~r/\A[^@\s]+@sha256:[0-9a-f]{64}\z/, value),
           do: {:ok, value},
           else: {:error, {:invalid_config, :builder_image}}
 

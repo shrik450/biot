@@ -45,9 +45,8 @@ The manifest JSON must have the exact shape from
 | `digest` | The node uses it to identify the manifest. It does not change the Nix evaluation. |
 
 Each pinned source uses the canonical `<source>#<revision>#<NAR hash>` string
-from `PinnedSource.to_string/1`. Nix 2.35 verifies the NAR hash through
-`builtins.fetchGit`. The build needs `nix-command`, but it does not need the
-`flakes` feature.
+from `PinnedSource.to_string/1`. The build checks each staged tree's NAR hash
+through `builtins.fetchTree`. It needs `nix-command` and `fetch-tree`.
 
 Each layer is a Nix module with these options:
 

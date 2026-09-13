@@ -337,7 +337,7 @@ defmodule Biot.Node.Host.Container do
 
   defp volume_arguments(config, biot_id) do
     Enum.flat_map(Paths.runtime_mounts(config, biot_id), fn {source, target, mode} ->
-      ["--volume", "#{source}:#{target}:#{mode}"]
+      ["--volume", "#{source}:#{target}:#{mode},z"]
     end)
   end
 

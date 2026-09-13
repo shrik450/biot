@@ -36,7 +36,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   alias Biot.Protocol.SourceSelector
 
   @moduletag :linux
-  @moduletag :nix
+  @moduletag :podman
   @moduletag timeout: 1_800_000
 
   setup_all do
@@ -106,12 +106,6 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
      broken_layer: repositories.broken_layer}
   end
 
-  # The fetch phase this fixture waited on now passes: the layer host's authority reaches the fetch
-  # worker through the operator's `fetch_ca_bundle`, built below from the builder image's own roots
-  # plus that authority, and the worker produces its staged out-link. The build phase that follows
-  # then ends `:build_failed` immediately after Nix lists its binary-cache downloads, for a cause
-  # nobody has identified yet, so the fixture stays skipped on that failure rather than the old one.
-  @tag :skip
   test "real host resources preserve ownership, data, and repeated effects", context do
     prove_second_process_lock(context.data_root)
 
@@ -1042,7 +1036,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
       cat_executable: "cat",
       sleep_executable: "sleep",
       builder_image:
-        "docker.io/nixos/nix@sha256:238dfe9a743a6e276e8e04d1db13b978c9bd91741445dec5d733c579596fea79",
+        "docker.io/nixos/nix@sha256:29fc5fe207f159ceb0143c25c19c774062fee02ce5eda118f3067547b3054894",
       build_support_dir: project_root,
       binary_cache_urls: ["https://cache.nixos.org"],
       binary_cache_keys: [

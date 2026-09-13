@@ -252,7 +252,7 @@ defmodule Biot.Node.Host.Worker do
 
   defp volume_arguments(mounts) do
     Enum.flat_map(mounts, fn {source, target, mode} ->
-      ["--volume", "#{source}:#{target}:#{mode}"]
+      ["--volume", "#{source}:#{target}:#{mode},z"]
     end)
   end
 
