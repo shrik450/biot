@@ -11,6 +11,7 @@ defmodule Biot.Server.Diagnostics do
   alias Biot.Server.Actor
   alias Biot.Server.Control.Connection
   alias Biot.Server.NodeConnections
+  alias Biot.Server.Principals
   alias Biot.Server.Repo
   alias Biot.Server.Schema.{Biot, Operation}
 
@@ -20,7 +21,8 @@ defmodule Biot.Server.Diagnostics do
   def get(nil, %PrivateDiagnosticId{}), do: {:error, :unauthenticated}
 
   def get(%Actor{} = actor, %PrivateDiagnosticId{} = diagnostic_ref) do
-    with {:ok, biot} <- authorized_biot(actor, diagnostic_ref),
+    with :ok <- Principals.require_enabled(Repo, actor),
+         {:ok, biot} <- authorized_biot(actor, diagnostic_ref),
          {:ok, pid} <- NodeConnections.ready(biot.node_id) do
       Connection.request_diagnostic(
         pid,

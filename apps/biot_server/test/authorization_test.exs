@@ -72,4 +72,35 @@ defmodule Biot.Server.AuthorizationTest do
     assert Authorization.role(context.stranger, context.biot, empty) ==
              {:collaborator, empty}
   end
+
+  describe "may_view?/4" do
+    test "the owner may view any port, with or without grants", context do
+      assert Authorization.may_view?(context.owner, context.biot, context.port, [])
+      assert Authorization.may_view?(context.owner, context.biot, TestFixtures.port(9_999), [])
+      assert Authorization.may_view?(context.owner, context.biot, context.port, [context.port])
+    end
+
+    test "a collaborator may view a granted port and no other", context do
+      other = TestFixtures.port(9_999)
+
+      assert Authorization.may_view?(context.stranger, context.biot, context.port, [
+               context.port
+             ])
+
+      refute Authorization.may_view?(context.stranger, context.biot, other, [context.port])
+    end
+
+    test "a collaborator with no matching grant may not view", context do
+      refute Authorization.may_view?(context.stranger, context.biot, context.port, [])
+
+      refute Authorization.may_view?(context.stranger, context.biot, context.port, [
+               TestFixtures.port(9_999)
+             ])
+    end
+
+    test "an absent or malformed actor may not view", context do
+      refute Authorization.may_view?(nil, context.biot, context.port, [context.port])
+      refute Authorization.may_view?(%{}, context.biot, context.port, [context.port])
+    end
+  end
 end

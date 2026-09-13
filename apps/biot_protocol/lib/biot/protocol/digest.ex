@@ -23,6 +23,9 @@ defmodule Biot.Protocol.Digest do
     %__MODULE__{value: :crypto.hash(:sha256, [Atom.to_string(name), <<0>>, bytes])}
   end
 
+  @spec sha256(iodata()) :: t()
+  def sha256(bytes), do: %__MODULE__{value: :crypto.hash(:sha256, bytes)}
+
   @spec to_string(t()) :: String.t()
   def to_string(%__MODULE__{value: value}), do: Base.encode16(value, case: :lower)
 end

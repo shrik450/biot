@@ -1,5 +1,5 @@
 # Used by "mix format"
 [
-  inputs: ["mix.exs", "config/*.exs", ".formatter.exs", ".credo.exs"],
+  inputs: ["mix.exs", "mix/*.exs", "config/*.exs", ".formatter.exs", ".credo.exs"],
   subdirectories: ["apps/*"]
 ]

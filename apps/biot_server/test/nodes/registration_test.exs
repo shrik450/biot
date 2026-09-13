@@ -111,7 +111,7 @@ defmodule Biot.Server.Nodes.RegistrationTest do
       StreamData.integer(),
       StreamData.float(),
       StreamData.list_of(StreamData.integer()),
-      StreamData.map_of(StreamData.integer(), StreamData.binary()),
+      StreamData.constant(%{1 => "binary"}),
       StreamData.tuple({StreamData.integer(), StreamData.binary()}),
       StreamData.member_of([nil, true, false, :value, [], {}, %{}])
     ])

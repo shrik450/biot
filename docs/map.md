@@ -58,13 +58,14 @@ This app owns shared parsed values and wire codecs.
 ### Value modules
 
 - **Identifiers:** `CanonicalUuid` parses canonical UUID strings.
+- **Identifiers:** `CredentialId` identifies one bearer credential, and `SshKeyId` identifies one registered SSH key. Both are canonical UUIDs.
 - **Sources:** `RepositorySource` represents a credential-free Git repository URL and derives its normalized `origin/1` for credential attribution.
 - **Sources:** `SourceSelector` represents an unpinned source and its ref.
 - **Sources:** `PinnedSource` represents a source with a commit revision and Nix NAR hash.
 - **Environment:** `EnvironmentSelection` represents the sources and project directory for an environment.
 - **Environment:** `Manifest` represents resolved sources, a project snapshot, and a content digest.
 - **Environment:** `ProjectSnapshot` represents a project identifier and its digest.
-- **Environment:** `Digest` represents a raw SHA-256 digest with a named encoding.
+- **Environment:** `Digest` represents a raw SHA-256 digest with a named encoding. `Digest.compute/2` serializes with a named encoding; `Digest.sha256/1` returns the plain SHA-256 of bytes.
 - **Execution:** `Desired` represents execution intent and provides `transition/2`.
 - **Execution:** `BiotSpec` contains execution and access intent for an assigned node.
 - **Execution:** `ExecutionSpec` contains complete server-owned execution intent.
@@ -78,16 +79,19 @@ This app owns shared parsed values and wire codecs.
 - **Other parsed values:** `Hostname` represents a lowercase DNS label.
 - **Other parsed values:** `Port` represents a valid user-facing TCP port.
 - **Other parsed values:** `RelativeDirectory` represents a safe relative checkout directory.
+- **Other parsed values:** `SshPublicKey` represents one OpenSSH public key line. It splits the line on any whitespace and parses the key type and blob through OTP `ssh_file`, so a comment, including one with spaces, is accepted and dropped from the stored canonical line. It computes the `SHA256:` fingerprint OpenSSH prints.
+- **Other parsed values:** `SameOriginPath` represents an absolute path with an optional query. It rejects a scheme, a host, a fragment, whitespace, a backslash, and a leading double slash.
 
 `RepositorySource`, `SourceSelector`, `RelativeDirectory`, and `EnvironmentSelection` enforce the shared limits. They return `:repository_url_too_long`, `:source_ref_too_long`, `:directory_too_long`, and `:too_many_layers` for those bound violations. `EnvironmentSelection` passes through component parser reasons.
 
 Parsed values share `parse/1`, which returns `{:ok, t} | {:error, atom}`.
 Their `to_string/1` output round-trips through `parse/1`.
-`ParsedList` parses lists of values with a supplied parser.
+`ParsedList.parse/2` parses a list of values with a supplied parser. `ParsedList.parse_indexed/2` returns the first bad element's index with its reason.
 `Failure`, `Manifest`, `EnvironmentSelection`, and `ContainerState` provide `encode/1` and `parse/1`.
 Tests for this app are pure unit tests with StreamData property tests.
 `test/test_helper.exs` holds the generators.
 `test/control_protocol_test.exs` covers the version 1 runtime-log request pair and malformed result shapes.
+`test/identity_values_test.exs` covers `CredentialId`, `SshKeyId`, `SshPublicKey`, `SameOriginPath`, and `Digest.sha256/1`.
 
 ## apps/biot_server
 
@@ -98,6 +102,11 @@ Tests for this app are pure unit tests with StreamData property tests.
 `ProtocolValue` stores any parsed protocol value as text.
 The other custom types wrap protocol `encode/1` and `parse/1` functions.
 `Principals` and `Nodes` own transactions.
+`Principals` owns principal identity, operator disabling, and last-seen email lookup.
+`Principals.require_enabled/2` is the one rule for a disabled principal, and every application boundary that accepts an `Actor` calls it.
+`Principals.reload/0` applies the operator's disabled identity set.
+`Principals.DisabledIdentities` loads and parses the operator file named by `BIOT_DISABLED_PRINCIPALS`.
+`Principals.Startup` runs `reload/0` before the control listener and fails boot with a readable message on invalid configuration.
 `Nodes.reload/0` is the one enrollment entry point.
 `Nodes.Startup` calls it at boot and fails boot with a readable message on rejection.
 Operators call it with `bin/server rpc "Biot.Server.Nodes.reload()"`.
@@ -138,6 +147,7 @@ A new status cannot compile until all six functions answer it.
 - `NodeWake` provides one PubSub topic per node, plus `spec_changed/2` and `subscribe/1`.
 - `Delivery` owns the one delivery rule: the caller must own a non-destroyed Biot whose assigned node is ready, and it returns that node's live connection.
 - `Secrets` delivers, removes, and lists runtime secrets. Delivery commits `direct_secret_exposure_possible` before sending and that historical marker is never cleared. `FetchCredentials` uses the same delivery rule but does not set the marker or queue work. `Queries.SecretView` projects the names returned by `list/2`.
+- `ExpirySweep` is the one owner of the expiry sweep. It runs every `expiry_sweep_interval_ms`, reads the clock once, and calls `sweep_expired/1` on `Sessions`, `PreviewHandoff`, and `Credentials`. A nil interval disables the process, and `config/test.exs` sets nil so it does not start under the manual sandbox.
 
 #### `Biot.Server.Publications`
 
@@ -156,7 +166,10 @@ access revision, and `enforcement`.
 `readable/2` builds one composable query. It is the only definition of which Biots
 an actor may read. Owners, shell-grant holders, and view-grant holders match it.
 `fetch_readable/2` returns the Biot and the actor's role, or `not_found` or
-`forbidden`. `grants_for/2` is total over the requested IDs and returns an entry
+`forbidden`. `view_authorized/3` returns `:ok` when an active publication's
+hostname grants the actor view authority, or `:not_found`/`:forbidden`. It takes
+the caller's repo so the read runs inside the caller's transaction.
+`grants_for/2` is total over the requested IDs and returns an entry
 for each one. `revoke_shell_grants/2` removes all shell grants during destroy.
 
 `grant_shell/3` and `revoke_shell/3` manage Biot shell grants.
@@ -165,6 +178,72 @@ port. `get_grants/2` returns the owner and explicit grants for the Biot. Mutatio
 results use `Policy.Applied` or `Policy.Unchanged`, with the same `enforcement`
 field. Grants require known principals; view grants require an active publication
 for the same Biot and port.
+
+#### Identity records
+
+`Sessions` owns control and preview browser sessions. `start_control/1` takes a
+`PrincipalId`, reads the stored status, and inserts the control row in one
+immediate transaction, so a disable cannot slip between the check and the insert.
+`control/1` looks up a presented token. `preview/2` requires a matching hostname,
+a live parent session, and the same principal. `live_control/2` is the one owner
+of control-proof validity, and `require_control/2` rechecks a proof on the
+caller's connection. `logout/1` rechecks the live proof and deletes the control
+row, so previews and handoffs cascade. `sweep_expired/1` deletes every session at
+or past its expiry, and a deleted control row cascades to its previews and
+handoffs.
+
+`Credentials` owns labeled bearer credentials. `create/3` requires a live control
+proof, caps the expiry at `credential_max_lifetime_ms`, and returns the clear
+token once. The row stores only the token digest. `authenticate/1` reads the live
+credential and records `last_used_at` at most once per
+`credential_last_used_interval_ms`. `list/1` and `revoke/2` scope to the actor.
+`Credentials.Created` is the result struct, and `Queries.CredentialView` is the
+projection that never holds the clear token. `sweep_expired/1` deletes
+credentials at or past their expiry.
+
+`SshKeys` owns registered OpenSSH public keys. `add/3` parses the line, stores the
+canonical line and fingerprint, and maps a duplicate fingerprint to
+`already_registered`. `authenticate/1` takes a parsed `%SshPublicKey{}`. `list/1`
+and `remove/2` scope to the actor. `Queries.SshKeyView` is the projection.
+
+`PreviewHandoff` owns single-use preview codes. `begin/4` requires a live control
+proof and view authority for an active publication. `finish/3` checks the
+hostname, the challenge, the expiry, the live parent, and the current view
+authority, then deletes the handoff and inserts the preview session in one
+transaction. A preview session expires with its parent. `PreviewHandoff.Finished`
+carries the preview token and the return path. `sweep_expired/1` deletes handoffs
+at or past their own expiry, which is shorter than the parent's.
+
+`Authentication` is `%Authentication{actor, proof}`. `AuthenticationProof` owns
+the `control`, `preview`, `credential`, and `ssh_key` proof variants and their
+constructors. A proof carries only stored identifiers and digests, never a clear
+token.
+
+`Tokens.mint/1` returns a clear token and its digest. Minting reads randomness,
+so callers treat it as an effect. `Tokens.digest/1` hashes a presented token.
+`Label` owns the 1-to-100-byte label rule shared by credentials and SSH keys.
+`Id.generate/1` mints a new canonical protocol ID.
+
+#### Principal status and disabling
+
+`Schema.Principal` stores `status`, an enum of `:enabled` and `:disabled`.
+`Principals.require_enabled/2` is the one check for a disabled principal. Inside
+an immediate transaction it runs after write ownership; read paths pass `Repo`.
+A disabled principal gets `{:error, :unauthenticated}` at every application
+boundary, and no error says whether the row is disabled, missing, or expired.
+
+`Principals.reload/0` reads the configured disabled identities and applies them
+in one immediate transaction. It inserts a disabled row for an unseen identity so
+a later first login cannot become enabled. It disables configured enabled
+principals and deletes their sessions, preview handoffs, credentials, and SSH
+keys. It re-enables principals no longer configured without restoring proofs. It
+bumps each affected Biot's access revision once and, after commit, wakes each
+Biot's node. Ownership, grants, and history stay. A repeated reload changes
+nothing, and an invalid file leaves the database unchanged.
+`Principals.DisabledIdentities` loads and parses the file. Errors are typed, so an
+invalid file fails before any write. `Principals.message/1` reports them.
+`Principals.Startup` runs `reload/0` before the control listener and fails boot
+on invalid configuration.
 
 #### `Biot.Server.Policy`
 
@@ -204,6 +283,8 @@ shown with the rest of the Biot view.
 `Authorization.role/3` returns `:owner` or `{:collaborator, grants}`. Its policy
 predicates keep lifecycle, policy, and grant reads owner-only. `Access.readable/2`
 owns Biot read access instead of a predicate in `Authorization`.
+`Authorization.may_view?/4` is the pure view predicate for one publication. It is
+true for the owner or a matching view port.
 
 These modules follow the model contract. Additions never move the access
 revision. Unpublish deletes the port's view grants in the same transaction.
@@ -266,6 +347,14 @@ access revision accepted for each Biot.
 Raw SQL is used only for `biots` and `view_grants`.
 SQLite needs their composite foreign keys inline. Step 18 adds the retry-state and server observation
 migrations for `waiting_for`.
+Step 19 adds `20260912000100_add_principal_status`, `20260912000200_create_sessions`,
+`20260912000300_create_preview_handoffs`, `20260912000400_create_credentials`, and
+`20260912000500_create_ssh_keys`. The status migration adds a non-null
+`principals.status` column defaulting to `enabled`. The four new tables are
+`sessions`, `preview_handoffs`, `credentials`, and `ssh_keys`. The `sessions`,
+`credentials`, and `ssh_keys` references to `principals` use `on_delete: :nothing`,
+because principals are never deleted. Preview sessions and handoffs cascade from
+their control session.
 
 ### Tests
 
@@ -288,8 +377,26 @@ Focused server evidence includes:
 - `policy_records_test.exs` uses real SQLite transactions to prove policy
   idempotence, authorization, revision and wake behavior, destroyed checks,
   publication state, view-grant cleanup, and enforcement progress.
-- `authorization_test.exs` proves owner, policy-change, grant-read, and role
-  predicates.
+- `authorization_test.exs` proves owner, policy-change, grant-read, role, and
+  view predicates.
+- `sessions_integration_test.exs` covers control start and lookup, disabled and
+  missing principals, expiry, preview hostname and parent checks, and logout
+  cascading to previews and handoffs.
+- `credentials_integration_test.exs` covers the control-proof requirement, label
+  and expiry bounds, digest-only storage, authenticate, coarse `last_used_at`,
+  list, revoke, and disabled owners.
+- `ssh_keys_integration_test.exs` covers OTP parsing, fingerprints, duplicate
+  rejection, add, list, remove, authenticate, and disabled owners.
+- `preview_handoff_integration_test.exs` covers the control-proof requirement,
+  view authority, single use, hostname and challenge binding, expiry, and revoked
+  authority.
+- `principals_reload_test.exs` covers proof deletion, ownership and grant
+  preservation, one revision bump per affected Biot, idempotent reload, no proof
+  restoration on re-enable, and the disabled-principal rule at every application
+  boundary.
+- `principals/disabled_identities_test.exs` covers file and inline loading,
+  malformed elements with their index, unknown keys, repeated identities, and
+  typed file errors.
 
 Node enrollment and abandonment evidence includes:
 
@@ -823,6 +930,8 @@ mise exec -- mix test
 
 `mix check` runs format checks, Credo in strict mode, and compilation with warnings as errors.
 
+The root and `apps/biot_server` `test` aliases load `mix/test_env.exs`. Its `Biot.Mix.TestEnv.require_test_env!/1` refuses to run unless `Mix.env()` is `:test`, and it runs before `ecto.drop`, so `MIX_ENV=dev mix test` cannot drop the dev database.
+
 Build and vet the CLI with:
 
 ```sh
@@ -846,7 +955,14 @@ Server configuration includes `publication_domain`, `ssh_advertised_host`,
 integer `ssh_port`, and `desired_sweep_interval_ms`. Production reads them from
 `BIOT_SERVER_PUBLICATION_DOMAIN`, `BIOT_SSH_ADVERTISED_HOST`, `BIOT_SSH_PORT`,
 and `BIOT_DESIRED_SWEEP_INTERVAL_MS`. No `BIOT_SERVER_PUBLICATION_HMAC_KEY`
-setting remains.
+setting remains. Step 19 adds `control_session_lifetime_ms`,
+`credential_max_lifetime_ms`, `credential_last_used_interval_ms`,
+`preview_handoff_ttl_ms`, and the `disabled_principals` and
+`disabled_principals_file` settings. Production reads
+`BIOT_SESSION_LIFETIME_HOURS` (default 168), `BIOT_CREDENTIAL_MAX_LIFETIME_DAYS`
+(default 90), and `BIOT_DISABLED_PRINCIPALS` for the server release.
+Fix round 4 adds `expiry_sweep_interval_ms`, the interval for `ExpirySweep`. It
+has no environment variable, and `config/test.exs` sets it to nil.
 
 ## Host tests in Docker
 

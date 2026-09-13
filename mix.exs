@@ -1,3 +1,5 @@
+Code.require_file(Path.expand("mix/test_env.exs", __DIR__))
+
 defmodule Biot.MixProject do
   use Mix.Project
 
@@ -22,7 +24,13 @@ defmodule Biot.MixProject do
     [
       "ecto.setup": ["ecto.create", "ecto.migrate"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
-      test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
+      test: [
+        &Biot.Mix.TestEnv.require_test_env!/1,
+        "ecto.drop --quiet",
+        "ecto.create --quiet",
+        "ecto.migrate --quiet",
+        "test"
+      ],
       check: [
         "format --check-formatted",
         "credo --strict",

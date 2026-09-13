@@ -7,6 +7,7 @@ defmodule Biot.Server.Queries.Nodes do
   alias Biot.Server.Biots.Capacity
   alias Biot.Server.CommandError
   alias Biot.Server.NodeConnections
+  alias Biot.Server.Principals
   alias Biot.Server.Queries.NodeView
   alias Biot.Server.Queries.NodeView.Input
   alias Biot.Server.Repo
@@ -15,7 +16,13 @@ defmodule Biot.Server.Queries.Nodes do
   @spec list(Actor.t() | nil) :: {:ok, [NodeView.t()]} | {:error, CommandError.t()}
   def list(nil), do: {:error, :unauthenticated}
 
-  def list(%Actor{}) do
+  def list(%Actor{} = actor) do
+    with :ok <- Principals.require_enabled(Repo, actor) do
+      list_views()
+    end
+  end
+
+  defp list_views do
     nodes = Repo.all(from(node in Node, order_by: [asc: node.id]))
     node_ids = Enum.map(nodes, & &1.id)
     counts = Capacity.counts(Repo, node_ids)

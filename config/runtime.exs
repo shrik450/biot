@@ -21,7 +21,8 @@ config :biot_server, default_node_id: default_node_id
 
 if config_env() in [:dev, :prod] do
   config :biot_server,
-    node_registrations_file: System.get_env("BIOT_NODE_REGISTRATIONS")
+    node_registrations_file: System.get_env("BIOT_NODE_REGISTRATIONS"),
+    disabled_principals_file: System.get_env("BIOT_DISABLED_PRINCIPALS")
 end
 
 if config_env() == :prod and System.get_env("RELEASE_NAME") != "node" do
@@ -48,6 +49,9 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "node" do
     ssh_advertised_host: required_env.("BIOT_SSH_ADVERTISED_HOST"),
     ssh_port: port_env.("BIOT_SSH_PORT"),
     control_port: integer_env.("BIOT_CONTROL_PORT", 4443),
+    control_session_lifetime_ms: integer_env.("BIOT_SESSION_LIFETIME_HOURS", 168) * 3_600_000,
+    credential_max_lifetime_ms:
+      integer_env.("BIOT_CREDENTIAL_MAX_LIFETIME_DAYS", 90) * 86_400_000,
     control_tls: [
       certfile: required_env.("BIOT_CONTROL_CERTFILE"),
       keyfile: required_env.("BIOT_CONTROL_KEYFILE"),

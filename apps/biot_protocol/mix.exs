@@ -17,7 +17,7 @@ defmodule Biot.Protocol.MixProject do
 
   def application do
     [
-      extra_applications: [:crypto, :logger]
+      extra_applications: [:crypto, :logger, :ssh]
     ]
   end
 

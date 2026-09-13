@@ -6,6 +6,8 @@ config :biot_server, Biot.Server.Repo,
 
 config :biot_server, node_registrations: []
 
+config :biot_server, expiry_sweep_interval_ms: nil
+
 config :biot_web, BiotWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
   secret_key_base: "Xpejv1jxyCS+IgiREufELTFm1QtRZBxZQSQX5HQNB+lnY3P7iGxKNDMId3XFv1Lv",

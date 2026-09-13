@@ -13,6 +13,7 @@ defmodule Biot.Server.Schema.Principal do
     field(:subject, :string)
     field(:last_seen_email, :string)
     field(:last_seen_name, :string)
+    field(:status, Ecto.Enum, values: [:enabled, :disabled], default: :enabled)
 
     timestamps(type: :utc_datetime_usec)
   end

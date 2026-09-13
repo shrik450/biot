@@ -3,17 +3,18 @@ defmodule Biot.Server.Access do
 
   import Ecto.Query
 
-  alias Biot.Protocol.{BiotId, Port, PrincipalId}
+  alias Biot.Protocol.{BiotId, Hostname, Port, PrincipalId}
   alias Biot.Server.Actor
   alias Biot.Server.Authorization
   alias Biot.Server.CommandError
   alias Biot.Server.Policy
   alias Biot.Server.Policy.Transaction
+  alias Biot.Server.Principals
   alias Biot.Server.Publications
   alias Biot.Server.Queries.AccessView
   alias Biot.Server.Queries.AccessView.Input
   alias Biot.Server.Repo
-  alias Biot.Server.Schema.{Biot, Principal, ShellGrant, ViewGrant}
+  alias Biot.Server.Schema.{Biot, Principal, Publication, ShellGrant, ViewGrant}
 
   @spec readable(Ecto.Queryable.t(), Actor.t()) :: Ecto.Query.t()
   def readable(queryable, %Actor{principal_id: principal_id}) do
@@ -42,8 +43,15 @@ defmodule Biot.Server.Access do
   end
 
   @spec fetch_readable(Actor.t(), BiotId.t()) ::
-          {:ok, Biot.t(), Authorization.role()} | {:error, :not_found | :forbidden}
+          {:ok, Biot.t(), Authorization.role()}
+          | {:error, :not_found | :forbidden | :unauthenticated}
   def fetch_readable(%Actor{} = actor, %BiotId{} = biot_id) do
+    with :ok <- Principals.require_enabled(Repo, actor) do
+      readable_biot(actor, biot_id)
+    end
+  end
+
+  defp readable_biot(actor, biot_id) do
     query = from(biot in Biot, where: biot.id == ^biot_id)
 
     case query |> readable(actor) |> Repo.one() do
@@ -58,15 +66,17 @@ defmodule Biot.Server.Access do
 
   @doc "Returns an entry for every requested Biot ID, so callers can use Map.fetch!/2."
   @spec grants_for(Actor.t(), [BiotId.t()]) :: %{BiotId.t() => Authorization.grants()}
-  def grants_for(%Actor{}, []), do: %{}
+  def grants_for(%Actor{} = actor, biot_ids), do: grants_for(Repo, actor, biot_ids)
 
-  def grants_for(%Actor{} = actor, biot_ids) do
+  defp grants_for(_repo, %Actor{}, []), do: %{}
+
+  defp grants_for(repo, %Actor{} = actor, biot_ids) do
     shell_biot_ids =
       from(grant in ShellGrant,
         where: grant.biot_id in ^biot_ids and grant.principal_id == ^actor.principal_id,
         select: grant.biot_id
       )
-      |> Repo.all()
+      |> repo.all()
       |> MapSet.new()
 
     view_ports =
@@ -74,13 +84,30 @@ defmodule Biot.Server.Access do
         where: grant.biot_id in ^biot_ids and grant.principal_id == ^actor.principal_id,
         select: {grant.biot_id, grant.port}
       )
-      |> Repo.all()
+      |> repo.all()
       |> Enum.group_by(fn {biot_id, _port} -> biot_id end, fn {_biot_id, port} -> port end)
 
     Map.new(biot_ids, fn biot_id ->
       ports = view_ports |> Map.get(biot_id, []) |> Enum.sort_by(& &1.value)
       {biot_id, %{shell: MapSet.member?(shell_biot_ids, biot_id), view_ports: ports}}
     end)
+  end
+
+  @spec view_authorized(Ecto.Repo.t() | module(), Actor.t(), Hostname.t()) ::
+          :ok | {:error, :not_found | :forbidden}
+  def view_authorized(repo, %Actor{} = actor, %Hostname{} = hostname) do
+    case Publications.active_by_hostname(repo, hostname) do
+      nil ->
+        {:error, :not_found}
+
+      %Publication{} = publication ->
+        biot = repo.get!(Biot, publication.biot_id)
+        grants = Map.fetch!(grants_for(repo, actor, [biot.id]), biot.id)
+
+        if Authorization.may_view?(actor, biot, publication.port, grants.view_ports),
+          do: :ok,
+          else: {:error, :forbidden}
+    end
   end
 
   @spec revoke_shell_grants(Ecto.Multi.t(), BiotId.t()) :: Ecto.Multi.t()
@@ -143,6 +170,12 @@ defmodule Biot.Server.Access do
   def get_grants(nil, %BiotId{}), do: {:error, :unauthenticated}
 
   def get_grants(%Actor{} = actor, %BiotId{} = biot_id) do
+    with :ok <- Principals.require_enabled(Repo, actor) do
+      own_grants(actor, biot_id)
+    end
+  end
+
+  defp own_grants(actor, biot_id) do
     case Repo.get(Biot, biot_id) do
       nil ->
         {:error, :not_found}

@@ -20,9 +20,11 @@ defmodule Biot.Server.Biots do
   alias Biot.Server.Biots.SelectEnvironment
   alias Biot.Server.Biots.Unchanged
   alias Biot.Server.CommandError
+  alias Biot.Server.Id
   alias Biot.Server.Nodes
   alias Biot.Server.Nodes.Status
   alias Biot.Server.NodeWake
+  alias Biot.Server.Principals
   alias Biot.Server.Publications
   alias Biot.Server.Repo
   alias Biot.Server.Schema.Biot, as: BiotRow
@@ -76,7 +78,7 @@ defmodule Biot.Server.Biots do
         %SelectEnvironment{selection: selection},
         expected_revision
       ) do
-    environment_id = generate_id(EnvironmentId)
+    environment_id = Id.generate(EnvironmentId)
 
     lifecycle_change(
       actor,
@@ -123,9 +125,12 @@ defmodule Biot.Server.Biots do
   end
 
   defp plan_creation(repo, actor, biot_id, command, fingerprint) do
-    case repo.get(BiotRow, biot_id) do
-      nil -> plan_new_creation(repo, actor, biot_id, command, fingerprint)
-      biot -> plan_creation_retry(repo, actor, biot, fingerprint)
+    # A disabled owner must not replay an existing create.
+    with :ok <- Principals.require_enabled(repo, actor) do
+      case repo.get(BiotRow, biot_id) do
+        nil -> plan_new_creation(repo, actor, biot_id, command, fingerprint)
+        biot -> plan_creation_retry(repo, actor, biot, fingerprint)
+      end
     end
   end
 
@@ -142,8 +147,8 @@ defmodule Biot.Server.Biots do
          {:ok, node} <- available_node(repo, node_id),
          :ok <- require_capacity(repo, node),
          :ok <- require_name_available(repo, actor.principal_id, command.name) do
-      environment_id = generate_id(EnvironmentId)
-      operation_id = generate_id(OperationId)
+      environment_id = Id.generate(EnvironmentId)
+      operation_id = Id.generate(OperationId)
 
       biot = %BiotRow{
         id: biot_id,
@@ -216,7 +221,8 @@ defmodule Biot.Server.Biots do
          change,
          selection
        ) do
-    with {:ok, biot} <- load_controlled_biot(repo, actor, biot_id),
+    with :ok <- Principals.require_enabled(repo, actor),
+         {:ok, biot} <- load_controlled_biot(repo, actor, biot_id),
          node = repo.get!(Node, biot.node_id),
          :ok <- require_lifecycle_capable_node(node),
          :ok <- check_revision(biot, expected_revision) do
@@ -225,7 +231,8 @@ defmodule Biot.Server.Biots do
   end
 
   defp plan_destroy(repo, actor, biot_id) do
-    with {:ok, biot} <- load_controlled_biot(repo, actor, biot_id) do
+    with :ok <- Principals.require_enabled(repo, actor),
+         {:ok, biot} <- load_controlled_biot(repo, actor, biot_id) do
       node = repo.get!(Node, biot.node_id)
       transition(biot, node, actor.principal_id, :destroy, nil)
     end
@@ -237,7 +244,7 @@ defmodule Biot.Server.Biots do
         kind = operation_kind(change)
 
         operation =
-          generate_id(OperationId)
+          Id.generate(OperationId)
           |> operation(actor_id, biot.id, kind, desired.revision)
           |> fail_for_abandoned_node(node)
 
@@ -456,10 +463,5 @@ defmodule Biot.Server.Biots do
       _error ->
         false
     end)
-  end
-
-  defp generate_id(module) do
-    {:ok, id} = module.parse(Ecto.UUID.generate())
-    id
   end
 end

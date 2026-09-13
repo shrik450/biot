@@ -17,7 +17,8 @@ defmodule Biot.Server.Publications do
   alias Biot.Server.Publications.Hostname
   alias Biot.Server.Queries.PublicationView
   alias Biot.Server.Repo
-  alias Biot.Server.Schema.{Biot, Publication, ViewGrant}
+  alias Biot.Server.Schema.Biot, as: BiotRow
+  alias Biot.Server.Schema.{Publication, ViewGrant}
 
   # Shared with the migration as "publications_hostname_index". SQLite reports this adapter name.
   @hostname_index_name "publications_hostname_index"
@@ -67,6 +68,12 @@ defmodule Biot.Server.Publications do
     |> repo.exists?()
   end
 
+  @spec active_by_hostname(Ecto.Repo.t() | module(), Biot.Protocol.Hostname.t()) ::
+          Publication.t() | nil
+  def active_by_hostname(repo, %Biot.Protocol.Hostname{} = hostname) do
+    active_publications() |> repo.get_by(hostname: hostname)
+  end
+
   @spec active_for([BiotId.t()]) :: %{BiotId.t() => [Publication.t()]}
   def active_for([]), do: %{}
 
@@ -91,7 +98,7 @@ defmodule Biot.Server.Publications do
     )
   end
 
-  defp publish_change(repo, %Biot{} = biot, port) do
+  defp publish_change(repo, %BiotRow{} = biot, port) do
     case repo.get_by(Publication, biot_id: biot.id, port: port) do
       %Publication{state: :active} ->
         :unchanged
@@ -122,7 +129,7 @@ defmodule Biot.Server.Publications do
     end
   end
 
-  defp unpublish_change(repo, %Biot{} = biot, port) do
+  defp unpublish_change(repo, %BiotRow{} = biot, port) do
     case repo.get_by(Publication, biot_id: biot.id, port: port) do
       nil ->
         :unchanged

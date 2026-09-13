@@ -1,6 +1,7 @@
 defmodule Biot.Server.Nodes.RegistrationLoader do
   @moduledoc "Loads and parses node registrations without changing database state."
 
+  alias Biot.Protocol.ParsedList
   alias Biot.Server.Nodes.Registration
 
   @type error ::
@@ -54,17 +55,9 @@ defmodule Biot.Server.Nodes.RegistrationLoader do
   defp load_file(path), do: {:error, {:invalid_path, path}}
 
   defp parse(registrations) when is_list(registrations) do
-    registrations
-    |> Enum.with_index()
-    |> Enum.reduce_while({:ok, []}, fn {value, index}, {:ok, parsed} ->
-      case parse_registration(value) do
-        {:ok, registration} -> {:cont, {:ok, [registration | parsed]}}
-        {:error, reason} -> {:halt, {:error, {:registration, index, reason}}}
-      end
-    end)
-    |> case do
-      {:ok, parsed} -> {:ok, Enum.reverse(parsed)}
-      {:error, reason} -> {:error, reason}
+    case ParsedList.parse_indexed(registrations, &parse_registration/1) do
+      {:ok, registrations} -> {:ok, registrations}
+      {:error, {index, reason}} -> {:error, {:registration, index, reason}}
     end
   end
 

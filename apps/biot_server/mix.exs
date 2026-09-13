@@ -1,3 +1,5 @@
+Code.require_file(Path.expand("../../mix/test_env.exs", __DIR__))
+
 defmodule Biot.Server.MixProject do
   use Mix.Project
 
@@ -38,7 +40,15 @@ defmodule Biot.Server.MixProject do
   end
 
   defp aliases do
-    [test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"]]
+    [
+      test: [
+        &Biot.Mix.TestEnv.require_test_env!/1,
+        "ecto.drop --quiet",
+        "ecto.create --quiet",
+        "ecto.migrate --quiet",
+        "test"
+      ]
+    ]
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]

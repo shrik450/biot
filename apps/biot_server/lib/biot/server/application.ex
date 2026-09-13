@@ -11,7 +11,9 @@ defmodule Biot.Server.Application do
 
     children = [
       Biot.Server.Repo,
+      Biot.Server.ExpirySweep,
       {Phoenix.PubSub, name: Biot.Server.PubSub},
+      Biot.Server.Principals.Startup,
       Biot.Server.NodeConnections,
       # Startup needs the registry, while the listener must not accept a node before enrollment.
       {Registry, keys: :unique, name: Biot.Server.Control.Registry},

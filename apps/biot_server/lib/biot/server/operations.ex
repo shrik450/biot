@@ -4,6 +4,7 @@ defmodule Biot.Server.Operations do
   alias Biot.Protocol.OperationId
   alias Biot.Server.Actor
   alias Biot.Server.CommandError
+  alias Biot.Server.Principals
   alias Biot.Server.Queries.OperationView
   alias Biot.Server.Repo
   alias Biot.Server.Schema.{Biot, Operation}
@@ -13,6 +14,12 @@ defmodule Biot.Server.Operations do
   def get(nil, %OperationId{}), do: {:error, :unauthenticated}
 
   def get(%Actor{} = actor, %OperationId{} = operation_id) do
+    with :ok <- Principals.require_enabled(Repo, actor) do
+      readable_operation(actor, operation_id)
+    end
+  end
+
+  defp readable_operation(actor, operation_id) do
     with %Operation{} = operation <- Repo.get(Operation, operation_id),
          %Biot{} = biot <- Repo.get(Biot, operation.biot_id),
          true <- authorized?(actor, operation, biot) do

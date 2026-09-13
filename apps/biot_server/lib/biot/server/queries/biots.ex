@@ -9,6 +9,7 @@ defmodule Biot.Server.Queries.Biots do
   alias Biot.Server.Authorization
   alias Biot.Server.CommandError
   alias Biot.Server.NodeConnections
+  alias Biot.Server.Principals
   alias Biot.Server.Publications
   alias Biot.Server.Queries.BiotView
   alias Biot.Server.Queries.BiotView.Input
@@ -40,6 +41,12 @@ defmodule Biot.Server.Queries.Biots do
   def list(nil, %{after: _after_id, limit: _limit}), do: {:error, :unauthenticated}
 
   def list(%Actor{} = actor, %{after: after_id, limit: limit}) do
+    with :ok <- Principals.require_enabled(Repo, actor) do
+      list_readable(actor, after_id, limit)
+    end
+  end
+
+  defp list_readable(actor, after_id, limit) do
     rows =
       BiotRow
       |> Access.readable(actor)

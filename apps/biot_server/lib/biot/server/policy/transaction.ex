@@ -9,6 +9,7 @@ defmodule Biot.Server.Policy.Transaction do
   alias Biot.Server.NodeWake
   alias Biot.Server.Policy
   alias Biot.Server.Policy.{Applied, Enforcement, Unchanged}
+  alias Biot.Server.Principals
   alias Biot.Server.Repo
   alias Biot.Server.Schema.{AccessObservation, Biot}
 
@@ -28,7 +29,8 @@ defmodule Biot.Server.Policy.Transaction do
   end
 
   defp plan(repo, actor, biot_id, change) do
-    with {:ok, biot} <- load_biot(repo, biot_id),
+    with :ok <- Principals.require_enabled(repo, actor),
+         {:ok, biot} <- load_biot(repo, biot_id),
          :ok <- authorize(actor, biot),
          :ok <- require_live(biot) do
       normalize(change.(repo, biot), biot)

@@ -1,8 +1,8 @@
 defmodule Biot.Server.Queries.DeploymentTest do
-  use ExUnit.Case, async: false
+  use Biot.Server.DataCase, async: false
 
-  alias Biot.Protocol.PrincipalId
-  alias Biot.Server.Actor
+  import Ecto.Query
+
   alias Biot.Server.Queries.Deployment
   alias Biot.Server.Queries.DeploymentView
   alias Biot.Server.TestFixtures
@@ -16,7 +16,9 @@ defmodule Biot.Server.Queries.DeploymentTest do
       for {key, value} <- previous, do: Application.put_env(:biot_server, key, value)
     end)
 
-    %{actor: %Actor{principal_id: TestFixtures.id(PrincipalId, 1)}}
+    principal = TestFixtures.principal(1)
+
+    %{actor: TestFixtures.actor(principal)}
   end
 
   test "any authenticated actor reads the advertised settings", context do
@@ -42,5 +44,19 @@ defmodule Biot.Server.Queries.DeploymentTest do
 
   test "an unauthenticated caller reads nothing" do
     assert Deployment.get(nil) == {:error, :unauthenticated}
+  end
+
+  test "a disabled caller reads nothing" do
+    principal = TestFixtures.principal(2)
+    disable(principal)
+
+    assert Deployment.get(TestFixtures.actor(principal)) == {:error, :unauthenticated}
+  end
+
+  defp disable(principal) do
+    Repo.update_all(
+      from(p in Biot.Server.Schema.Principal, where: p.id == ^principal.id),
+      set: [status: :disabled]
+    )
   end
 end
