@@ -10,8 +10,10 @@ defmodule Biot.Server.Credentials do
   import Ecto.Query
 
   alias Biot.Protocol.CredentialId
+  alias Biot.Server.Access.Owners
   alias Biot.Server.Actor
   alias Biot.Server.Authentication
+  alias Biot.Server.Authentication.Validity
   alias Biot.Server.AuthenticationProof
   alias Biot.Server.CommandError
   alias Biot.Server.Credentials.Created
@@ -20,7 +22,7 @@ defmodule Biot.Server.Credentials do
   alias Biot.Server.Principals
   alias Biot.Server.Queries.CredentialView
   alias Biot.Server.Repo
-  alias Biot.Server.Schema.{Credential, Principal}
+  alias Biot.Server.Schema.Credential
   alias Biot.Server.Sessions
   alias Biot.Server.Tokens
 
@@ -85,7 +87,9 @@ defmodule Biot.Server.Credentials do
           )
         )
 
-      if deleted == 1, do: :ok, else: {:error, :not_found}
+      if deleted == 1,
+        do: Owners.close_proof({:credential, credential_id}),
+        else: {:error, :not_found}
     end
   end
 
@@ -131,17 +135,7 @@ defmodule Biot.Server.Credentials do
   end
 
   defp live_credential(digest) do
-    now = DateTime.utc_now()
-
-    from(credential in Credential,
-      join: principal in Principal,
-      on: principal.id == credential.principal_id,
-      where:
-        credential.secret_digest == ^digest and credential.expires_at > ^now and
-          principal.status == :enabled,
-      select: credential
-    )
-    |> Repo.one()
+    Validity.credential_by_digest(Repo, digest, DateTime.utc_now())
   end
 
   defp touch(%Credential{last_used_at: nil} = credential), do: record_use(credential)

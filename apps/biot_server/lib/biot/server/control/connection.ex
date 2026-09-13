@@ -12,7 +12,8 @@ defmodule Biot.Server.Control.Connection do
   alias Biot.Protocol.PeerIdentity
   alias Biot.Protocol.Version
   alias Biot.Protocol.Wire
-  alias Biot.Server.Biots
+  alias Biot.Server.Access.Owners
+  alias Biot.Server.BiotSpecs
   alias Biot.Server.Control.Synchronization
   alias Biot.Server.NodeConnections
   alias Biot.Server.Nodes.Status
@@ -185,6 +186,8 @@ defmodule Biot.Server.Control.Connection do
   end
 
   def handle_info(:desired_sweep, {socket, %State{phase: :ready} = state}) do
+    :ok = close_withdrawn_owners(state.node_id)
+
     case send_behind_specs(socket, state) do
       :ok ->
         Process.send_after(self(), :desired_sweep, state.desired_sweep_interval_ms)
@@ -465,8 +468,8 @@ defmodule Biot.Server.Control.Connection do
          {:ok, node} <- store_platform(node, hello.platform),
          :ok <- send_connected(socket, connection_id, version),
          :ok <- NodeWake.subscribe(node.id),
+         :ok <- close_withdrawn_owners(node.id),
          :ok <- send_snapshot(socket, node.id, connection_id, version) do
-      NodeConnections.put(node.id, %{connection_id: connection_id, state: :synchronizing})
       Process.send_after(self(), :send_heartbeat, state.heartbeat_interval_ms)
 
       {:continue,
@@ -511,15 +514,10 @@ defmodule Biot.Server.Control.Connection do
          _socket,
          %State{phase: :synchronizing, connection_id: connection_id} = state
        ) do
-    case NodeConnections.put(state.node_id, %{connection_id: connection_id, state: :ready}) do
-      :ok ->
-        # The snapshot sends the set; the sweep covers later intent, including dropped wakes.
-        Process.send_after(self(), :desired_sweep, state.desired_sweep_interval_ms)
-        {:continue, %{state | phase: :ready}}
-
-      {:error, reason} ->
-        close(reason, state)
-    end
+    :ok = NodeConnections.put(state.node_id, %{connection_id: connection_id, state: :ready})
+    # The snapshot sends the set; the sweep covers later intent, including dropped wakes.
+    Process.send_after(self(), :desired_sweep, state.desired_sweep_interval_ms)
+    {:continue, %{state | phase: :ready}}
   end
 
   defp handle_message(%Message.Observation{} = message, _socket, %State{phase: :ready} = state) do
@@ -651,9 +649,9 @@ defmodule Biot.Server.Control.Connection do
   end
 
   defp claim_node(node_id, connection_id) do
-    # The Registry uses NodeId keys so the newest authenticated connection replaces the old one.
-    case Registry.register(Biot.Server.Control.Registry, node_id, connection_id) do
-      {:ok, _owner} ->
+    # The newest authenticated connection replaces the old one.
+    case NodeConnections.put(node_id, %{connection_id: connection_id, state: :synchronizing}) do
+      :ok ->
         :ok
 
       {:error, {:already_registered, pid}} ->
@@ -725,7 +723,7 @@ defmodule Biot.Server.Control.Connection do
   defp cleanup(%State{node_id: nil}), do: :ok
 
   defp cleanup(%State{} = state) do
-    NodeConnections.delete(state.node_id, state.connection_id)
+    NodeConnections.delete(state.node_id)
     Pending.control_lost(state.connection_id)
 
     Enum.each(state.pending_requests, fn {_request_id, {from, timer, _reply}} ->
@@ -800,16 +798,23 @@ defmodule Biot.Server.Control.Connection do
   end
 
   defp send_desired(socket, biot_id, version) do
-    with {:ok, spec} <- Biots.spec(biot_id) do
+    with {:ok, spec} <- BiotSpecs.build(biot_id) do
       send_message(socket, %Message.Desired{biot_spec: spec}, version)
     end
+  end
+
+  # A withdrawal whose request process died before it closed owners still reaches them here.
+  defp close_withdrawn_owners(node_id) do
+    node_id
+    |> Synchronization.access_behind()
+    |> Enum.each(&Owners.close_biot/1)
   end
 
   defp desired_messages(node_id, connection_id) do
     node_id
     |> Synchronization.behind(connection_id)
     |> Enum.reduce_while({:ok, []}, fn biot_id, {:ok, messages} ->
-      case Biots.spec(biot_id) do
+      case BiotSpecs.build(biot_id) do
         {:ok, spec} -> {:cont, {:ok, [%Message.Desired{biot_spec: spec} | messages]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end

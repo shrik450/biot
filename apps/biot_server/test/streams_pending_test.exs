@@ -11,7 +11,6 @@ defmodule Biot.Server.StreamsPendingTest do
   alias Biot.Protocol.ShellFrame
   alias Biot.Protocol.StreamId
   alias Biot.Server.Id
-  alias Biot.Server.NodeConnections
   alias Biot.Server.Streams
   alias Biot.Server.Streams.Pending
 
@@ -19,15 +18,16 @@ defmodule Biot.Server.StreamsPendingTest do
     @moduledoc false
     use GenServer
 
-    alias Biot.Server.Control.Registry, as: ControlRegistry
+    alias Biot.Server.NodeConnections
 
     def start_link(node_id, connection_id, parent) do
       GenServer.start_link(__MODULE__, {node_id, connection_id, parent})
     end
 
+    # Only the connection process may mark its node ready, as a real control connection does.
     @impl true
     def init({node_id, connection_id, parent}) do
-      {:ok, _owner} = Registry.register(ControlRegistry, node_id, connection_id)
+      :ok = NodeConnections.put(node_id, %{connection_id: connection_id, state: :ready})
       {:ok, parent}
     end
 
@@ -104,8 +104,12 @@ defmodule Biot.Server.StreamsPendingTest do
     node_id = Id.generate(NodeId)
     connection_id = Id.generate(ConnectionId)
     {:ok, _pid} = FakeConnection.start_link(node_id, connection_id, self())
-    :ok = NodeConnections.put(node_id, %{connection_id: connection_id, state: :ready})
     {node_id, connection_id}
+  end
+
+  defp open_deadline do
+    System.monotonic_time(:millisecond) +
+      Application.fetch_env!(:biot_server, :stream_open_timeout_ms)
   end
 
   test "an open with no attach returns at the configured deadline and claims nothing" do
@@ -119,7 +123,7 @@ defmodule Biot.Server.StreamsPendingTest do
 
     caller =
       Task.async(fn ->
-        result = Streams.open(node_id, biot_id, 1, target)
+        result = Streams.open_until(node_id, biot_id, 1, target, open_deadline())
         send(parent, {:result, result, System.monotonic_time(:millisecond) - started})
       end)
 
@@ -135,7 +139,9 @@ defmodule Biot.Server.StreamsPendingTest do
     biot_id = Id.generate(BiotId)
     target = {:port, elem(Port.parse(3000), 1)}
 
-    caller = Task.async(fn -> Streams.open(node_id, biot_id, 1, target) end)
+    caller =
+      Task.async(fn -> Streams.open_until(node_id, biot_id, 1, target, open_deadline()) end)
+
     assert_receive {:opened, %Message.OpenStream{} = message}, 5_000
     assert Task.await(caller, 5_000) == {:error, :timeout}
 
@@ -149,7 +155,11 @@ defmodule Biot.Server.StreamsPendingTest do
     {node_id, connection_id} = ready_connection()
     target = {:port, elem(Port.parse(3000), 1)}
 
-    caller = Task.async(fn -> Streams.open(node_id, Id.generate(BiotId), 1, target) end)
+    caller =
+      Task.async(fn ->
+        Streams.open_until(node_id, Id.generate(BiotId), 1, target, open_deadline())
+      end)
+
     assert_receive {:opened, %Message.OpenStream{} = message}, 5_000
 
     handler = spawn(fn -> Process.sleep(:infinity) end)
@@ -169,7 +179,7 @@ defmodule Biot.Server.StreamsPendingTest do
 
     caller =
       Task.async(fn ->
-        result = Streams.open(node_id, Id.generate(BiotId), 1, target)
+        result = Streams.open_until(node_id, Id.generate(BiotId), 1, target, open_deadline())
         send(parent, {:open_result, result})
 
         receive do
@@ -210,10 +220,13 @@ defmodule Biot.Server.StreamsPendingTest do
     node_id = Id.generate(NodeId)
     connection_id = Id.generate(ConnectionId)
     {:ok, connection_pid} = FakeConnection.start_link(node_id, connection_id, self())
-    :ok = NodeConnections.put(node_id, %{connection_id: connection_id, state: :ready})
     target = {:port, elem(Port.parse(3000), 1)}
 
-    caller = Task.async(fn -> Streams.open(node_id, Id.generate(BiotId), 1, target) end)
+    caller =
+      Task.async(fn ->
+        Streams.open_until(node_id, Id.generate(BiotId), 1, target, open_deadline())
+      end)
+
     assert_receive {:opened, %Message.OpenStream{} = message}, 5_000
 
     handler = spawn(fn -> Process.sleep(:infinity) end)
@@ -233,10 +246,13 @@ defmodule Biot.Server.StreamsPendingTest do
     node_id = Id.generate(NodeId)
     connection_id = Id.generate(ConnectionId)
     {:ok, connection_pid} = FakeConnection.start_link(node_id, connection_id, self())
-    :ok = NodeConnections.put(node_id, %{connection_id: connection_id, state: :ready})
     target = {:port, elem(Port.parse(3000), 1)}
 
-    caller = Task.async(fn -> Streams.open(node_id, Id.generate(BiotId), 1, target) end)
+    caller =
+      Task.async(fn ->
+        Streams.open_until(node_id, Id.generate(BiotId), 1, target, open_deadline())
+      end)
+
     assert_receive {:opened, %Message.OpenStream{} = message}, 5_000
 
     Process.unlink(connection_pid)
@@ -294,8 +310,7 @@ defmodule Biot.Server.StreamsPendingTest do
     connection_id = Id.generate(ConnectionId)
     id = Id.generate(StreamId)
     handler = self()
-    connection_pid = spawn(fn -> Process.sleep(:infinity) end)
-    on_exit(fn -> Process.exit(connection_pid, :kill) end)
+    {:ok, connection_pid} = FakeConnection.start_link(node_id, connection_id, self())
     pending_pid = Process.whereis(Pending)
     monitors_before = pending_monitors(pending_pid)
 
@@ -312,7 +327,6 @@ defmodule Biot.Server.StreamsPendingTest do
     assert Pending.attach(node_id, connection_id, Id.generate(StreamId), handler, make_ref()) ==
              {:error, :unknown_stream}
 
-    :ok = NodeConnections.put(node_id, %{connection_id: connection_id, state: :ready})
     socket = make_ref()
     assert Pending.attach(node_id, connection_id, id, handler, socket) == {:ok, self(), :port}
     assert_received {:stream_claimed, ^id, ^handler, ^socket}
@@ -324,19 +338,18 @@ defmodule Biot.Server.StreamsPendingTest do
 
   test "control loss fails every open for that connection" do
     {node_id, connection_id} = ready_connection()
-    other_node_id = Id.generate(NodeId)
-    other_connection_id = Id.generate(ConnectionId)
-    {:ok, _pid} = FakeConnection.start_link(other_node_id, other_connection_id, self())
-    :ok = NodeConnections.put(other_node_id, %{connection_id: other_connection_id, state: :ready})
+    {other_node_id, _other_connection_id} = ready_connection()
 
     target = {:port, elem(Port.parse(3000), 1)}
 
     first =
-      Task.async(fn -> Streams.open(node_id, Id.generate(BiotId), 1, target) end)
+      Task.async(fn ->
+        Streams.open_until(node_id, Id.generate(BiotId), 1, target, open_deadline())
+      end)
 
     second =
       Task.async(fn ->
-        Streams.open(other_node_id, Id.generate(BiotId), 1, target)
+        Streams.open_until(other_node_id, Id.generate(BiotId), 1, target, open_deadline())
       end)
 
     assert_receive {:opened, %Message.OpenStream{}}, 5_000

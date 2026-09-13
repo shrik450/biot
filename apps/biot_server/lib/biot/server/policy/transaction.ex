@@ -2,11 +2,11 @@ defmodule Biot.Server.Policy.Transaction do
   @moduledoc "Runs one immediate transaction for a synchronous policy change."
 
   alias Biot.Protocol.BiotId
+  alias Biot.Server.Access.Withdrawal
   alias Biot.Server.Actor
   alias Biot.Server.Authorization
   alias Biot.Server.CommandError
   alias Biot.Server.NodeConnections
-  alias Biot.Server.NodeWake
   alias Biot.Server.Policy
   alias Biot.Server.Policy.{Applied, Enforcement, Unchanged}
   alias Biot.Server.Principals
@@ -82,7 +82,7 @@ defmodule Biot.Server.Policy.Transaction do
 
   defp build_result(kind, %Biot{} = biot) do
     if kind == :withdrawn do
-      NodeWake.spec_changed(biot.node_id, biot.id)
+      Withdrawal.enforce([{:biot, biot.id}], [{biot.node_id, biot.id}])
     end
 
     # Enforcement uses committed state because an earlier withdrawal can still be pending.

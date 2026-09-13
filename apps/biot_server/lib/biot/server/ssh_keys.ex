@@ -10,8 +10,10 @@ defmodule Biot.Server.SshKeys do
   import Ecto.Query
 
   alias Biot.Protocol.{SshKeyId, SshPublicKey}
+  alias Biot.Server.Access.Owners
   alias Biot.Server.Actor
   alias Biot.Server.Authentication
+  alias Biot.Server.Authentication.Validity
   alias Biot.Server.AuthenticationProof
   alias Biot.Server.CommandError
   alias Biot.Server.Id
@@ -61,22 +63,22 @@ defmodule Biot.Server.SshKeys do
           )
         )
 
-      if deleted == 1, do: :ok, else: {:error, :not_found}
+      if deleted == 1, do: Owners.close_proof({:ssh_key, key_id}), else: {:error, :not_found}
     end
   end
 
   @spec authenticate(SshPublicKey.t()) :: {:ok, Authentication.t()} | :error
   def authenticate(%SshPublicKey{} = public_key) do
-    with %SshKey{} = key <-
-           Repo.get_by(SshKey, fingerprint: SshPublicKey.fingerprint(public_key)),
-         :ok <- Principals.require_enabled(Repo, %Actor{principal_id: key.principal_id}) do
-      {:ok,
-       %Authentication{
-         actor: %Actor{principal_id: key.principal_id},
-         proof: AuthenticationProof.ssh_key(key.id)
-       }}
-    else
-      _unknown_or_rejected -> :error
+    case Validity.ssh_key_by_fingerprint(Repo, SshPublicKey.fingerprint(public_key)) do
+      %SshKey{} = key ->
+        {:ok,
+         %Authentication{
+           actor: %Actor{principal_id: key.principal_id},
+           proof: AuthenticationProof.ssh_key(key.id)
+         }}
+
+      _unknown_or_rejected ->
+        :error
     end
   end
 

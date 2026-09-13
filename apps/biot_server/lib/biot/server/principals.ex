@@ -6,10 +6,10 @@ defmodule Biot.Server.Principals do
   require Logger
 
   alias Biot.Protocol.PrincipalId
+  alias Biot.Server.Access.Withdrawal
   alias Biot.Server.Actor
   alias Biot.Server.CommandError
   alias Biot.Server.Id
-  alias Biot.Server.NodeWake
   alias Biot.Server.Principals.DisabledIdentities
   alias Biot.Server.Repo
   alias Biot.Server.Schema.Biot, as: BiotRow
@@ -94,11 +94,10 @@ defmodule Biot.Server.Principals do
   def resolve_email(_actor, _email), do: {:error, :unauthenticated}
 
   defp apply_disabled_identities(identities) do
-    {:ok, wake} =
+    {:ok, {disabled_ids, wakes}} =
       Repo.transact(fn repo -> change_principals(repo, identities) end, mode: :immediate)
 
-    wake_affected(wake)
-    :ok
+    Withdrawal.enforce(Enum.map(disabled_ids, &{:principal, &1}), wakes)
   end
 
   defp change_principals(repo, identities) do
@@ -118,7 +117,7 @@ defmodule Biot.Server.Principals do
     |> Enum.reject(&MapSet.member?(existing, &1))
     |> Enum.each(fn {issuer, subject} -> insert_disabled(repo, issuer, subject) end)
 
-    {:ok, bump_affected_biots(repo, to_disable)}
+    {:ok, {Enum.map(to_disable, & &1.id), bump_affected_biots(repo, to_disable)}}
   end
 
   defp configured_principals(_repo, []), do: []
@@ -182,10 +181,6 @@ defmodule Biot.Server.Principals do
       |> repo.update_all(inc: [access_revision: 1])
 
     wake
-  end
-
-  defp wake_affected(wake) do
-    Enum.each(wake, fn {node_id, biot_id} -> NodeWake.spec_changed(node_id, biot_id) end)
   end
 
   defp insert(repo, issuer, subject, email, name) do

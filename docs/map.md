@@ -118,7 +118,9 @@ The other custom types wrap protocol `encode/1` and `parse/1` functions.
 `Nodes.reload/0` is the one enrollment entry point.
 `Nodes.Startup` calls it at boot and fails boot with a readable message on rejection.
 Operators call it with `bin/server rpc "Biot.Server.Nodes.reload()"`.
-It loads the enrollment file, runs the enrollment transaction, and closes planned control connections after commit.
+It loads the enrollment file and runs the enrollment transaction.
+After commit, it closes the session owners of every Biot whose access revision it bumped, then closes planned control connections.
+It sends no wake, because a reconnected node receives the new revisions in its snapshot.
 An invalid reload changes nothing and logs a plain failure message.
 `Nodes.abandonment_failure/0` builds the only abandonment failure value.
 `Biots` writes it when destroy runs on an abandoned node.
@@ -140,7 +142,8 @@ A new status cannot compile until all six functions answer it.
 
 ### Application modules
 
-- `Biots` handles `create`, `start`, `stop`, `update_environment`, `destroy`, and `spec`. `spec/1` is the node-facing intent query.
+- `Biots` handles `create`, `start`, `stop`, `update_environment`, and `destroy`. After a destroy commits, it closes the Biot's session owners through `Access.Withdrawal`, then wakes the node.
+- `BiotSpecs.build/1` builds the node-facing `BiotSpec` from the Biot and Environment rows. It reads no policy or lifecycle command code, so the control connection depends on it instead of on `Biots`.
 - `Biots.Create`, `Biots.SelectEnvironment`, `Biots.Accepted`, `Biots.Unchanged`, and `Biots.CreationFingerprint` define lifecycle inputs, results, and fingerprints. `Create.initial_state` defaults to `:running`, and the fingerprint uses `:biot_creation_v2`.
 - `Biots.Capacity.room?/2` admits creation, and `counts/2` projects capacity held on assigned nodes. Together they define which Biots still hold capacity.
 - `Operations` owns operation queries.
@@ -151,7 +154,7 @@ A new status cannot compile until all six functions answer it.
 - `Queries.Deployment.get/1` returns the publication and SSH settings in `DeploymentView`.
 - `Queries.BiotView`, `Queries.PublicationView`, and `Queries.OperationView` provide pure projections. `BiotView` includes the actor's `role`, the row's `direct_secret_exposure_possible` column, and `waiting_for`. Creation sets the exposure column to `false`; observations supply the current wait.
 - `Authorization` owns the `grants` and `role` types and the pure role and policy predicates.
-- `NodeConnections` is a registry of current node connections written by the control link.
+- `NodeConnections` is a thin layer over `Control.Registry`, the one node membership table. The key is the node ID, the process is the control connection, and the value is the connection ID and state. Only the owning control process writes its entry, through `put/2` and `delete/1`. The entry leaves the Registry when that process exits. `current/1`, `connection_pid/1`, `ready/1`, and `ready_connection/1` skip an entry whose process is already dead.
 - `NodeWake` provides one PubSub topic per node, plus `spec_changed/2` and `subscribe/1`.
 - `Delivery` owns the one delivery rule: the caller must own a non-destroyed Biot whose assigned node is ready, and it returns that node's live connection.
 - `Secrets` delivers, removes, and lists runtime secrets. Delivery commits `direct_secret_exposure_possible` before sending and that historical marker is never cleared. `FetchCredentials` uses the same delivery rule but does not set the marker or queue work. `Queries.SecretView` projects the names returned by `list/2`.
@@ -163,7 +166,7 @@ A new status cannot compile until all six functions answer it.
 inactive row. A row has state `:active` or `:inactive`. Republish keeps the same
 hostname. `unpublish/3` makes the row inactive and deletes that port's view grants.
 `withdraw_all/2` deactivates every row and deletes every view grant during destroy.
-`active?/3` and `active_for/1` are the only reads of active publication rows.
+`active?/3`, `active_by_hostname/2`, and `active_for/1` are the only reads of active publication rows.
 `discover/2` returns active URLs allowed by the actor's role. Each mutation returns a
 `Policy.Applied` result when it changes records, or a `Policy.Unchanged` result
 when the requested policy already exists. Both result structs carry the Biot ID,
@@ -171,14 +174,36 @@ access revision, and `enforcement`.
 
 #### `Biot.Server.Access`
 
-`readable/2` builds one composable query. It is the only definition of which Biots
-an actor may read. Owners, shell-grant holders, and view-grant holders match it.
-`fetch_readable/2` returns the Biot and the actor's role, or `not_found` or
-`forbidden`. `view_authorized/3` returns `:ok` when an active publication's
-hostname grants the actor view authority, or `:not_found`/`:forbidden`. It takes
-the caller's repo so the read runs inside the caller's transaction.
-`grants_for/2` is total over the requested IDs and returns an entry
-for each one. `revoke_shell_grants/2` removes all shell grants during destroy.
+`readable/2` builds one composable query for listings. Owners, shell-grant
+holders, and view-grant holders match it. It must match
+`Authorization.may_read?/3`, which decides one loaded Biot. `fetch_readable/2`
+returns the Biot and the actor's role, or `not_found` or `forbidden`; it decides
+with `may_read?/3`. `grants_for/2` is total over the requested IDs and returns an
+entry for each one. `revoke_shell_grants/2` removes all shell grants during
+destroy.
+
+`view_authority/3` is the one preview view authority read. It returns the active
+publication at a hostname, its Biot, and its node when `Authorization.may_view?/4`
+allows the actor. Otherwise it returns `not_found` or `forbidden`. It takes the
+caller's repo so the read runs inside the caller's transaction. `PreviewHandoff`
+and preview admission both call it.
+
+`open_preview/2` and `open_shell/3` are the model entry points for stream
+admission. Each one passes a snapshot read to `Access.Admission.admit/3`, which
+runs it in one transaction. `open_preview/2` first finds the Biot of the active
+publication at the hostname, only to register under it. The preview snapshot then
+checks these conditions in order:
+
+1. The proof is accepted on that preview host.
+2. `Validity.check/3` finds the proof live.
+3. `view_authority/3` allows the actor.
+4. The publication still belongs to the registered Biot.
+5. The Biot is not destroyed, and its node is enabled.
+
+The shell snapshot checks that the proof is accepted on `:shell` and is live,
+that `may_shell?/3` allows the actor, and the same Biot and node conditions. Each
+snapshot returns an `%Admission{}` with the node, the access revision, the stream
+target, and the proof's live expiry. A disabled node gives `node_unavailable`.
 
 `grant_shell/3` and `revoke_shell/3` manage Biot shell grants.
 `grant_view/4` and `revoke_view/4` manage a principal's access to one published
@@ -187,16 +212,90 @@ results use `Policy.Applied` or `Policy.Unchanged`, with the same `enforcement`
 field. Grants require known principals; view grants require an active publication
 for the same Biot and port.
 
+#### Session owners and admission
+
+A session owner is the process that holds one admitted stream, such as a browser
+preview or a shell. `Access.Admission` runs the owner protocol. `Access.Owners`
+records which closes reach each owner.
+
+`Admission.admit/3` runs in the owner process in this order:
+
+1. It drops any close left in the mailbox by an earlier admission.
+2. It registers the process in `Owners` under the Biot, the principal, and each
+   proof key.
+3. It reads the snapshot in one transaction, with a close check before and after
+   the read.
+4. It opens the stream with `Streams.open_until/5` before one deadline of
+   `stream_open_timeout_ms`.
+5. On success, it monitors the control connection and starts the expiry timer.
+   Then it checks for a close once more.
+
+Registration comes before the snapshot read, so a withdrawal that commits later
+finds the owner. A close that arrives during any step stops the admission with
+`forbidden`, and closes the stream if it is already open. A `stale_access`
+refusal reads the snapshot once more and opens again within the same deadline. A
+second `stale_access` returns `timeout` and sends no third open. A node's
+`unknown_biot` becomes `not_found`. Any failure unregisters the process.
+
+`Access.handle_owner_message/2` handles each message an owner receives while it holds a
+stream. A `:DOWN` from the control connection closes with `:control_lost`. The
+expiry timer closes with `:expired`. `{:biot_access, :close}` closes with
+`:policy`. Every other message returns `:ignored`. The expiry is the proof's live
+expiry; an SSH key proof has none and gets no timer.
+
+`Access.close/1` is the only close an owner may use. Both functions delegate to
+`Admission`, so an owner uses only `Access` for its whole lifecycle. It removes every
+registration, cancels the monitor and timer, and then closes the stream.
+`Streams.close/1` alone leaves the owner registered. One process holds one
+admission at a time, and `Owners.register/3` crashes if the process still holds
+keys. `close_invalid_proof_owners/0` checks each distinct registered proof key
+with `Validity.key_valid?/3` and closes the owners of every invalid key.
+
+`Access.Owners` is a duplicate-key `Registry`. Its closure keys are
+`{:biot, id}`, `{:principal, id}`, and the `Validity` proof keys, and they hold no
+value. An admitted owner also holds `{:admitted, stream_id}`. Its value is the
+`Owners.Admitted` monitor and timer. `close/1` sends `{:biot_access, :close}` to
+every process under a key. `proof_keys/0` returns each distinct proof key once.
+`unregister/0` removes every key the calling process holds and returns its
+`Admitted` values.
+
+`Access.Withdrawal.enforce/2` runs after a transaction commits. It closes owners
+by key, then wakes nodes. Owners close first because a node applies the new
+access revision later, and a local stream must not stay open for that time. Its
+callers are:
+
+| Caller | Closure keys | Wakes |
+| --- | --- | --- |
+| `Policy.Transaction` on a withdrawal | `{:biot, id}` | the Biot's node |
+| `Biots` destroy | `{:biot, id}` | the Biot's node |
+| `Principals.reload/0` | `{:principal, id}` for each disabled principal | each affected Biot's node |
+| `Nodes.reload/0` | `{:biot, id}` for each Biot whose access revision it bumped | none |
+
+Proof deletions call `Owners.close_proof/1` directly after commit.
+`Sessions.logout/1` closes `{:control_session, digest}`. A preview owner also
+holds its parent's key, so logout closes its previews too. `Credentials.revoke/2`
+closes `{:credential, id}`, and `SshKeys.remove/2` closes `{:ssh_key, id}`. A
+delete that finds nothing closes no owner.
+
+Two checks catch a close that was lost. `Control.Connection` closes the owners of
+every Biot in `Synchronization.access_behind/1` at hello, before the snapshot, and
+on each desired sweep. `Access.AuthSweep` calls `close_invalid_proof_owners/0`
+every `auth_check_interval_ms`, and a nil interval disables it. The application
+starts `Owners` and `AuthSweep` before `Principals.Startup`, because both startup
+reloads close owners.
+
 #### Identity records
 
 `Sessions` owns control and preview browser sessions. `start_control/1` takes a
 `PrincipalId`, reads the stored status, and inserts the control row in one
 immediate transaction, so a disable cannot slip between the check and the insert.
 `control/1` looks up a presented token. `preview/2` requires a matching hostname,
-a live parent session, and the same principal. `live_control/2` is the one owner
-of control-proof validity, and `require_control/2` rechecks a proof on the
-caller's connection. `logout/1` rechecks the live proof and deletes the control
-row, so previews and handoffs cascade. `sweep_expired/1` deletes every session at
+an unexpired preview row, a live parent session, and the same principal.
+`require_control/2` rechecks a control proof on the caller's connection. All
+three use the `Authentication.Validity` queries. `logout/1` rechecks the live
+proof and deletes the control row, so previews and handoffs cascade. After
+commit, it closes the session owners of that login and its previews.
+`sweep_expired/1` deletes every session at
 or past its expiry, and a deleted control row cascades to its previews and
 handoffs.
 
@@ -205,14 +304,17 @@ proof, caps the expiry at `credential_max_lifetime_ms`, and returns the clear
 token once. The row stores only the token digest. `authenticate/1` reads the live
 credential and records `last_used_at` at most once per
 `credential_last_used_interval_ms`. `list/1` and `revoke/2` scope to the actor.
+After its delete commits, `revoke/2` closes the session owners of that credential.
 `Credentials.Created` is the result struct, and `Queries.CredentialView` is the
 projection that never holds the clear token. `sweep_expired/1` deletes
 credentials at or past their expiry.
 
 `SshKeys` owns registered OpenSSH public keys. `add/3` parses the line, stores the
 canonical line and fingerprint, and maps a duplicate fingerprint to
-`already_registered`. `authenticate/1` takes a parsed `%SshPublicKey{}`. `list/1`
-and `remove/2` scope to the actor. `Queries.SshKeyView` is the projection.
+`already_registered`. `authenticate/1` takes a parsed `%SshPublicKey{}` and finds
+only a key of an enabled principal. `list/1` and `remove/2` scope to the actor.
+After its delete commits, `remove/2` closes the session owners of that key.
+`Queries.SshKeyView` is the projection.
 
 `PreviewHandoff` owns single-use preview codes. `begin/4` requires a live control
 proof and view authority for an active publication. `finish/3` checks the
@@ -225,7 +327,19 @@ at or past their own expiry, which is shorter than the parent's.
 `Authentication` is `%Authentication{actor, proof}`. `AuthenticationProof` owns
 the `control`, `preview`, `credential`, and `ssh_key` proof variants and their
 constructors. A proof carries only stored identifiers and digests, never a clear
-token.
+token. `AuthenticationProof.accepted_on?/2` says where a proof may open a stream.
+A preview proof works only on its own preview host. Every other proof works on
+any surface.
+
+`Authentication.Validity` owns the shared live-proof queries: `control_session/3`,
+`preview_session/4`, `credential/3`, `credential_by_digest/3`, `ssh_key/2`, and
+`ssh_key_by_fingerprint/2`. Each one requires an enabled principal. A live preview
+also needs an unexpired preview row and a live parent control session of the same
+principal. `check/3` returns a proof's live expiry: the session or credential
+expiry, the earlier of a preview and its parent, or nil for an SSH key.
+`proof_keys/1` maps a proof to its closure keys, and a preview yields its own key
+and its parent's control-session key. `key_valid?/3` checks one key, and
+`proof_key?/1` separates proof keys from other `Owners` keys.
 
 `Tokens.mint/1` returns a clear token and its digest. Minting reads randomness,
 so callers treat it as an effect. `Tokens.digest/1` hashes a presented token.
@@ -245,8 +359,9 @@ in one immediate transaction. It inserts a disabled row for an unseen identity s
 a later first login cannot become enabled. It disables configured enabled
 principals and deletes their sessions, preview handoffs, credentials, and SSH
 keys. It re-enables principals no longer configured without restoring proofs. It
-bumps each affected Biot's access revision once and, after commit, wakes each
-Biot's node. Ownership, grants, and history stay. A repeated reload changes
+bumps each affected Biot's access revision once. After commit, it closes the
+session owners of each disabled principal, then wakes each affected Biot's node.
+Ownership, grants, and history stay. A repeated reload changes
 nothing, and an invalid file leaves the database unchanged.
 `Principals.DisabledIdentities` loads and parses the file. Errors are typed, so an
 invalid file fails before any write. `Principals.message/1` reports them.
@@ -259,14 +374,15 @@ on invalid configuration.
 `Policy.enforcement()` is `:applied` or `{:pending, node_id}`.
 `Policy.Transaction` owns the immediate transaction around each mutation. It
 loads the Biot, authorizes the actor, checks that the Biot is not destroyed,
-executes the callback's writes, bumps the access revision on withdrawal, wakes
-the node after a withdrawal, reads enforcement from `AccessObservation` and
+executes the callback's writes, and bumps the access revision on withdrawal.
+After a withdrawal commits, it closes the Biot's session owners and wakes the
+node. It then reads enforcement from `AccessObservation` and
 live connection state, and builds the result.
 
 Policy callbacks receive the transaction's repository and Biot. They return
 `:unchanged`, `{:added, multi}`, or `{:withdrawn, multi}`. Additions keep the
-current revision and do not wake the node. Withdrawals add one revision and wake
-the assigned node.
+current revision and do not wake the node. Withdrawals add one revision, close the
+Biot's session owners, and wake the assigned node.
 
 `Schema.AccessObservation` stores the latest access revision accepted by a node
 connection. `Policy.Enforcement.access/3` reads that row and the live connection.
@@ -289,10 +405,15 @@ view grants. `Queries.BiotView` uses `Policy.Enforcement` for the access status
 shown with the rest of the Biot view.
 
 `Authorization.role/3` returns `:owner` or `{:collaborator, grants}`. Its policy
-predicates keep lifecycle, policy, and grant reads owner-only. `Access.readable/2`
-owns Biot read access instead of a predicate in `Authorization`.
-`Authorization.may_view?/4` is the pure view predicate for one publication. It is
-true for the owner or a matching view port.
+predicates keep lifecycle, policy, and grant reads owner-only. Three pure
+predicates decide read and stream access for one loaded Biot:
+
+- `may_read?/3` is true for the owner or any shell or view grant.
+  `Access.readable/2` is its query form and must match it.
+- `may_view?/4` is true for the owner or a matching view port on one publication.
+- `may_shell?/3` is true for the owner or a shell grant.
+
+A nil actor passes none of them.
 
 These modules follow the model contract. Additions never move the access
 revision. Unpublish deletes the port's view grants in the same transaction.
@@ -301,9 +422,11 @@ transaction.
 
 #### `Biot.Server.Streams`
 
-`Biot.Server.Streams` is the owner's stream API. `open/4` finds a node's ready
-connection, registers the open with `Pending`, sends `OpenStream`, and waits for
-the attach. On success it returns a `Stream` the caller owns.
+`Biot.Server.Streams` is the owner's stream API. `open_until/5` finds a node's
+ready connection, registers the open with `Pending`, sends `OpenStream`, and
+waits for the attach before a caller-owned monotonic deadline. On success it
+returns a `Stream` the caller owns. Admission sets one deadline of
+`stream_open_timeout_ms`, so its one retry shares the first open's deadline.
 
 `stream/2` turns one message into typed events. A port stream reports
 `{:data, bytes}`, `:closed`, or `:lost`. A shell stream decodes its frames and
@@ -338,11 +461,17 @@ reports `:node_unavailable` to every caller on that connection.
   after the frame with `:unknown_stream`, claims the pending stream, sends `Attached`, and hands
   the socket to the owner with `:ssl.controlling_process/2`. The handler then holds no socket data
   and closes when the owner exits.
-- The server starts the Registry before `Nodes.Startup` and starts the listener after `Nodes.Startup`.
-  The Registry enforces newest-wins connection replacement.
+- The server starts `Control.Registry` before `Nodes.Startup` and starts the listener after `Nodes.Startup`.
+  The connection claims its node with `NodeConnections.put/2` in the `:synchronizing` state and
+  moves to `:ready` after `synchronized`. When another process holds the node, the new connection
+  sends it `:replaced`, waits for it to exit, and claims again, so the newest connection wins.
 - `Control.Synchronization.behind/2` runs one query. It returns Biots whose desired
   revision or access revision this connection has not accepted. The sweep resends
-  `desired` for those Biots.
+  `desired` for those Biots, built by `BiotSpecs.build/1`.
+- `Control.Synchronization.access_behind/1` returns the included Biots on a node whose
+  access revision is ahead of the last one the node applied on any connection. The
+  connection closes their session owners at hello, before the snapshot, and on each
+  desired sweep. This reaches a withdrawal whose request process died before it closed owners.
 - `Reports.observation/4` and `Reports.access_applied/4` require the assigned node
   and the current connection through `NodeConnections.current?/2`. Equal or lower
   access revisions return `{:ignored, :revision_ahead}`. Reports from another
@@ -414,8 +543,25 @@ Focused server evidence includes:
 - `authorization_test.exs` proves owner, policy-change, grant-read, role, and
   view predicates.
 - `sessions_integration_test.exs` covers control start and lookup, disabled and
-  missing principals, expiry, preview hostname and parent checks, and logout
-  cascading to previews and handoffs.
+  missing principals, expiry, preview hostname and parent checks, logout
+  cascading to previews and handoffs, and `Validity.control_session/3`.
+- `access_admission_integration_test.exs` covers admitted owners and their closure
+  keys, denied admission, admission races, the single `stale_access` retry within
+  one deadline, absolute expiry, control loss, and several admissions in turn in
+  one process.
+- `access_closure_integration_test.exs` covers owner closure after policy
+  withdrawal, destroy, principal disable, node disable, the access sweep, node
+  reconnection, and proof deletion.
+- `access_closure_commit_test.exs` proves that each close is sent only after its
+  transaction or delete commits.
+- `access_proof_check_integration_test.exs` covers `close_invalid_proof_owners/0`,
+  distinct proof keys, the periodic `AuthSweep`, and a nil interval.
+- `authentication/validity_proof_keys_test.exs` covers `Validity.proof_keys/1` and
+  `proof_key?/1`.
+- `stream_predicates_test.exs` covers `may_read?/3`, `may_view?/4`, and
+  `may_shell?/3`, and checks that the three agree.
+- `support/access_harness.ex` provides a fake node that plays the real control
+  protocol against the real listener, plus session owner processes driven by message.
 - `credentials_integration_test.exs` covers the control-proof requirement, label
   and expiry bounds, digest-only storage, authenticate, coarse `last_used_at`,
   list, revoke, and disabled owners.
@@ -431,7 +577,7 @@ Focused server evidence includes:
 - `principals/disabled_identities_test.exs` covers file and inline loading,
   malformed elements with their index, unknown keys, repeated identities, and
   typed file errors.
-- `streams_integration_test.exs` covers `Biot.Server.Streams.open/4` over a real
+- `streams_integration_test.exs` covers `Biot.Server.Streams.open_until/5` over a real
   listener, a real node, and the real Go agent.
 - `streams_pending_test.exs` covers `Pending` claim order, timeouts, late attach,
   node and connection identity, control loss, and `Streams.stream/2` events.
@@ -461,7 +607,7 @@ Lifecycle, access, query, publication, and redelivery evidence includes:
 - `access_readable_test.exs` property-tests the single owner, shell-grant, and view-grant read rule.
 - `biots/capacity_test.exs` covers room and counts, including destroyed Biots waiting for release.
 - `biots/create_command_test.exs` property-tests accepted initial states and the running default.
-- `biots/spec_test.exs` covers node-facing specs, selected environments, and access revisions.
+- `biots/spec_test.exs` covers `BiotSpecs.build/1`, selected environments, and access revisions.
 - `control/synchronization_behind_test.exs` covers connection-specific execution and access acceptance, plus cleanup exclusion.
 - `control/synchronization_test.exs` covers the shared inclusion rule for desired state and observed data.
 - `publications/hostname_test.exs` property-tests 128-bit lowercase unpadded base32 allocation.
@@ -1048,8 +1194,11 @@ setting remains. Step 19 adds `control_session_lifetime_ms`,
 (default 90), and `BIOT_DISABLED_PRINCIPALS` for the server release.
 Fix round 4 adds `expiry_sweep_interval_ms`, the interval for `ExpirySweep`. It
 has no environment variable, and `config/test.exs` sets it to nil.
-Step 20 adds `stream_open_timeout_ms`, the deadline for one `Streams.open/4`.
+Step 20 adds `stream_open_timeout_ms`, the deadline for one admission's stream opens.
 Production reads `BIOT_STREAM_OPEN_TIMEOUT_MS` (default 30_000).
+Step 21 adds `auth_check_interval_ms`, the interval for `Access.AuthSweep`.
+Production reads `BIOT_AUTH_CHECK_INTERVAL_MS` (default 60_000), and
+`config/test.exs` sets it to nil.
 
 ## Host tests in Docker
 

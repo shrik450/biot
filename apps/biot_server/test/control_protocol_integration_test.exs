@@ -28,6 +28,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
   alias Biot.Server.Biots
   alias Biot.Server.Biots.Accepted
   alias Biot.Server.Biots.Unchanged
+  alias Biot.Server.BiotSpecs
   alias Biot.Server.Control.Listener
   alias Biot.Server.Diagnostics, as: ServerDiagnostics
   alias Biot.Server.NodeConnections
@@ -717,15 +718,18 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     assert ServerDiagnostics.get(actor, diagnostic_ref) ==
              {:error, :temporarily_unavailable}
 
-    NodeConnections.put(node.id, %{
-      connection_id: TestFixtures.connection_id(88),
-      state: :ready
-    })
+    # Only the connection process writes its entry, so another process cannot mark it ready.
+    assert {:error, {:already_registered, _connection_pid}} =
+             NodeConnections.put(node.id, %{
+               connection_id: TestFixtures.connection_id(88),
+               state: :ready
+             })
+
+    assert %{state: :synchronizing} = NodeConnections.current(node.id)
 
     assert ServerDiagnostics.get(actor, diagnostic_ref) ==
              {:error, :temporarily_unavailable}
 
-    NodeConnections.delete(node.id)
     :ssl.close(socket)
   end
 
@@ -1096,8 +1100,8 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         {next_row, _environment} =
           TestFixtures.biot(owner, node, 8_042, desired_state: :destroyed)
 
-        {:ok, baseline} = Biots.spec(baseline_row.id)
-        {:ok, next_spec} = Biots.spec(next_row.id)
+        {:ok, baseline} = BiotSpecs.build(baseline_row.id)
+        {:ok, next_spec} = BiotSpecs.build(next_row.id)
 
         configure_node_host()
         start_node_journal()
@@ -1182,7 +1186,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         {biot, _environment} =
           TestFixtures.biot(owner, node, 8_071, desired_state: :destroyed)
 
-        {:ok, spec} = Biots.spec(biot.id)
+        {:ok, spec} = BiotSpecs.build(biot.id)
 
         report = %ExecutionReport{
           accepted_revision: spec.execution.desired.revision,
@@ -1310,9 +1314,9 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         {second_row, _environment} =
           TestFixtures.biot(owner, node, 8_053, desired_state: :destroyed)
 
-        {:ok, baseline} = Biots.spec(baseline_row.id)
-        {:ok, first} = Biots.spec(first_row.id)
-        {:ok, second} = Biots.spec(second_row.id)
+        {:ok, baseline} = BiotSpecs.build(baseline_row.id)
+        {:ok, first} = BiotSpecs.build(first_row.id)
+        {:ok, second} = BiotSpecs.build(second_row.id)
         start_node_journal()
         assert {:ok, _intent} = NodeJournal.put_intent(baseline)
 
@@ -1387,8 +1391,8 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         {next_row, _environment} =
           TestFixtures.biot(owner, node, 8_062, desired_state: :destroyed)
 
-        {:ok, baseline} = Biots.spec(baseline_row.id)
-        {:ok, next_spec} = Biots.spec(next_row.id)
+        {:ok, baseline} = BiotSpecs.build(baseline_row.id)
+        {:ok, next_spec} = BiotSpecs.build(next_row.id)
 
         configure_node_host()
         start_node_journal()

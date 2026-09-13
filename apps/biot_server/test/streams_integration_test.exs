@@ -166,7 +166,15 @@ defmodule Biot.Server.StreamsIntegrationTest do
     biot_id = prepare_port_stream(context)
     echo_port = prepare_echo_port(biot_id)
 
-    assert {:ok, stream} = Streams.open(context.node.id, biot_id, 1, port_target(echo_port))
+    assert {:ok, stream} =
+             Streams.open_until(
+               context.node.id,
+               biot_id,
+               1,
+               port_target(echo_port),
+               open_deadline()
+             )
+
     assert is_pid(stream.connection_pid)
 
     :ok = Streams.write(stream, "ping")
@@ -180,7 +188,9 @@ defmodule Biot.Server.StreamsIntegrationTest do
     biot_id = prepare_shell_stream(context)
     request = %ShellRequest{term: "xterm", cols: 80, rows: 24, command: nil}
 
-    assert {:ok, stream} = Streams.open(context.node.id, biot_id, 1, {:shell, request})
+    assert {:ok, stream} =
+             Streams.open_until(context.node.id, biot_id, 1, {:shell, request}, open_deadline())
+
     :ok = Streams.write(stream, "echo hi\nexit\n")
 
     events = Reader.collect(stream)
@@ -193,7 +203,9 @@ defmodule Biot.Server.StreamsIntegrationTest do
     biot_id = prepare_shell_stream(context)
     request = %ShellRequest{term: "xterm", cols: 80, rows: 24, command: nil}
 
-    assert {:ok, stream} = Streams.open(context.node.id, biot_id, 1, {:shell, request})
+    assert {:ok, stream} =
+             Streams.open_until(context.node.id, biot_id, 1, {:shell, request}, open_deadline())
+
     kill_agent(biot_id)
 
     events = Reader.collect(stream)
@@ -202,11 +214,12 @@ defmodule Biot.Server.StreamsIntegrationTest do
     :ok = Streams.close(stream)
   end
 
-  test "open/4 reports node_unavailable when the node has no ready link", %{} do
+  test "open_until/5 reports node_unavailable when the node has no ready link", %{} do
     node_id = Id.generate(NodeId)
     biot_id = Id.generate(BiotId)
 
-    assert Streams.open(node_id, biot_id, 1, port_target(1)) == {:error, :node_unavailable}
+    assert Streams.open_until(node_id, biot_id, 1, port_target(1), open_deadline()) ==
+             {:error, :node_unavailable}
   end
 
   defp prepare_port_stream(context) do
@@ -245,4 +258,9 @@ defmodule Biot.Server.StreamsIntegrationTest do
   end
 
   defp port_target(value), do: {:port, elem(Port.parse(value), 1)}
+
+  defp open_deadline do
+    System.monotonic_time(:millisecond) +
+      Application.fetch_env!(:biot_server, :stream_open_timeout_ms)
+  end
 end

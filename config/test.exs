@@ -6,7 +6,7 @@ config :biot_server, Biot.Server.Repo,
 
 config :biot_server, node_registrations: []
 
-config :biot_server, expiry_sweep_interval_ms: nil
+config :biot_server, expiry_sweep_interval_ms: nil, auth_check_interval_ms: nil
 
 config :biot_web, BiotWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],

@@ -61,6 +61,7 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "node" do
     heartbeat_interval_ms: integer_env.("BIOT_HEARTBEAT_INTERVAL_MS", 30_000),
     heartbeat_timeout_ms: integer_env.("BIOT_HEARTBEAT_TIMEOUT_MS", 10_000),
     desired_sweep_interval_ms: integer_env.("BIOT_DESIRED_SWEEP_INTERVAL_MS", 60_000),
+    auth_check_interval_ms: integer_env.("BIOT_AUTH_CHECK_INTERVAL_MS", 60_000),
     node_request_timeout_ms: integer_env.("BIOT_NODE_REQUEST_TIMEOUT_MS", 10_000),
     node_response_max_bytes: integer_env.("BIOT_NODE_RESPONSE_MAX_BYTES", 256_000),
     stream_open_timeout_ms: integer_env.("BIOT_STREAM_OPEN_TIMEOUT_MS", 30_000),

@@ -11,7 +11,8 @@ defmodule Biot.Server.Nodes do
 
   alias Biot.Protocol.Failure
   alias Biot.Protocol.NodeId
-  alias Biot.Server.Control.Registry, as: ControlRegistry
+  alias Biot.Server.Access.Withdrawal
+  alias Biot.Server.NodeConnections
   alias Biot.Server.Nodes.Plan
   alias Biot.Server.Nodes.RegistrationLoader
   alias Biot.Server.Repo
@@ -59,7 +60,8 @@ defmodule Biot.Server.Nodes do
 
     # Immediate mode takes SQLite write ownership before enrollment state is read.
     case Repo.transaction(multi, mode: :immediate) do
-      {:ok, %{nodes: nodes, plan: plan}} ->
+      {:ok, %{nodes: nodes, plan: plan} = changes} ->
+        withdraw_access(changes)
         close_connections(plan.close_connections)
         {:ok, nodes}
 
@@ -142,7 +144,7 @@ defmodule Biot.Server.Nodes do
   end
 
   defp apply_action(multi, {:increment_access_revisions, node_id}, _now) do
-    query = from(biot in Biot, where: biot.node_id == ^node_id)
+    query = from(biot in Biot, where: biot.node_id == ^node_id, select: biot.id)
 
     Ecto.Multi.update_all(
       multi,
@@ -179,12 +181,23 @@ defmodule Biot.Server.Nodes do
 
   def message(rejection), do: Plan.message(rejection)
 
+  # Every plan that increments a node's access revisions also closes its connection. The close ends
+  # the node's streams, and a reconnection snapshot carries the new revisions, so no wake is sent.
+  defp withdraw_access(changes) do
+    owner_keys =
+      for {{:increment_access_revisions, _node_id}, {_count, biot_ids}} <- changes,
+          biot_id <- biot_ids,
+          do: {:biot, biot_id}
+
+    Withdrawal.enforce(owner_keys, [])
+  end
+
   defp close_connections(node_ids), do: Enum.each(node_ids, &close_connection/1)
 
   defp close_connection(node_id) do
-    case Registry.lookup(ControlRegistry, node_id) do
-      [{pid, _connection_id}] -> send(pid, :registration_changed)
-      [] -> :ok
+    case NodeConnections.connection_pid(node_id) do
+      nil -> :ok
+      pid -> send(pid, :registration_changed)
     end
   end
 

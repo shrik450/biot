@@ -6,6 +6,7 @@ defmodule Biot.Server.Biots.SpecTest do
   alias Biot.Server.Biots
   alias Biot.Server.Biots.Accepted
   alias Biot.Server.Biots.SelectEnvironment
+  alias Biot.Server.BiotSpecs
   alias Biot.Server.NodeConnections
   alias Biot.Server.Repo
   alias Biot.Server.Schema.Biot, as: BiotRow
@@ -30,7 +31,7 @@ defmodule Biot.Server.Biots.SpecTest do
     biot = Repo.get!(BiotRow, context.biot_id)
     environment = Repo.get!(Environment, biot.desired_environment_id)
 
-    assert {:ok, %BiotSpec{} = spec} = Biots.spec(context.biot_id)
+    assert {:ok, %BiotSpec{} = spec} = BiotSpecs.build(context.biot_id)
     assert spec.access_revision == biot.access_revision
     assert spec.execution.biot_id == context.biot_id
     assert spec.execution.repository == biot.repository
@@ -46,7 +47,7 @@ defmodule Biot.Server.Biots.SpecTest do
     assert {:ok, %Accepted{revision: 2}} =
              Biots.update_environment(context.actor, context.biot_id, command, 1)
 
-    assert {:ok, spec} = Biots.spec(context.biot_id)
+    assert {:ok, spec} = BiotSpecs.build(context.biot_id)
     assert spec.execution.desired.revision == 2
 
     assert spec.execution.environment.id ==
@@ -56,13 +57,13 @@ defmodule Biot.Server.Biots.SpecTest do
 
     assert {:ok, %Accepted{revision: 3}} = Biots.destroy(context.actor, context.biot_id)
 
-    assert {:ok, destroyed_spec} = Biots.spec(context.biot_id)
+    assert {:ok, destroyed_spec} = BiotSpecs.build(context.biot_id)
     assert destroyed_spec.execution.desired.state == :destroyed
     assert destroyed_spec.access_revision == 2
     assert BiotSpec.parse(BiotSpec.encode(destroyed_spec)) == {:ok, destroyed_spec}
   end
 
   test "spec for an unknown biot is not found" do
-    assert Biots.spec(TestFixtures.id(BiotId, 9_999)) == {:error, :not_found}
+    assert BiotSpecs.build(TestFixtures.id(BiotId, 9_999)) == {:error, :not_found}
   end
 end

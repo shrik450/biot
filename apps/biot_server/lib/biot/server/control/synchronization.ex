@@ -8,7 +8,7 @@ defmodule Biot.Server.Control.Synchronization do
   alias Biot.Protocol.Desired
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.NodeId
-  alias Biot.Server.Biots
+  alias Biot.Server.BiotSpecs
   alias Biot.Server.Repo
   alias Biot.Server.Schema.AccessObservation
   alias Biot.Server.Schema.Biot, as: BiotRow
@@ -31,9 +31,36 @@ defmodule Biot.Server.Control.Synchronization do
     |> Repo.all()
     |> Enum.filter(&included?(&1.desired_state, &1.data))
     |> Enum.map(fn row ->
-      {:ok, spec} = Biots.spec(row.biot_id)
+      {:ok, spec} = BiotSpecs.build(row.biot_id)
       spec
     end)
+  end
+
+  @doc """
+  Returns the included Biots whose access revision is ahead of the last one the node applied.
+
+  An application on any connection counts. Applying a revision closes every older stream on the
+  node, and control loss closes every owner admitted through an older connection.
+  """
+  @spec access_behind(NodeId.t()) :: [Biot.Protocol.BiotId.t()]
+  def access_behind(%NodeId{} = node_id) do
+    node_biots(node_id)
+    |> join(:left, [biot], access_observation in AccessObservation,
+      on: access_observation.biot_id == biot.id
+    )
+    |> where(
+      [biot, _observation, access_observation],
+      is_nil(access_observation.applied_access_revision) or
+        access_observation.applied_access_revision < biot.access_revision
+    )
+    |> select([biot, observation], %{
+      biot_id: biot.id,
+      desired_state: biot.desired_state,
+      data: observation.data
+    })
+    |> Repo.all()
+    |> Enum.filter(&included?(&1.desired_state, &1.data))
+    |> Enum.map(& &1.biot_id)
   end
 
   @spec behind(NodeId.t(), ConnectionId.t()) :: [Biot.Protocol.BiotId.t()]

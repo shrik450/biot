@@ -34,4 +34,21 @@ defmodule Biot.Server.AuthenticationProof do
 
   @spec ssh_key(SshKeyId.t()) :: t()
   def ssh_key(%SshKeyId{} = ssh_key_id), do: {:ssh_key, ssh_key_id}
+
+  @typedoc "Where a caller uses a proof to open a stream."
+  @type surface :: :shell | {:preview_host, Hostname.t()}
+
+  @doc """
+  Says whether the proof may be used on the surface.
+
+  A preview session acts only on its own preview host (model section 5). The other proofs are
+  not scoped to a host.
+  """
+  @spec accepted_on?(t(), surface()) :: boolean()
+  def accepted_on?({:preview, _digest, _parent_digest, hostname, _expires_at}, surface),
+    do: surface == {:preview_host, hostname}
+
+  def accepted_on?({:control, _digest, _expires_at}, _surface), do: true
+  def accepted_on?({:credential, _credential_id, _expires_at}, _surface), do: true
+  def accepted_on?({:ssh_key, _ssh_key_id}, _surface), do: true
 end

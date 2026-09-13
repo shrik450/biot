@@ -2,7 +2,8 @@ defmodule Biot.Server.Streams do
   @moduledoc """
   The server caller's stream API.
 
-  `open/4` asks the node's ready control connection to open a stream and waits for the attach. The
+  `open_until/5` asks the node's ready control connection to open a stream and waits for the attach
+  before the caller's deadline. The
   attach handler moves the raw SSL socket to this caller with `:ssl.controlling_process/2`, and
   from then on the caller owns it.
 
@@ -29,7 +30,7 @@ defmodule Biot.Server.Streams do
   @type open_error :: StreamFailure.t() | :timeout | :node_unavailable
 
   defmodule Stream do
-    @moduledoc "One attached stream, owned by the process that called `open/4`."
+    @moduledoc "One attached stream, owned by the process that called `open_until/5`."
     @enforce_keys [:id, :kind, :socket, :connection_pid]
     defstruct [:id, :kind, :socket, :connection_pid, buffer: <<>>, exited: false]
 
@@ -45,11 +46,19 @@ defmodule Biot.Server.Streams do
 
   @type event :: {:data, binary()} | {:exit, 0..255} | :closed | :lost
 
-  @spec open(NodeId.t(), BiotId.t(), pos_integer(), StreamTarget.t()) ::
+  @doc "Opens one stream before the caller-owned absolute monotonic deadline."
+  @spec open_until(NodeId.t(), BiotId.t(), pos_integer(), StreamTarget.t(), integer()) ::
           {:ok, Stream.t()} | {:error, open_error()}
-  def open(%NodeId{} = node_id, %BiotId{} = biot_id, access_revision, target) do
-    with {:ok, connection_pid, connection_id} <- ready_connection(node_id) do
-      deadline = System.monotonic_time(:millisecond) + timeout_ms()
+  def open_until(
+        %NodeId{} = node_id,
+        %BiotId{} = biot_id,
+        access_revision,
+        target,
+        deadline
+      )
+      when is_integer(deadline) do
+    with {:ok, connection_pid, connection_id} <- ready_connection(node_id),
+         :ok <- before(deadline) do
       id = Id.generate(StreamId)
       kind = StreamTarget.kind(target)
       :ok = Pending.register(id, node_id, connection_id, connection_pid, kind, self())
@@ -132,9 +141,9 @@ defmodule Biot.Server.Streams do
     end
   end
 
-  defp timeout_ms, do: Application.fetch_env!(:biot_server, :stream_open_timeout_ms)
-
   defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
+
+  defp before(deadline), do: if(remaining(deadline) > 0, do: :ok, else: {:error, :timeout})
 
   defp await(id, connection_pid, deadline) do
     receive do

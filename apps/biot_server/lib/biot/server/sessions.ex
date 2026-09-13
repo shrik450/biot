@@ -10,13 +10,15 @@ defmodule Biot.Server.Sessions do
 
   import Ecto.Query
 
-  alias Biot.Protocol.{Digest, Hostname, PrincipalId}
+  alias Biot.Protocol.{Hostname, PrincipalId}
+  alias Biot.Server.Access.Owners
   alias Biot.Server.Actor
   alias Biot.Server.Authentication
+  alias Biot.Server.Authentication.Validity
   alias Biot.Server.AuthenticationProof
   alias Biot.Server.Principals
   alias Biot.Server.Repo
-  alias Biot.Server.Schema.{Principal, Session}
+  alias Biot.Server.Schema.Session
   alias Biot.Server.Tokens
 
   @spec start_control(PrincipalId.t()) :: {:ok, String.t()} | {:error, :unauthenticated}
@@ -42,30 +44,9 @@ defmodule Biot.Server.Sessions do
     )
   end
 
-  @doc """
-  Returns the live control session for a digest, or nil.
-
-  Live means a control row, unexpired at one clock reading, with an enabled
-  principal. This is the one owner of control-proof validity.
-  """
-  @spec live_control(Ecto.Repo.t() | module(), Digest.t()) :: Session.t() | nil
-  def live_control(repo, digest) do
-    now = DateTime.utc_now()
-
-    from(session in Session,
-      join: principal in Principal,
-      on: principal.id == session.principal_id,
-      where:
-        session.id_digest == ^digest and session.scope == :control and
-          session.expires_at > ^now and principal.status == :enabled,
-      select: session
-    )
-    |> repo.one()
-  end
-
   @spec control(String.t()) :: {:ok, Authentication.t()} | :error
   def control(token) when is_binary(token) do
-    case live_control(Repo, Tokens.digest(token)) do
+    case Validity.control_session(Repo, Tokens.digest(token), DateTime.utc_now()) do
       %Session{} = session -> {:ok, control_authentication(session)}
       nil -> :error
     end
@@ -73,25 +54,28 @@ defmodule Biot.Server.Sessions do
 
   @spec preview(Hostname.t(), String.t()) :: {:ok, Authentication.t()} | :error
   def preview(%Hostname{} = hostname, token) when is_binary(token) do
-    # A preview session expires with its parent, so the parent's liveness is
-    # the only expiry check the lookup needs.
-    with %Session{scope: :preview, hostname: ^hostname, control_session_digest: parent_digest} =
-           session <- Repo.get(Session, Tokens.digest(token)),
-         %Session{principal_id: principal_id} = parent <- live_control(Repo, parent_digest),
-         true <- principal_id == session.principal_id do
-      {:ok,
-       %Authentication{
-         actor: actor(principal_id),
-         proof:
-           AuthenticationProof.preview(
-             session.id_digest,
-             parent.id_digest,
-             session.hostname,
-             session.expires_at
-           )
-       }}
-    else
-      _missing_or_rejected -> :error
+    # Preview validity includes the parent control session and enabled principal.
+    digest = Tokens.digest(token)
+
+    case Validity.preview_session(Repo, digest, hostname, DateTime.utc_now()) do
+      %Session{
+        control_session_digest: parent_digest,
+        principal_id: principal_id
+      } = session ->
+        {:ok,
+         %Authentication{
+           actor: actor(principal_id),
+           proof:
+             AuthenticationProof.preview(
+               session.id_digest,
+               parent_digest,
+               session.hostname,
+               session.expires_at
+             )
+         }}
+
+      _missing_or_rejected ->
+        :error
     end
   end
 
@@ -104,7 +88,7 @@ defmodule Biot.Server.Sessions do
   @spec require_control(Ecto.Repo.t() | module(), Authentication.t()) ::
           :ok | {:error, :unauthenticated}
   def require_control(repo, %Authentication{actor: actor, proof: {:control, digest, _}}) do
-    case live_control(repo, digest) do
+    case Validity.control_session(repo, digest, DateTime.utc_now()) do
       %Session{principal_id: principal_id} when principal_id == actor.principal_id -> :ok
       _missing_or_mismatched -> {:error, :unauthenticated}
     end
@@ -118,7 +102,8 @@ defmodule Biot.Server.Sessions do
 
     with {:ok, :ok} <-
            Repo.transact(fn repo -> delete_control_session(repo, digest) end, mode: :immediate) do
-      :ok
+      # A preview owner also registers under its parent control session, so this closes it too.
+      Owners.close_proof({:control_session, digest})
     end
   end
 
@@ -131,7 +116,7 @@ defmodule Biot.Server.Sessions do
   end
 
   defp delete_control_session(repo, digest) do
-    case live_control(repo, digest) do
+    case Validity.control_session(repo, digest, DateTime.utc_now()) do
       %Session{} = session ->
         repo.delete_all(from(s in Session, where: s.id_digest == ^session.id_digest))
         {:ok, :ok}

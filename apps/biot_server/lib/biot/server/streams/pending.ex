@@ -2,7 +2,7 @@ defmodule Biot.Server.Streams.Pending do
   @moduledoc """
   Owns the stream opens that have been sent to a node but not yet attached.
 
-  One entry is registered by `open/4`, claimed by an attaching control connection, or removed by a
+  One entry is registered by `open_until/5`, claimed by an attaching control connection, or removed by a
   failure or the open deadline. Claim and removal both happen in this one process, so exactly one
   of `attach/5` and `abandon/1` wins. A caller learns which it was from the reply and from the
   message the winning operation already put in its mailbox.
@@ -208,7 +208,6 @@ defmodule Biot.Server.Streams.Pending do
 
   defp current?(entry, node_id, connection_id) do
     entry.node_id == node_id and entry.connection_id == connection_id and
-      Process.alive?(entry.connection_pid) and
-      NodeConnections.current?(connection_id, NodeConnections.current(node_id))
+      NodeConnections.ready_connection(node_id) == {:ok, entry.connection_pid, connection_id}
   end
 end

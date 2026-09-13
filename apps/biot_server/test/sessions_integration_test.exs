@@ -6,6 +6,7 @@ defmodule Biot.Server.SessionsIntegrationTest do
   alias Biot.Protocol.{Hostname, SameOriginPath, SshKeyId}
   alias Biot.Server.Actor
   alias Biot.Server.Authentication
+  alias Biot.Server.Authentication.Validity
   alias Biot.Server.AuthenticationProof
   alias Biot.Server.Repo
   alias Biot.Server.Schema.{PreviewHandoff, Principal, Session}
@@ -346,22 +347,22 @@ defmodule Biot.Server.SessionsIntegrationTest do
     end
   end
 
-  describe "live_control/2" do
+  describe "Validity.control_session/3" do
     test "returns the live control row and nil for previews, expiry, and disablement" do
       principal = TestFixtures.principal(1)
       parent = start_control!(principal)
-      assert %Session{} = Sessions.live_control(Repo, parent.digest)
+      assert %Session{} = Validity.control_session(Repo, parent.digest, DateTime.utc_now())
 
       {_token, preview} = insert_session(principal, :preview)
-      assert Sessions.live_control(Repo, preview.id_digest) == nil
+      assert Validity.control_session(Repo, preview.id_digest, DateTime.utc_now()) == nil
 
       expired = start_control!(principal)
       Repo.get!(Session, expired.digest) |> expire()
-      assert Sessions.live_control(Repo, expired.digest) == nil
+      assert Validity.control_session(Repo, expired.digest, DateTime.utc_now()) == nil
 
       disabled = start_control!(principal)
       disable(principal)
-      assert Sessions.live_control(Repo, disabled.digest) == nil
+      assert Validity.control_session(Repo, disabled.digest, DateTime.utc_now()) == nil
     end
   end
 

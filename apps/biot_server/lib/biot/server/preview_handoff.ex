@@ -13,6 +13,7 @@ defmodule Biot.Server.PreviewHandoff do
   alias Biot.Server.Access
   alias Biot.Server.Actor
   alias Biot.Server.Authentication
+  alias Biot.Server.Authentication.Validity
   alias Biot.Server.CommandError
   alias Biot.Server.PreviewHandoff.Finished
   alias Biot.Server.Repo
@@ -33,7 +34,8 @@ defmodule Biot.Server.PreviewHandoff do
     Repo.transact(
       fn repo ->
         with :ok <- Sessions.require_control(repo, authentication),
-             :ok <- Access.view_authorized(repo, authentication.actor, hostname) do
+             {:ok, _publication, _biot, _node} <-
+               Access.view_authority(repo, authentication.actor, hostname) do
           {code, code_digest} = Tokens.mint()
 
           repo.insert!(%PreviewHandoff{
@@ -60,9 +62,10 @@ defmodule Biot.Server.PreviewHandoff do
       fn repo ->
         with %PreviewHandoff{} = handoff <- load_handoff(repo, code),
              :ok <- require_current(handoff, hostname, challenge),
-             %Session{} = parent <- Sessions.live_control(repo, handoff.control_session_digest),
-             :ok <-
-               Access.view_authorized(repo, %Actor{principal_id: parent.principal_id}, hostname) do
+             %Session{} = parent <-
+               Validity.control_session(repo, handoff.control_session_digest, DateTime.utc_now()),
+             {:ok, _publication, _biot, _node} <-
+               Access.view_authority(repo, %Actor{principal_id: parent.principal_id}, hostname) do
           repo.delete!(handoff)
 
           {token, digest} = Tokens.mint()

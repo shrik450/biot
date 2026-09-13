@@ -1,16 +1,15 @@
 defmodule Biot.Server.Biots do
-  @moduledoc "Owns biot lifecycle transactions and control-link specifications."
+  @moduledoc "Owns Biot lifecycle transactions."
 
   import Ecto.Query
 
   alias Biot.Protocol.BiotId
-  alias Biot.Protocol.BiotSpec
   alias Biot.Protocol.Desired
   alias Biot.Protocol.EnvironmentId
-  alias Biot.Protocol.ExecutionSpec
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.OperationId
   alias Biot.Server.Access
+  alias Biot.Server.Access.Withdrawal
   alias Biot.Server.Actor
   alias Biot.Server.Authorization
   alias Biot.Server.Biots.Accepted
@@ -23,7 +22,6 @@ defmodule Biot.Server.Biots do
   alias Biot.Server.Id
   alias Biot.Server.Nodes
   alias Biot.Server.Nodes.Status
-  alias Biot.Server.NodeWake
   alias Biot.Server.Principals
   alias Biot.Server.Publications
   alias Biot.Server.Repo
@@ -105,25 +103,6 @@ defmodule Biot.Server.Biots do
     |> lifecycle_transaction_result()
   end
 
-  @spec spec(BiotId.t()) :: {:ok, BiotSpec.t()} | {:error, :not_found}
-  def spec(%BiotId{} = biot_id) do
-    with %BiotRow{} = biot <- Repo.get(BiotRow, biot_id),
-         %Environment{} = environment <- Repo.get(Environment, biot.desired_environment_id) do
-      {:ok,
-       %BiotSpec{
-         execution: %ExecutionSpec{
-           biot_id: biot.id,
-           repository: biot.repository,
-           desired: BiotRow.desired(biot),
-           environment: %{id: environment.id, selection: environment.selection}
-         },
-         access_revision: biot.access_revision
-       }}
-    else
-      nil -> {:error, :not_found}
-    end
-  end
-
   defp plan_creation(repo, actor, biot_id, command, fingerprint) do
     # A disabled owner must not replay an existing create.
     with :ok <- Principals.require_enabled(repo, actor) do
@@ -179,7 +158,8 @@ defmodule Biot.Server.Biots do
   defp creation_writes(%{plan: {:unchanged, result}}) do
     Ecto.Multi.new()
     |> Ecto.Multi.put(:result, result)
-    |> Ecto.Multi.put(:wake, nil)
+    |> Ecto.Multi.put(:close, [])
+    |> Ecto.Multi.put(:wake, [])
   end
 
   defp creation_writes(%{plan: {:create, biot, environment, operation}}) do
@@ -188,7 +168,8 @@ defmodule Biot.Server.Biots do
     |> Ecto.Multi.insert(:environment, environment)
     |> Ecto.Multi.insert(:operation, operation)
     |> Ecto.Multi.put(:result, accepted(operation))
-    |> Ecto.Multi.put(:wake, {biot.node_id, biot.id})
+    |> Ecto.Multi.put(:close, [])
+    |> Ecto.Multi.put(:wake, [{biot.node_id, biot.id}])
   end
 
   defp lifecycle_change(nil, %BiotId{}, _expected_revision, _change, _selection),
@@ -261,7 +242,8 @@ defmodule Biot.Server.Biots do
   defp lifecycle_writes(%{plan: {:unchanged, result}}) do
     Ecto.Multi.new()
     |> Ecto.Multi.put(:result, result)
-    |> Ecto.Multi.put(:wake, nil)
+    |> Ecto.Multi.put(:close, [])
+    |> Ecto.Multi.put(:wake, [])
   end
 
   defp lifecycle_writes(%{plan: {:change, biot, node, desired, selection, operation}}) do
@@ -300,11 +282,12 @@ defmodule Biot.Server.Biots do
     multi
     |> Publications.withdraw_all(biot_id)
     |> Access.revoke_shell_grants(biot_id)
+    |> Ecto.Multi.put(:close, [{:biot, biot_id}])
   end
 
   defp withdraw_access(multi, _biot_id, kind)
        when kind in [:start, :stop, :update_environment],
-       do: multi
+       do: Ecto.Multi.put(multi, :close, [])
 
   defp desired_changeset(biot, desired, :destroy) do
     Ecto.Changeset.change(biot,
@@ -414,7 +397,7 @@ defmodule Biot.Server.Biots do
   defp fail_for_abandoned_node(%Operation{} = operation, %Node{}), do: operation
 
   defp lifecycle_wake(biot, %Node{} = node) do
-    if Status.written_off?(node.status), do: nil, else: {biot.node_id, biot.id}
+    if Status.written_off?(node.status), do: [], else: [{biot.node_id, biot.id}]
   end
 
   defp accepted(operation) do
@@ -425,8 +408,8 @@ defmodule Biot.Server.Biots do
     }
   end
 
-  defp lifecycle_transaction_result({:ok, %{result: result, wake: wake}}) do
-    wake_node(wake)
+  defp lifecycle_transaction_result({:ok, %{result: result, close: owner_keys, wake: wakes}}) do
+    Withdrawal.enforce(owner_keys, wakes)
     {:ok, result}
   end
 
@@ -439,10 +422,6 @@ defmodule Biot.Server.Biots do
       raise Ecto.InvalidChangesetError, action: :insert, changeset: changeset
     end
   end
-
-  defp wake_node(nil), do: :ok
-
-  defp wake_node({node_id, biot_id}), do: NodeWake.spec_changed(node_id, biot_id)
 
   defp operation_kind(:start), do: :start
   defp operation_kind(:stop), do: :stop

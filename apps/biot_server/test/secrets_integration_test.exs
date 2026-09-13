@@ -291,23 +291,35 @@ defmodule Biot.Server.SecretsIntegrationTest do
       # out, because the server cannot prove it did not.
       assert exposure_marked?(biot_id)
 
-      :ok =
-        NodeConnections.put(node.id, %{
-          connection_id: TestFixtures.connection_id(7),
-          state: :synchronizing
-        })
+      parent = self()
+      connection = %{connection_id: TestFixtures.connection_id(7), state: :synchronizing}
 
-      on_exit(fn -> NodeConnections.delete(node.id) end)
+      # Only a connection process writes its own entry, so this process stands in for one.
+      connection_pid =
+        spawn(fn ->
+          :ok = NodeConnections.put(node.id, connection)
+          send(parent, :synchronizing)
 
+          receive do
+            :ready ->
+              :ok = NodeConnections.put(node.id, %{connection | state: :ready})
+              send(parent, :ready)
+
+              receive do
+              end
+          end
+        end)
+
+      assert_receive :synchronizing
       assert Secrets.list(context.actor, biot_id) == {:error, :temporarily_unavailable}
 
-      :ok =
-        NodeConnections.put(node.id, %{
-          connection_id: TestFixtures.connection_id(7),
-          state: :ready
-        })
+      send(connection_pid, :ready)
+      assert_receive :ready
+      reference = Process.monitor(connection_pid)
+      Process.exit(connection_pid, :kill)
+      assert_receive {:DOWN, ^reference, :process, ^connection_pid, :killed}
 
-      # Ready in the table with no registered connection process is still no link.
+      # A killed connection leaves no link, even before the Registry removes its entry.
       assert Secrets.list(context.actor, biot_id) == {:error, :temporarily_unavailable}
     end
   end
