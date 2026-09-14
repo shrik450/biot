@@ -9,6 +9,7 @@ defmodule Biot.Server.Publications do
   import Ecto.Query
 
   alias Biot.Protocol.{BiotId, Port}
+  alias Biot.Protocol.Hostname, as: ProtocolHostname
   alias Biot.Server.Access
   alias Biot.Server.Actor
   alias Biot.Server.CommandError
@@ -56,6 +57,13 @@ defmodule Biot.Server.Publications do
 
       {:ok, PublicationView.project(publications, domain)}
     end
+  end
+
+  @doc "Formats a URL from a hostname whose active publication was already authorized."
+  @spec url(ProtocolHostname.t()) :: String.t()
+  def url(%ProtocolHostname{} = hostname) do
+    domain = Application.fetch_env!(:biot_server, :publication_domain)
+    PublicationView.url(hostname, domain)
   end
 
   @spec active?(module(), BiotId.t(), Port.t()) :: boolean()

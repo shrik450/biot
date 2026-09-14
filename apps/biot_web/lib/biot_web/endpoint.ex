@@ -1,16 +1,9 @@
 defmodule BiotWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :biot_web
 
-  @session_options [
-    store: :cookie,
-    key: "_biot_web_key",
-    signing_salt: "QGKrtdlg",
-    same_site: "Lax"
-  ]
-
   socket "/live", Phoenix.LiveView.Socket,
-    websocket: [connect_info: [session: @session_options]],
-    longpoll: [connect_info: [session: @session_options]]
+    websocket: [connect_info: [session: {BiotWeb.Cookies, :session_options, []}]],
+    longpoll: [connect_info: [session: {BiotWeb.Cookies, :session_options, []}]]
 
   plug Plug.Static,
     at: "/",
@@ -26,6 +19,8 @@ defmodule BiotWeb.Endpoint do
   end
 
   plug Plug.RequestId
+  # Before telemetry, so request logs and metrics see the client rather than the edge.
+  plug :put_client_address
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
   plug Plug.Parsers,
@@ -35,6 +30,18 @@ defmodule BiotWeb.Endpoint do
 
   plug Plug.MethodOverride
   plug Plug.Head
-  plug Plug.Session, @session_options
+  plug :session
   plug BiotWeb.Router
+
+  defp put_client_address(conn, _opts) do
+    trusted = Application.fetch_env!(:biot_web, :trusted_edge_peers)
+    forwarded = get_req_header(conn, "x-forwarded-for")
+    %{conn | remote_ip: BiotWeb.ClientAddress.resolve(conn.remote_ip, trusted, forwarded)}
+  end
+
+  # The cookie's max_age comes from runtime configuration, so the options are built per request
+  # rather than when the endpoint compiles.
+  defp session(conn, _opts) do
+    Plug.Session.call(conn, Plug.Session.init(BiotWeb.Cookies.session_options()))
+  end
 end

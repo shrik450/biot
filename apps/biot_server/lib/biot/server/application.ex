@@ -24,6 +24,30 @@ defmodule Biot.Server.Application do
       Biot.Server.Control.Listener
     ]
 
+    oidc_issuer =
+      case Application.get_env(:biot_server, :oidc) do
+        %{issuer: issuer} -> issuer
+        oidc when is_list(oidc) -> Keyword.get(oidc, :issuer)
+        _value -> nil
+      end
+
+    children =
+      if is_binary(oidc_issuer) do
+        [
+          {Oidcc.ProviderConfiguration.Worker,
+           %{
+             issuer: oidc_issuer,
+             name: Biot.Server.Login.Provider,
+             backoff_type: :random_exponential,
+             backoff_min: 100,
+             backoff_max: 5_000
+           }}
+          | children
+        ]
+      else
+        children
+      end
+
     opts = [strategy: :one_for_one, name: Biot.Server.Supervisor]
     Supervisor.start_link(children, opts)
   end

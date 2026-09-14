@@ -1,5 +1,8 @@
 defmodule Biot.Server.Principals do
-  @moduledoc "Owns principal identity, operator disabling, and last-seen email lookup."
+  @moduledoc """
+  Owns principal identity, the actor's own principal view, operator disabling, and last-seen email
+  lookup.
+  """
 
   import Ecto.Query
 
@@ -11,6 +14,7 @@ defmodule Biot.Server.Principals do
   alias Biot.Server.CommandError
   alias Biot.Server.Id
   alias Biot.Server.Principals.DisabledIdentities
+  alias Biot.Server.Queries.PrincipalView
   alias Biot.Server.Repo
   alias Biot.Server.Schema.Biot, as: BiotRow
   alias Biot.Server.Schema.{Credential, Principal, Session, ShellGrant, SshKey, ViewGrant}
@@ -68,6 +72,16 @@ defmodule Biot.Server.Principals do
       :ok
     else
       {:error, :unauthenticated}
+    end
+  end
+
+  @spec get(Actor.t() | nil) :: {:ok, PrincipalView.t()} | {:error, CommandError.t()}
+  def get(nil), do: {:error, :unauthenticated}
+
+  def get(%Actor{principal_id: principal_id} = actor) do
+    with :ok <- require_enabled(Repo, actor) do
+      # Principals are never deleted, so the enabled principal's row is still present.
+      {:ok, PrincipalView.project(Repo.get!(Principal, principal_id))}
     end
   end
 

@@ -1,21 +1,16 @@
 defmodule BiotWeb.ErrorJSON do
   @moduledoc """
-  This module is invoked by your endpoint in case of errors on JSON requests.
+  Renders the API error body for an error raised outside an action, such as an unknown route or a
+  crash.
 
-  See config/config.exs.
+  The body has the `{"error": tag}` shape of `BiotWeb.Api.ErrorResponse`. A crash is `internal`.
+  Any other status uses Plug's name for it, so an unknown route is `not_found`.
   """
 
-  # If you want to customize a particular status code,
-  # you may add your own clauses, such as:
-  #
-  # def render("500.json", _assigns) do
-  #   %{errors: %{detail: "Internal Server Error"}}
-  # end
+  alias Plug.Conn.Status
 
-  # By default, Phoenix returns the status message from
-  # the template name. For example, "404.json" becomes
-  # "Not Found".
-  def render(template, _assigns) do
-    %{errors: %{detail: Phoenix.Controller.status_message_from_template(template)}}
-  end
+  def render("500.json", _assigns), do: %{"error" => "internal"}
+
+  def render(_template, %{status: status}),
+    do: %{"error" => status |> Status.reason_atom() |> Atom.to_string()}
 end

@@ -8,6 +8,7 @@ config :biot_server,
   ssh_port: 22,
   control_port: nil,
   control_tls: nil,
+  oidc: nil,
   control_session_lifetime_ms: 7 * 24 * 60 * 60 * 1000,
   credential_max_lifetime_ms: 90 * 24 * 60 * 60 * 1000,
   credential_last_used_interval_ms: 60 * 60 * 1000,
@@ -85,7 +86,9 @@ config :biot_web, BiotWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,
   render_errors: [
-    formats: [html: BiotWeb.ErrorHTML, json: BiotWeb.ErrorJSON],
+    # The first format answers a request with no Accept header, such as an API client's. Browsers
+    # ask for HTML.
+    formats: [json: BiotWeb.ErrorJSON, html: BiotWeb.ErrorHTML],
     layout: false
   ],
   pubsub_server: BiotWeb.PubSub,
@@ -123,5 +126,8 @@ config :logger, :default_formatter,
   ]
 
 config :phoenix, :json_library, Jason
+
+# Secret and credential values, and login codes and their state, never reach request logs.
+config :phoenix, :filter_parameters, ["password", "value", "code", "state", "challenge"]
 
 import_config "#{config_env()}.exs"

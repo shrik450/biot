@@ -28,7 +28,7 @@ defmodule Biot.Server.Sessions do
     Repo.transact(
       fn repo ->
         with :ok <- Principals.require_enabled(repo, actor(principal_id)) do
-          expires_at = DateTime.add(DateTime.utc_now(), lifetime_ms(), :millisecond)
+          expires_at = DateTime.add(DateTime.utc_now(), control_lifetime_ms(), :millisecond)
 
           repo.insert!(%Session{
             id_digest: digest,
@@ -43,6 +43,12 @@ defmodule Biot.Server.Sessions do
       mode: :immediate
     )
   end
+
+  @doc """
+  How long a control session lasts after login. The lifetime is absolute, so no request extends it.
+  """
+  @spec control_lifetime_ms() :: pos_integer()
+  def control_lifetime_ms, do: Application.fetch_env!(:biot_server, :control_session_lifetime_ms)
 
   @spec control(String.t()) :: {:ok, Authentication.t()} | :error
   def control(token) when is_binary(token) do
@@ -134,6 +140,4 @@ defmodule Biot.Server.Sessions do
   end
 
   defp actor(principal_id), do: %Actor{principal_id: principal_id}
-
-  defp lifetime_ms, do: Application.fetch_env!(:biot_server, :control_session_lifetime_ms)
 end

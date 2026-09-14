@@ -19,6 +19,25 @@ default_node_id =
 
 config :biot_server, default_node_id: default_node_id
 
+if System.get_env("RELEASE_NAME") != "node" do
+  trusted_edge_peers =
+    case System.get_env("BIOT_TRUSTED_EDGE_PEERS") do
+      nil ->
+        []
+
+      value ->
+        case BiotWeb.ClientAddress.parse_peers(value) do
+          {:ok, peers} ->
+            peers
+
+          {:error, {:invalid_peer, entry}} ->
+            raise "BIOT_TRUSTED_EDGE_PEERS entry #{inspect(entry)} is not an IP address"
+        end
+    end
+
+  config :biot_web, trusted_edge_peers: trusted_edge_peers
+end
+
 if config_env() in [:dev, :prod] do
   config :biot_server,
     node_registrations_file: System.get_env("BIOT_NODE_REGISTRATIONS"),
@@ -80,10 +99,35 @@ if config_env() == :prod and System.get_env("RELEASE_NAME") != "node" do
       environment variable PHX_HOST is missing.
       """
 
+  oidc =
+    case {
+      System.get_env("BIOT_OIDC_ISSUER"),
+      System.get_env("BIOT_OIDC_CLIENT_ID"),
+      System.get_env("BIOT_OIDC_CLIENT_SECRET")
+    } do
+      {nil, nil, nil} ->
+        nil
+
+      {issuer, client_id, client_secret}
+      when is_binary(issuer) and is_binary(client_id) and is_binary(client_secret) ->
+        %{
+          issuer: issuer,
+          client_id: client_id,
+          client_secret: client_secret,
+          redirect_uri: "https://#{host}/login/callback"
+        }
+
+      _values ->
+        raise "BIOT_OIDC_ISSUER, BIOT_OIDC_CLIENT_ID, and BIOT_OIDC_CLIENT_SECRET must be set together"
+    end
+
+  config :biot_server, oidc: oidc
+
   port = String.to_integer(System.get_env("PORT", "4000"))
 
   config :biot_web, BiotWeb.Endpoint,
-    url: [host: host, port: 443],
+    # The edge terminates TLS, so this URL is the control origin that browsers send in `Origin`.
+    url: [scheme: "https", host: host, port: 443],
     http: [ip: {0, 0, 0, 0, 0, 0, 0, 0}, port: port],
     secret_key_base: secret_key_base,
     server: true

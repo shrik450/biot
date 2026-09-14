@@ -4,7 +4,8 @@
 
 - `apps/biot_protocol` owns shared parsed values and wire codecs.
 - `apps/biot_server` owns server modules, queries, policy, and the server database.
-- `apps/biot_web` owns the Phoenix HTTP API and LiveView UI.
+- `apps/biot_web` owns the Phoenix HTTP API and browser access boundaries. Its LiveView socket and
+  layouts remain the scaffold for the UI step.
 - `apps/biot_node` owns reconciliation, host effects, environment handling, and container sessions.
 - `nix/` owns the module schema, the `build.nix` entry point, and example layers. `nix/README.md` holds the build contract for the node host layer.
 - `cli` contains the Go command-line client.
@@ -110,7 +111,8 @@ Tests for this app are pure unit tests with StreamData property tests.
 `ProtocolValue` stores any parsed protocol value as text.
 The other custom types wrap protocol `encode/1` and `parse/1` functions.
 `Principals` and `Nodes` own transactions.
-`Principals` owns principal identity, operator disabling, and last-seen email lookup.
+`Principals` owns principal identity, the authenticated principal view, operator disabling, and
+last-seen email lookup.
 `Principals.require_enabled/2` is the one rule for a disabled principal, and every application boundary that accepts an `Actor` calls it.
 `Principals.reload/0` applies the operator's disabled identity set.
 `Principals.DisabledIdentities` loads and parses the operator file named by `BIOT_DISABLED_PRINCIPALS`.
@@ -152,7 +154,7 @@ A new status cannot compile until all six functions answer it.
 - `Queries.Biots.get/2` and `list/2` build owner and collaborator `BiotView` values. `Access.readable/2` supplies their single read rule. `PublicationView.visible/2` limits collaborator publications to their view grants.
 - `Queries.Nodes.list/1` and `Queries.NodeView` build the node inventory with capacity counts, live connections, and latest orphan reports.
 - `Queries.Deployment.get/1` returns the publication and SSH settings in `DeploymentView`.
-- `Queries.BiotView`, `Queries.PublicationView`, and `Queries.OperationView` provide pure projections. `BiotView` includes the actor's `role`, the row's `direct_secret_exposure_possible` column, and `waiting_for`. Creation sets the exposure column to `false`; observations supply the current wait.
+- `Queries.PrincipalView`, `Queries.BiotView`, `Queries.PublicationView`, and `Queries.OperationView` provide pure projections. `PrincipalView` projects the authenticated principal's ID and latest OIDC email and name. `BiotView` includes the actor's `role`, the row's `direct_secret_exposure_possible` column, and `waiting_for`. Creation sets the exposure column to `false`; observations supply the current wait.
 - `Authorization` owns the `grants` and `role` types and the pure role and policy predicates.
 - `NodeConnections` is a thin layer over `Control.Registry`, the one node membership table. The key is the node ID, the process is the control connection, and the value is the connection ID and state. Only the owning control process writes its entry, through `put/2` and `delete/1`. The entry leaves the Registry when that process exits. `current/1`, `connection_pid/1`, `ready/1`, and `ready_connection/1` skip an entry whose process is already dead.
 - `NodeWake` provides one PubSub topic per node, plus `spec_changed/2` and `subscribe/1`.
@@ -346,6 +348,20 @@ so callers treat it as an effect. `Tokens.digest/1` hashes a presented token.
 `Label` owns the 1-to-100-byte label rule shared by credentials and SSH keys.
 `Id.generate/1` mints a new canonical protocol ID.
 
+#### OIDC login
+
+`Login.start/1` creates the authorization URL and a `Login.Pending` value with
+state, nonce, PKCE verifier, and a same-origin return path. `Login.finish/2`
+uses the provider worker, checks the callback through `Login.Callback`, verifies
+the ID-token claims, identifies the principal, and starts a control session.
+Provider failures map to `:temporarily_unavailable`; identity and callback
+failures map to `:unauthenticated`.
+
+`Biot.Server.Application` starts `Oidcc.ProviderConfiguration.Worker` as
+`Biot.Server.Login.Provider` when OIDC settings include an issuer. The worker
+owns provider discovery and JWKS state. No worker starts when OIDC is unset.
+The `biot_server` application declares the `oidcc` dependency for this flow.
+
 #### Principal status and disabling
 
 `Schema.Principal` stores `status`, an enum of `:enabled` and `:disabled`.
@@ -397,6 +413,10 @@ unpadded base32 and parses the label as a protocol hostname. The publication row
 keeps that label while inactive. `publication_domain` reads
 `BIOT_SERVER_PUBLICATION_DOMAIN`. `Queries.PublicationView` owns the URL format:
 `https://<hostname>.<domain>`.
+
+`Publications.url/1` applies the configured domain to one parsed hostname for
+handoff redirects. `Queries.PublicationView.url/2` is the shared URL formatter
+used by both this function and publication projections.
 
 `Queries.PublicationView` sorts publications by port and projects each row into
 its port and HTTPS URL. `Queries.AccessView` projects loaded shell and view rows
@@ -615,6 +635,120 @@ Lifecycle, access, query, publication, and redelivery evidence includes:
 - `queries/deployment_test.exs` covers authenticated deployment settings and runtime reads.
 - `queries/node_view_test.exs` covers node facts, capacity, connection state, status, and orphan reports.
 - `queries/nodes_test.exs` covers node listing, capacity counts, live connections, and orphan reports.
+
+## `apps/biot_web`
+
+Step 22 adds the HTTP API and browser access boundaries. `BiotWeb.Layouts` and
+the `/live` socket remain the scaffold for the later UI. The preview proxy and
+the preview callback consumer are outside this step.
+
+### Application and request boundaries
+
+- `BiotWeb.Application` starts `BiotWeb.PubSub` and `BiotWeb.Endpoint`.
+- `BiotWeb.Endpoint` serves static assets and the LiveView socket, parses requests, applies the
+  Phoenix session, and installs `BiotWeb.Router`. It resolves the client address before telemetry.
+- `BiotWeb.Router` has a browser pipeline with sessions, CSRF, control-origin checks, and
+  `ControlSession`. Its API pipeline accepts JSON and requires a bearer credential. The API fallback
+  handles unknown paths with the same error body.
+- `BiotWeb.ClientAddress` parses `BIOT_TRUSTED_EDGE_PEERS` as individual IPv4 or IPv6 addresses.
+  `resolve/3` trusts `X-Forwarded-For` only when the immediate peer is listed, and uses the last
+  parsed entry. It canonicalizes IPv4-mapped IPv6 addresses and keeps the peer address on failure.
+- `BiotWeb.Cookies` owns `__Host-biot_session` and `__Host-biot_login`, their `Secure`, `HttpOnly`,
+  `SameSite=Lax`, path, and lifetime attributes. The login cookie is sealed pending OIDC state;
+  the session cookie holds only the control token and CSRF token.
+- `BiotWeb.Params` is the pure request parser. It keeps path and body fields separate, parses
+  protocol values, collects invalid fields, and applies the page default of 50 and limit of 200.
+- `BiotWeb.Plugs.ControlSession` authenticates the session token through `Sessions` and removes a
+  dead token. `BiotWeb.Plugs.ControlOrigin` permits safe methods, no `Origin`, or the configured
+  control origin; another origin raises a 403 error before CSRF checks.
+- `BiotWeb.PreviewPaths` owns the reserved `/__biot/callback` path used in preview handoff URLs.
+- `BiotWeb` provides the Phoenix controller, router, HTML, and LiveView macros. `Layouts` embeds
+  the root template, while `ErrorHTML` renders status messages and `ErrorJSON` returns
+  `{"error":"internal"}` for crashes and a status tag for other endpoint errors.
+
+### API modules and routes
+
+`BiotWeb.Api.BearerHeader` accepts exactly one case-insensitive `Bearer` value.
+`BiotWeb.Api.Bearer` authenticates it with `Credentials` and does not read
+browser cookies. `BiotWeb.Api.Authenticated` supplies the actor to controllers.
+Controllers parse input, call one server function, and pass views through
+`BiotWeb.Api.Json`.
+
+| Route | Controller | Server boundary |
+| --- | --- | --- |
+| `GET /api/me` | `MeController` | `Principals.get` |
+| `GET /api/deployment` | `DeploymentController` | `Queries.Deployment.get` |
+| `GET /api/nodes` | `NodeController` | `Queries.Nodes.list` |
+| `GET /api/principals?email=` | `PrincipalController` | `Principals.resolve_email` |
+| `GET /api/biots` | `BiotController` | `Queries.Biots.list` |
+| `PUT /api/biots/:id` | `BiotController` | `Biots.create` |
+| `GET /api/biots/:id` | `BiotController` | `Queries.Biots.get` |
+| `DELETE /api/biots/:id` | `BiotController` | `Biots.destroy` |
+| `POST /api/biots/:id/start` | `BiotController` | `Biots.start` |
+| `POST /api/biots/:id/stop` | `BiotController` | `Biots.stop` |
+| `POST /api/biots/:id/environment` | `BiotController` | `Biots.update_environment` |
+| `GET /api/biots/:id/publications` | `PublicationController` | `Publications.discover` |
+| `PUT` and `DELETE /api/biots/:id/publications/:port` | `PublicationController` | `Publications.publish`, `unpublish` |
+| `GET /api/biots/:id/grants` | `GrantController` | `Access.get_grants` |
+| `PUT` and `DELETE /api/biots/:id/grants/shell/:principal_id` | `GrantController` | `Access.grant_shell`, `revoke_shell` |
+| `PUT` and `DELETE /api/biots/:id/grants/view/:port/:principal_id` | `GrantController` | `Access.grant_view`, `revoke_view` |
+| `GET /api/biots/:id/secrets` | `SecretController` | `Secrets.list` |
+| `PUT` and `DELETE /api/biots/:id/secrets/:name` | `SecretController` | `Secrets.deliver`, `remove` |
+| `PUT` and `DELETE /api/biots/:id/fetch-credentials` | `FetchCredentialController` | `FetchCredentials.deliver`, `remove` |
+| `GET /api/biots/:id/logs` | `LogController` | `RuntimeLogs.get` |
+| `GET /api/operations/:id` | `OperationController` | `Operations.get` |
+| `GET /api/diagnostics/:ref` | `DiagnosticController` | `Diagnostics.get` |
+| `GET /api/credentials` and `DELETE /api/credentials/:id` | `CredentialController` | `Credentials.list`, `revoke` |
+| `GET /api/ssh-keys` | `SshKeyController` | `SshKeys.list` |
+| `POST /api/ssh-keys` | `SshKeyController` | `SshKeys.add` |
+| `DELETE /api/ssh-keys/:id` | `SshKeyController` | `SshKeys.remove` |
+
+`Json` encodes server views, protocol unions, IDs, ports, times, diagnostics,
+and runtime logs. `Response` maps accepted lifecycle results to 202 with one
+operation location, unchanged lifecycle results to 200, policy results to 200,
+new SSH keys to 201, and bare effects to 204. `Reply` applies those status,
+headers, and bodies. `ErrorResponse` maps `CommandError` values to the model's
+status and error fields. `FallbackController` handles action errors and API
+fallbacks. Credential creation has no API route; it is reserved for the control UI step.
+
+### Browser login and preview handoff
+
+- `BiotWeb.LoginController` validates a same-origin return path, calls `Login.start/1`, seals
+  `Login.Pending` in the ten-minute `__Host-biot_login` cookie, and redirects to the provider.
+  The callback opens that cookie, calls `Login.finish/2`, rotates the Phoenix session, stores the
+  control token, removes the login cookie, and returns to the stored path. Missing, forged, expired,
+  or failed login state has one generic 401 response; unavailable provider state is 503.
+- `BiotWeb.PreviewAuthorizeController` parses the host, challenge digest, and return path. A live
+  control session calls `PreviewHandoff.begin/4` and redirects to the publication URL plus
+  `PreviewPaths.callback()`. An absent session redirects through `/login` and preserves this
+  request. Invalid input, missing publication, and missing view authority return 400, 404, and 403.
+- `BiotWeb.SessionController` logs out the current control session and redirects to `/`; the server
+  closes its previews and handoffs while other logins and credentials remain valid.
+
+### Step 22 web tests
+
+`BiotWeb.ConnCase` owns the SQL sandbox and JSON request helpers. `TestFixtures`
+builds principals, nodes, Biots, and environments through server records.
+`BiotWeb.OidcPeer` is a real Bandit test provider with discovery, JWKS, `/authorize`, and `/token`.
+It records state, nonce, and S256 challenge values, verifies client credentials and PKCE, signs
+RS256 ID tokens, and consumes authorization codes once.
+
+- `api_contract_test.exs` covers bearer parsing and HTTP response and error status tables.
+- `api_integration_test.exs` checks every model route, bearer-only authentication, fallback errors,
+  lifecycle and policy responses, JSON projections, and unavailable node-backed routes against real SQLite.
+- `boundary_robustness_test.exs` fuzzes bearer, callback, parameter, and client-address boundaries;
+  its three properties run 100 cases each and cover positive revisions, page limits, path/body
+  separation, trusted peers, mapped addresses, and the final forwarded entry.
+- `browser_auth_integration_test.exs` covers CSRF, same-origin rules, cookie attributes, dead
+  sessions, logout closure, and the separation between browser and bearer authentication.
+- `oidc_login_integration_test.exs` covers callback state, real provider discovery, PKCE, nonce,
+  principal creation and reuse, disabled principals, unavailable providers, sealed browser state,
+  and session rotation.
+- `preview_authorize_integration_test.exs` covers authorized and login-mediated handoffs, callback
+  host binding, single use, view denial, inactive hosts, and malformed parameters.
+
+The clean web suite passes 37 tests: three properties and 34 tests. `mix
+format --check-formatted` and `mix check` pass for the step 22 tree.
 
 ## `apps/biot_node`
 
@@ -1185,8 +1319,7 @@ for the production node release.
 Server configuration includes `publication_domain`, `ssh_advertised_host`,
 integer `ssh_port`, and `desired_sweep_interval_ms`. Production reads them from
 `BIOT_SERVER_PUBLICATION_DOMAIN`, `BIOT_SSH_ADVERTISED_HOST`, `BIOT_SSH_PORT`,
-and `BIOT_DESIRED_SWEEP_INTERVAL_MS`. No `BIOT_SERVER_PUBLICATION_HMAC_KEY`
-setting remains. Step 19 adds `control_session_lifetime_ms`,
+and `BIOT_DESIRED_SWEEP_INTERVAL_MS`. Step 19 adds `control_session_lifetime_ms`,
 `credential_max_lifetime_ms`, `credential_last_used_interval_ms`,
 `preview_handoff_ttl_ms`, and the `disabled_principals` and
 `disabled_principals_file` settings. Production reads
@@ -1198,7 +1331,13 @@ Step 20 adds `stream_open_timeout_ms`, the deadline for one admission's stream o
 Production reads `BIOT_STREAM_OPEN_TIMEOUT_MS` (default 30_000).
 Step 21 adds `auth_check_interval_ms`, the interval for `Access.AuthSweep`.
 Production reads `BIOT_AUTH_CHECK_INTERVAL_MS` (default 60_000), and
-`config/test.exs` sets it to nil.
+`config/test.exs` sets it to nil. Step 22 adds `oidc` settings and
+`trusted_edge_peers`. Production reads `BIOT_OIDC_ISSUER`,
+`BIOT_OIDC_CLIENT_ID`, `BIOT_OIDC_CLIENT_SECRET`, `PHX_HOST`, and
+`BIOT_TRUSTED_EDGE_PEERS`; the login callback is
+`https://<PHX_HOST>/login/callback`. All three OIDC settings must be present
+together. Phoenix filters `value`, `code`, `state`, and `challenge` from
+request logs.
 
 ## Host tests in Docker
 

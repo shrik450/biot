@@ -31,6 +31,7 @@ defmodule Biot.Server.MixProject do
       {:ecto_sql, "~> 3.13"},
       {:ecto_sqlite3, "~> 0.22"},
       {:jason, "~> 1.4"},
+      {:oidcc, "~> 3.9"},
       {:phoenix_pubsub, "~> 2.1"},
       {:thousand_island, "~> 1.5"},
       {:stream_data, "~> 1.1", only: :test},

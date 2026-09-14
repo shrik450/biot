@@ -46,6 +46,18 @@ defmodule BiotWeb do
     end
   end
 
+  def api_controller do
+    quote do
+      use Phoenix.Controller, formats: [:json]
+
+      import Plug.Conn
+      import BiotWeb.Api.Authenticated
+      import BiotWeb.Api.Reply
+
+      action_fallback BiotWeb.Api.FallbackController
+    end
+  end
+
   def live_view do
     quote do
       use Phoenix.LiveView
