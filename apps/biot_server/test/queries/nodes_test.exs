@@ -93,6 +93,9 @@ defmodule Biot.Server.Queries.NodesTest do
   test "orphans come from the latest node observation", context do
     allocation = TestFixtures.orphaned_allocation(1)
 
+    :ok =
+      NodeConnections.put(context.first.id, %{connection_id: context.connection_id, state: :ready})
+
     assert {:ok, %NodeObservation{}} =
              Reports.node_observation(context.first.id, context.connection_id, [allocation])
 

@@ -6,7 +6,6 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   alias Biot.Node.DataRootLock
   alias Biot.Node.Host
   alias Biot.Node.Host.Command
-  alias Biot.Node.Host.Command.Reaper
   alias Biot.Node.Host.ContainerEvents
   alias Biot.Node.Host.Environment, as: HostEnvironment
   alias Biot.Node.Host.Inspection
@@ -44,7 +43,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     data_root = temporary_directory("biot-host-linux")
     repository_root = temporary_directory("biot-host-git")
     authority = certificate_authority(repository_root)
-    settings = host_settings(data_root, project_root, authority.bundle)
+    settings = host_settings(data_root, authority.bundle)
 
     previous =
       Map.new(settings, fn {key, _value} -> {key, Application.get_env(:biot_node, key)} end)
@@ -79,6 +78,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
     on_exit(fn ->
       if Port.info(server), do: Port.close(server)
+      :persistent_term.erase(Biot.Node.Host.Config)
       remove_all_test_containers(settings)
       File.chmod(data_root, 0o700)
       System.cmd("podman", ["unshare", "chown", "-R", "0:0", data_root], stderr_to_stdout: true)
@@ -115,8 +115,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
     selection = %EnvironmentSelection{
       base_nixpkgs: SourceSelector.nixpkgs(),
-      layers: [selector(context.base_layer), selector(context.service_layer)],
-      project_context: nil
+      layers: [selector(context.base_layer), selector(context.service_layer)]
     }
 
     running =
@@ -192,7 +191,10 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     started = System.monotonic_time(:millisecond)
 
     assert {:ok, %Command.Result{status: 0}} =
-             Podman.run(host.config, ["kill", Names.container(first_container.incarnation_id)])
+             Podman.run(host.config, [
+               "kill",
+               IncarnationId.to_string(first_container.incarnation_id)
+             ])
 
     assert eventually(fn ->
              match?(
@@ -293,8 +295,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
     broken_selection = %EnvironmentSelection{
       base_nixpkgs: SourceSelector.nixpkgs(),
-      layers: [selector(context.broken_layer)],
-      project_context: nil
+      layers: [selector(context.broken_layer)]
     }
 
     broken =
@@ -319,11 +320,13 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     assert after_failed_build.data == old_data
 
     assert :ok = Host.run({:retire, old_container.incarnation_id}, host)
-    foreign_id = IncarnationId.generate()
-    start_foreign_container(host, allocation, installed(after_failed_build), bundle, foreign_id)
+    start_foreign_container(host, allocation, installed(after_failed_build), bundle)
 
     foreign_state = Host.inspect_state(biot_id, host)
-    assert {:present, %{biot_id: foreign_owner}} = foreign_state.container
+
+    assert {:present, %{biot_id: foreign_owner, incarnation_id: foreign_id}} =
+             foreign_state.container
+
     assert foreign_owner == id(BiotId, 899)
 
     assert {:error, %Biot.Node.Host.Outcome{outcome: :ownership_mismatch}} =
@@ -331,7 +334,6 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
     assert {:present, _container} = Host.inspect_state(biot_id, host).container
     remove_container(host, foreign_id)
-    File.rm(Paths.container_identity(host.config, biot_id))
 
     assert :ok = Host.run({:release_allocation, allocation}, host)
     assert Allocation.resources(Journal.allocation(biot_id)) == Allocation.resources(allocation)
@@ -406,7 +408,6 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
     assert Process.alive?(reader)
     assert Process.whereis(ContainerEvents) == reader
-    assert :sys.get_state(Reaper) == %{}
 
     after_files = MapSet.new(Path.wildcard(Path.join(System.tmp_dir!(), "biot-command-*")))
     assert MapSet.difference(after_files, before) == MapSet.new()
@@ -561,7 +562,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     case Host.inspect_state(spec.biot_id, host).container do
       {:present, %{state: {:exited, status}, incarnation_id: incarnation_id}} ->
         {:ok, %Command.Result{stdout: output}} =
-          Podman.run(host.config, ["logs", Names.container(incarnation_id)])
+          Podman.run(host.config, ["logs", IncarnationId.to_string(incarnation_id)])
 
         flunk("container exited with #{status}:\n#{output}")
 
@@ -594,7 +595,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   end
 
   defp assert_container_runtime_contract(host, biot_id, container, bundle) do
-    name = Names.container(container.incarnation_id)
+    name = IncarnationId.to_string(container.incarnation_id)
 
     assert {:ok, %Command.Result{status: 0, stdout: output}} =
              Podman.run(host.config, ["inspect", "--format", "{{json .}}", name])
@@ -640,7 +641,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   defp container_curl(host, container, curl, method, path, body \\ nil) do
     arguments = [
       "exec",
-      Names.container(container.incarnation_id),
+      IncarnationId.to_string(container.incarnation_id),
       curl,
       "--fail",
       "--silent",
@@ -665,7 +666,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
                "inspect",
                "--format",
                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-               Names.container(container.incarnation_id)
+               IncarnationId.to_string(container.incarnation_id)
              ])
 
     String.trim(output)
@@ -677,7 +678,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
                "inspect",
                "--format",
                "{{json .HostConfig.LogConfig}}",
-               Names.container(container.incarnation_id)
+               IncarnationId.to_string(container.incarnation_id)
              ])
 
     output |> String.trim() |> Jason.decode!()
@@ -688,7 +689,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
       {:ok, %Command.Result{status: 0}},
       Podman.run(host.config, [
         "exec",
-        Names.container(container.incarnation_id),
+        IncarnationId.to_string(container.incarnation_id),
         curl,
         "--fail",
         "--silent",
@@ -700,7 +701,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     )
   end
 
-  defp start_foreign_container(host, allocation, installation, bundle, incarnation_id) do
+  defp start_foreign_container(host, allocation, installation, bundle) do
     biot_id = allocation.biot_id
     foreign_owner = id(BiotId, 899)
     mapped_start = Allocation.subordinate_start(allocation, host.config.uid_range_base)
@@ -715,7 +716,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
       [
         "run",
         "--name",
-        Names.container(incarnation_id),
+        Names.container(biot_id),
         "--detach",
         "--read-only",
         "--tmpfs",
@@ -729,7 +730,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
         "--gidmap",
         mapping
       ] ++
-        Names.label_arguments(foreign_owner, incarnation_id, installation.environment_id) ++
+        Names.label_arguments(foreign_owner, installation.environment_id) ++
         volumes ++
         [
           "--rootfs",
@@ -738,12 +739,11 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
         ]
 
     assert {:ok, %Command.Result{status: 0}} = Podman.run(host.config, arguments)
-    File.write!(Paths.container_identity(host.config, biot_id), "#{incarnation_id}\n")
   end
 
   defp remove_container(host, incarnation_id) do
     assert {:ok, %Command.Result{status: 0}} =
-             Podman.run(host.config, ["rm", "--force", Names.container(incarnation_id)])
+             Podman.run(host.config, ["rm", "--force", IncarnationId.to_string(incarnation_id)])
   end
 
   defp cleanup_allocation(host, allocation) do
@@ -938,7 +938,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
                stderr_to_stdout: true
              )
 
-    image = Keyword.fetch!(host_settings("/unused", "/unused", nil), :builder_image)
+    image = Keyword.fetch!(host_settings("/unused", nil), :builder_image)
 
     {roots, 0} =
       System.cmd(
@@ -1019,7 +1019,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     Enum.any?(Controllers.running(), fn {running_id, _pid} -> running_id == biot_id end)
   end
 
-  defp host_settings(data_root, project_root, fetch_ca_bundle) do
+  defp host_settings(data_root, fetch_ca_bundle) do
     [
       data_root: data_root,
       fetch_ca_bundle: fetch_ca_bundle,
@@ -1037,7 +1037,6 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
       sleep_executable: "sleep",
       builder_image:
         "docker.io/nixos/nix@sha256:29fc5fe207f159ceb0143c25c19c774062fee02ce5eda118f3067547b3054894",
-      build_support_dir: project_root,
       binary_cache_urls: ["https://cache.nixos.org"],
       binary_cache_keys: [
         "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="

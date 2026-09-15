@@ -1,29 +1,23 @@
 defmodule Biot.Protocol.Wire do
-  @moduledoc "Encodes and decodes strict JSON messages for a negotiated protocol version. Handshake messages always use the fixed version 1 shape."
+  @moduledoc """
+  Encodes and decodes strict JSON messages for a negotiated protocol version. Handshake messages
+  always use the fixed version 1 shape.
+
+  Each message module declares its fields and their codecs (see `Biot.Protocol.Message`). This
+  module owns the version table, the codecs, and the bounds, and reads every message through the
+  same loop.
+  """
 
   alias Biot.Protocol.AuthorizationValue
-  alias Biot.Protocol.BiotId
   alias Biot.Protocol.BiotSpec
-  alias Biot.Protocol.ConnectionId
-  alias Biot.Protocol.EnvironmentId
-  alias Biot.Protocol.ExecutionReport
+  alias Biot.Protocol.Choice
   alias Biot.Protocol.Frame
   alias Biot.Protocol.IncarnationId
   alias Biot.Protocol.Limits
-  alias Biot.Protocol.Manifest
   alias Biot.Protocol.Message
-  alias Biot.Protocol.OrphanedAllocation
   alias Biot.Protocol.ParsedList
-  alias Biot.Protocol.Platform
-  alias Biot.Protocol.PrivateDiagnosticId
-  alias Biot.Protocol.RegistrationId
-  alias Biot.Protocol.RepositorySource
-  alias Biot.Protocol.SecretName
   alias Biot.Protocol.SecretOutcome
   alias Biot.Protocol.SecretValue
-  alias Biot.Protocol.StreamFailure
-  alias Biot.Protocol.StreamId
-  alias Biot.Protocol.StreamTarget
   alias Biot.Protocol.Version
 
   @modules %{
@@ -101,17 +95,20 @@ defmodule Biot.Protocol.Wire do
   @doc """
   The smallest frame limit that can still carry every message this version allows.
 
-  Two messages set it: the largest BiotSpec and the largest delivered secret. A frame limit below
-  either one would leave an accepted selection or an accepted secret undeliverable, which is a
-  configuration fault the node and the server both refuse at boot rather than discover in use.
+  Three fields set it: the largest BiotSpec, the largest delivered secret, and the largest agent
+  request line a stream target carries. A frame limit below any of them would leave an accepted
+  selection, secret, or stream undeliverable, which is a configuration fault the node and the
+  server both refuse at boot rather than discover in use.
   """
   @spec min_frame_bytes(version()) :: pos_integer()
   def min_frame_bytes(version) do
     largest =
       Enum.max([
-        Limits.max_biot_spec_bytes(version) + biot_spec_envelope_bytes(version),
-        encoded_secret_value_bytes(version) + secret_envelope_bytes(version),
-        Limits.max_agent_line_bytes() + envelope_bytes([Message.OpenStream], version)
+        Limits.max_biot_spec_bytes(version) + envelope_bytes([:biot_spec], version),
+        encoded_secret_value_bytes(version) +
+          envelope_bytes([:secret_value, :authorization_value], version),
+        Limits.max_agent_line_bytes() +
+          envelope_bytes([{:json, Biot.Protocol.StreamTarget}], version)
       ])
 
     largest + Frame.overhead_bytes()
@@ -165,20 +162,13 @@ defmodule Biot.Protocol.Wire do
   end
 
   defp exact_fields(value, module) do
-    expected = ["type" | struct_fields(module) |> Enum.map(&Atom.to_string/1)] |> MapSet.new()
-    actual = value |> Map.keys() |> MapSet.new()
-    if actual == expected, do: :ok, else: {:error, :unknown_fields}
-  end
-
-  defp struct_fields(module) do
-    module.__struct__() |> Map.delete(:__struct__) |> Map.keys()
+    expected = MapSet.new(["type" | Enum.map(module.fields(), &Atom.to_string(elem(&1, 0)))])
+    if MapSet.new(Map.keys(value)) == expected, do: :ok, else: {:error, :unknown_fields}
   end
 
   defp encode_payload(module, message, context) do
-    message
-    |> Map.from_struct()
-    |> Enum.reduce_while({:ok, %{}}, fn {field, value}, {:ok, payload} ->
-      case encode_field(module, field, value, context) do
+    Enum.reduce_while(module.fields(), {:ok, %{}}, fn {field, codec}, {:ok, payload} ->
+      case encode_value(codec, Map.fetch!(message, field), context) do
         {:ok, encoded} -> {:cont, {:ok, Map.put(payload, Atom.to_string(field), encoded)}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -186,12 +176,9 @@ defmodule Biot.Protocol.Wire do
   end
 
   defp decode_payload(module, payload, context) do
-    module
-    |> struct_fields()
-    |> Enum.reduce_while({:ok, %{}}, fn field, {:ok, attrs} ->
-      value = Map.fetch!(payload, Atom.to_string(field))
-
-      case decode_field(module, field, value, context) do
+    module.fields()
+    |> Enum.reduce_while({:ok, %{}}, fn {field, codec}, {:ok, attrs} ->
+      case decode_value(codec, Map.fetch!(payload, Atom.to_string(field)), context) do
         {:ok, decoded} -> {:cont, {:ok, Map.put(attrs, field, decoded)}}
         {:error, reason} -> {:halt, decode_field_error(reason, field)}
       end
@@ -212,188 +199,41 @@ defmodule Biot.Protocol.Wire do
   defp decode_field_error(reason, field) when reason not in @bound_reasons,
     do: {:error, {:invalid_message, field}}
 
-  @spec_carrying_messages [Message.SynchronizeItem, Message.Desired]
+  defp encode_value({:text, module}, value, _context), do: {:ok, module.to_string(value)}
+  defp encode_value({:json, module}, value, _context), do: {:ok, module.encode(value)}
 
-  @secret_messages [
-    Message.DeliverSecret,
-    Message.RemoveSecret,
-    Message.ListSecrets,
-    Message.DeliverFetchCredential,
-    Message.RemoveFetchCredential
-  ]
+  defp encode_value({:list, module}, values, _context),
+    do: {:ok, Enum.map(values, &module.encode/1)}
 
-  @secret_result_messages [
-    Message.SecretResult,
-    Message.SecretListResult,
-    Message.FetchCredentialResult
-  ]
+  defp encode_value({:choice, _choices}, value, _context), do: {:ok, Atom.to_string(value)}
 
-  @value_carrying_messages [Message.DeliverSecret, Message.DeliverFetchCredential]
-
-  defp encode_field(Message.SynchronizeItem, :biot_spec, spec, context),
-    do: encode_biot_spec(spec, context)
-
-  defp encode_field(Message.Desired, :biot_spec, spec, context),
-    do: encode_biot_spec(spec, context)
-
-  defp encode_field(Message.Hello, :registration_id, value, _context),
-    do: {:ok, RegistrationId.to_string(value)}
-
-  defp encode_field(Message.Hello, :platform, value, _context),
-    do: {:ok, Platform.to_string(value)}
-
-  defp encode_field(Message.Hello, :supported_protocol_versions, versions, _context),
-    do: {:ok, versions}
-
-  defp encode_field(Message.Connected, :connection_id, value, _context),
-    do: {:ok, ConnectionId.to_string(value)}
-
-  defp encode_field(Message.Connected, :selected_protocol_version, value, _context),
-    do: {:ok, value}
-
-  defp encode_field(Message.Reject, :reason, reason, _context),
-    do: {:ok, Atom.to_string(reason)}
-
-  defp encode_field(Message.SynchronizeBegin, :connection_id, value, _context),
-    do: {:ok, ConnectionId.to_string(value)}
-
-  defp encode_field(Message.SynchronizeBegin, :count, value, _context), do: {:ok, value}
-
-  defp encode_field(Message.SynchronizeEnd, :connection_id, value, _context),
-    do: {:ok, ConnectionId.to_string(value)}
-
-  defp encode_field(Message.Diagnostic, :request_id, value, _context), do: {:ok, value}
-
-  defp encode_field(Message.Diagnostic, :diagnostic_id, value, _context),
-    do: {:ok, PrivateDiagnosticId.to_string(value)}
-
-  defp encode_field(Message.Diagnostic, field, value, _context)
-       when field in [:max_bytes, :timeout_ms],
+  defp encode_value(codec, value, _context)
+       when codec in [:text, :positive_integer, :non_negative_integer, :protocol_versions],
        do: {:ok, value}
 
-  defp encode_field(Message.RuntimeLogs, :request_id, value, _context), do: {:ok, value}
-
-  defp encode_field(Message.RuntimeLogs, :biot_id, value, _context),
-    do: {:ok, BiotId.to_string(value)}
-
-  defp encode_field(Message.RuntimeLogs, field, value, _context)
-       when field in [:max_bytes, :timeout_ms],
-       do: {:ok, value}
-
-  defp encode_field(module, :request_id, value, _context)
-       when module in @secret_messages,
-       do: {:ok, value}
-
-  defp encode_field(module, :biot_id, value, _context)
-       when module in @secret_messages,
-       do: {:ok, BiotId.to_string(value)}
-
-  defp encode_field(module, :timeout_ms, value, _context)
-       when module in @secret_messages,
-       do: {:ok, value}
-
-  defp encode_field(module, :name, value, _context)
-       when module in [Message.DeliverSecret, Message.RemoveSecret],
-       do: {:ok, SecretName.to_string(value)}
-
-  defp encode_field(module, :source, value, _context)
-       when module in [Message.DeliverFetchCredential, Message.RemoveFetchCredential],
-       do: {:ok, RepositorySource.to_string(value)}
-
-  defp encode_field(Message.DeliverSecret, :value, value, _context),
-    do: {:ok, Base.encode64(SecretValue.reveal(value))}
-
-  defp encode_field(Message.DeliverFetchCredential, :value, value, _context),
-    do: {:ok, Base.encode64(AuthorizationValue.reveal(value))}
-
-  defp encode_field(module, :request_id, value, _context)
-       when module in @secret_result_messages,
-       do: {:ok, value}
-
-  defp encode_field(Message.SecretListResult, :result, value, _context),
-    do: {:ok, SecretOutcome.encode_listing(value)}
-
-  defp encode_field(module, :result, value, _context)
-       when module in [Message.SecretResult, Message.FetchCredentialResult],
-       do: {:ok, SecretOutcome.encode(value)}
-
-  defp encode_field(Message.Synchronized, :connection_id, value, _context),
-    do: {:ok, ConnectionId.to_string(value)}
-
-  defp encode_field(Message.Attach, :registration_id, value, _context),
-    do: {:ok, RegistrationId.to_string(value)}
-
-  defp encode_field(Message.Attach, :connection_id, value, _context),
-    do: {:ok, ConnectionId.to_string(value)}
-
-  defp encode_field(Message.Attach, :stream_id, value, _context),
-    do: {:ok, StreamId.to_string(value)}
-
-  defp encode_field(Message.OpenStream, :connection_id, value, _context),
-    do: {:ok, ConnectionId.to_string(value)}
-
-  defp encode_field(Message.OpenStream, :access_revision, value, _context), do: {:ok, value}
-
-  defp encode_field(Message.OpenStream, :stream_id, value, _context),
-    do: {:ok, StreamId.to_string(value)}
-
-  defp encode_field(Message.OpenStream, :biot_id, value, _context),
-    do: {:ok, BiotId.to_string(value)}
-
-  defp encode_field(Message.OpenStream, :target, value, _context),
-    do: {:ok, StreamTarget.encode(value)}
-
-  defp encode_field(Message.StreamFailed, :stream_id, value, _context),
-    do: {:ok, StreamId.to_string(value)}
-
-  defp encode_field(Message.StreamFailed, :reason, value, _context),
-    do: {:ok, StreamFailure.to_string(value)}
-
-  defp encode_field(Message.Observation, :biot_id, value, _context),
-    do: {:ok, BiotId.to_string(value)}
-
-  defp encode_field(Message.Observation, :execution_report, value, _context),
-    do: {:ok, ExecutionReport.encode(value)}
-
-  defp encode_field(Message.AccessApplied, :biot_id, value, _context),
-    do: {:ok, BiotId.to_string(value)}
-
-  defp encode_field(Message.AccessApplied, :access_revision, value, _context), do: {:ok, value}
-
-  defp encode_field(Message.Resolution, :environment_id, value, _context),
-    do: {:ok, EnvironmentId.to_string(value)}
-
-  defp encode_field(Message.Resolution, :manifest, value, _context),
-    do: {:ok, Manifest.encode(value)}
-
-  defp encode_field(Message.NodeObservation, :orphaned_allocations, values, _context),
-    do: {:ok, Enum.map(values, &OrphanedAllocation.encode/1)}
-
-  defp encode_field(Message.DiagnosticResult, :request_id, value, _context), do: {:ok, value}
-
-  defp encode_field(Message.DiagnosticResult, :result, :not_found, _context),
-    do: {:ok, %{"status" => "not_found"}}
-
-  defp encode_field(Message.DiagnosticResult, :result, {content, truncated}, _context) do
-    {:ok,
-     %{
-       "status" => "found",
-       "content" => Base.encode64(content),
-       "truncated" => truncated
-     }}
+  defp encode_value(:biot_spec, spec, context) do
+    encoded = BiotSpec.encode(spec)
+    with :ok <- check_biot_spec_size(encoded, context), do: {:ok, encoded}
   end
 
-  defp encode_field(Message.RuntimeLogsResult, :request_id, value, _context), do: {:ok, value}
+  defp encode_value(:secret_value, value, _context),
+    do: {:ok, Base.encode64(SecretValue.reveal(value))}
 
-  defp encode_field(Message.RuntimeLogsResult, :result, :not_found, _context),
-    do: {:ok, %{"status" => "not_found"}}
+  defp encode_value(:authorization_value, value, _context),
+    do: {:ok, Base.encode64(AuthorizationValue.reveal(value))}
 
-  defp encode_field(
-         Message.RuntimeLogsResult,
-         :result,
-         {incarnation_id, content, truncated},
-         _context
-       ) do
+  defp encode_value(:secret_listing, value, _context),
+    do: {:ok, SecretOutcome.encode_listing(value)}
+
+  defp encode_value(result, :not_found, _context)
+       when result in [:diagnostic_result, :runtime_logs_result],
+       do: {:ok, %{"status" => "not_found"}}
+
+  defp encode_value(:diagnostic_result, {content, truncated}, _context) do
+    {:ok, %{"status" => "found", "content" => Base.encode64(content), "truncated" => truncated}}
+  end
+
+  defp encode_value(:runtime_logs_result, {incarnation_id, content, truncated}, _context) do
     {:ok,
      %{
        "status" => "found",
@@ -403,173 +243,33 @@ defmodule Biot.Protocol.Wire do
      }}
   end
 
-  defp encode_field(module, :challenge, value, _context)
-       when module in [Message.Heartbeat, Message.HeartbeatResponse],
-       do: {:ok, value}
+  defp decode_value({:text, module}, value, _context), do: module.parse(value)
+  defp decode_value({:json, module}, value, _context), do: module.parse(value)
 
-  defp decode_field(Message.SynchronizeItem, :biot_spec, value, context),
-    do: decode_biot_spec(value, context)
+  defp decode_value({:list, module}, values, _context),
+    do: ParsedList.parse(values, &module.parse/1)
 
-  defp decode_field(Message.Desired, :biot_spec, value, context),
-    do: decode_biot_spec(value, context)
+  defp decode_value({:choice, choices}, value, _context), do: Choice.parse(value, choices)
+  defp decode_value(:text, value, _context), do: nonempty_string(value)
+  defp decode_value(:positive_integer, value, _context), do: positive_integer(value)
+  defp decode_value(:non_negative_integer, value, _context), do: non_negative_integer(value)
+  defp decode_value(:protocol_versions, value, _context), do: protocol_versions(value)
 
-  defp decode_field(Message.Hello, :registration_id, value, _context),
-    do: RegistrationId.parse(value)
-
-  defp decode_field(Message.Hello, :platform, value, _context), do: Platform.parse(value)
-
-  defp decode_field(Message.Hello, :supported_protocol_versions, value, _context),
-    do: protocol_versions(value)
-
-  defp decode_field(Message.Connected, :connection_id, value, _context),
-    do: ConnectionId.parse(value)
-
-  defp decode_field(Message.Connected, :selected_protocol_version, value, _context),
-    do: positive_integer(value)
-
-  defp decode_field(Message.Reject, :reason, value, _context) do
-    reject_reason(value)
+  defp decode_value(:biot_spec, value, context) do
+    with :ok <- check_biot_spec_size(value, context), do: BiotSpec.parse(value)
   end
 
-  defp decode_field(Message.SynchronizeBegin, :connection_id, value, _context),
-    do: ConnectionId.parse(value)
-
-  defp decode_field(Message.SynchronizeBegin, :count, value, _context),
-    do: non_negative_integer(value)
-
-  defp decode_field(Message.SynchronizeEnd, :connection_id, value, _context),
-    do: ConnectionId.parse(value)
-
-  defp decode_field(Message.Diagnostic, :request_id, value, _context),
-    do: nonempty_string(value)
-
-  defp decode_field(Message.Diagnostic, :diagnostic_id, value, _context),
-    do: PrivateDiagnosticId.parse(value)
-
-  defp decode_field(Message.Diagnostic, field, value, _context)
-       when field in [:max_bytes, :timeout_ms],
-       do: positive_integer(value)
-
-  defp decode_field(Message.RuntimeLogs, :request_id, value, _context),
-    do: nonempty_string(value)
-
-  defp decode_field(Message.RuntimeLogs, :biot_id, value, _context), do: BiotId.parse(value)
-
-  defp decode_field(Message.RuntimeLogs, field, value, _context)
-       when field in [:max_bytes, :timeout_ms],
-       do: positive_integer(value)
-
-  defp decode_field(module, :request_id, value, _context)
-       when module in @secret_messages or module in @secret_result_messages,
-       do: nonempty_string(value)
-
-  defp decode_field(module, :biot_id, value, _context)
-       when module in @secret_messages,
-       do: BiotId.parse(value)
-
-  defp decode_field(module, :timeout_ms, value, _context)
-       when module in @secret_messages,
-       do: positive_integer(value)
-
-  defp decode_field(module, :name, value, _context)
-       when module in [Message.DeliverSecret, Message.RemoveSecret],
-       do: SecretName.parse(value)
-
-  defp decode_field(module, :source, value, _context)
-       when module in [Message.DeliverFetchCredential, Message.RemoveFetchCredential],
-       do: RepositorySource.parse(value)
-
-  defp decode_field(Message.DeliverSecret, :value, value, context) do
+  defp decode_value(:secret_value, value, context) do
     with {:ok, decoded} <- decode_base64(value), do: SecretValue.parse(decoded, context)
   end
 
-  defp decode_field(Message.DeliverFetchCredential, :value, value, context) do
+  defp decode_value(:authorization_value, value, context) do
     with {:ok, decoded} <- decode_base64(value), do: AuthorizationValue.parse(decoded, context)
   end
 
-  defp decode_field(Message.SecretListResult, :result, value, _context),
-    do: SecretOutcome.parse_listing(value)
-
-  defp decode_field(module, :result, value, _context)
-       when module in [Message.SecretResult, Message.FetchCredentialResult],
-       do: SecretOutcome.parse(value)
-
-  defp decode_field(Message.Synchronized, :connection_id, value, _context),
-    do: ConnectionId.parse(value)
-
-  defp decode_field(Message.Attach, :registration_id, value, _context),
-    do: RegistrationId.parse(value)
-
-  defp decode_field(Message.Attach, :connection_id, value, _context),
-    do: ConnectionId.parse(value)
-
-  defp decode_field(Message.Attach, :stream_id, value, _context),
-    do: StreamId.parse(value)
-
-  defp decode_field(Message.OpenStream, :connection_id, value, _context),
-    do: ConnectionId.parse(value)
-
-  defp decode_field(Message.OpenStream, :access_revision, value, _context),
-    do: positive_integer(value)
-
-  defp decode_field(Message.OpenStream, :stream_id, value, _context),
-    do: StreamId.parse(value)
-
-  defp decode_field(Message.OpenStream, :biot_id, value, _context),
-    do: BiotId.parse(value)
-
-  defp decode_field(Message.OpenStream, :target, value, _context),
-    do: StreamTarget.parse(value)
-
-  defp decode_field(Message.StreamFailed, :stream_id, value, _context),
-    do: StreamId.parse(value)
-
-  defp decode_field(Message.StreamFailed, :reason, value, _context),
-    do: StreamFailure.parse(value)
-
-  defp decode_field(Message.Observation, :biot_id, value, _context), do: BiotId.parse(value)
-
-  defp decode_field(Message.Observation, :execution_report, value, _context),
-    do: ExecutionReport.parse(value)
-
-  defp decode_field(Message.AccessApplied, :biot_id, value, _context),
-    do: BiotId.parse(value)
-
-  defp decode_field(Message.AccessApplied, :access_revision, value, _context),
-    do: positive_integer(value)
-
-  defp decode_field(Message.Resolution, :environment_id, value, _context),
-    do: EnvironmentId.parse(value)
-
-  defp decode_field(Message.Resolution, :manifest, value, _context), do: Manifest.parse(value)
-
-  defp decode_field(Message.NodeObservation, :orphaned_allocations, values, _context),
-    do: ParsedList.parse(values, &OrphanedAllocation.parse/1)
-
-  defp decode_field(Message.DiagnosticResult, :request_id, value, _context),
-    do: nonempty_string(value)
-
-  defp decode_field(Message.DiagnosticResult, :result, value, _context),
-    do: diagnostic_result(value)
-
-  defp decode_field(Message.RuntimeLogsResult, :request_id, value, _context),
-    do: nonempty_string(value)
-
-  defp decode_field(Message.RuntimeLogsResult, :result, value, _context),
-    do: runtime_logs_result(value)
-
-  defp decode_field(module, :challenge, value, _context)
-       when module in [Message.Heartbeat, Message.HeartbeatResponse],
-       do: nonempty_string(value)
-
-  defp reject_reason(value) when is_binary(value) do
-    case Enum.find(Message.Reject.reasons(), &(Atom.to_string(&1) == value)) do
-      nil -> {:error, :invalid_format}
-      reason -> {:ok, reason}
-    end
-  end
-
-  defp reject_reason(_value), do: {:error, :invalid_format}
+  defp decode_value(:secret_listing, value, _context), do: SecretOutcome.parse_listing(value)
+  defp decode_value(:diagnostic_result, value, _context), do: diagnostic_result(value)
+  defp decode_value(:runtime_logs_result, value, _context), do: runtime_logs_result(value)
 
   defp diagnostic_result(%{"status" => "not_found"} = value) when map_size(value) == 1,
     do: {:ok, :not_found}
@@ -620,10 +320,8 @@ defmodule Biot.Protocol.Wire do
   defp non_negative_integer(value) when is_integer(value) and value >= 0, do: {:ok, value}
   defp non_negative_integer(_value), do: {:error, :invalid_format}
 
-  defp valid_positive_integer?(value), do: is_integer(value) and value > 0
-
-  defp protocol_versions(versions) when is_list(versions) and versions != [] do
-    if Enum.all?(versions, &valid_positive_integer?/1),
+  defp protocol_versions([_first | _rest] = versions) do
+    if Enum.all?(versions, &(is_integer(&1) and &1 > 0)),
       do: {:ok, versions},
       else: {:error, :invalid_format}
   end
@@ -633,16 +331,6 @@ defmodule Biot.Protocol.Wire do
   defp nonempty_string(value) when is_binary(value) and value != "", do: {:ok, value}
   defp nonempty_string(_value), do: {:error, :invalid_format}
 
-  defp encode_biot_spec(spec, context) do
-    encoded = BiotSpec.encode(spec)
-
-    with :ok <- check_biot_spec_size(encoded, context), do: {:ok, encoded}
-  end
-
-  defp decode_biot_spec(value, context) do
-    with :ok <- check_biot_spec_size(value, context), do: BiotSpec.parse(value)
-  end
-
   defp check_biot_spec_size(_value, :handshake), do: :ok
 
   defp check_biot_spec_size(value, version) do
@@ -651,35 +339,26 @@ defmodule Biot.Protocol.Wire do
       else: {:error, :biot_spec_too_large}
   end
 
-  defp biot_spec_envelope_bytes(version) do
-    envelope_bytes(@spec_carrying_messages, version)
-  end
-
-  defp secret_envelope_bytes(version) do
-    envelope_bytes(@value_carrying_messages, version)
-  end
-
   # Base64 is how a delivered value crosses JSON, so the frame has to fit the encoded form.
   defp encoded_secret_value_bytes(version) do
     version |> Limits.max_secret_value_bytes() |> Kernel.+(2) |> div(3) |> Kernel.*(4)
   end
 
-  defp envelope_bytes(modules, version) do
-    modules
-    |> Enum.map(&envelope_bytes_for(&1, version))
+  # What a message costs around its one large field, measured by encoding the message with every
+  # field null, for every message of the version with a field of one of `codecs`. A renamed or
+  # added field changes this number without anyone remembering to.
+  defp envelope_bytes(codecs, version) do
+    @modules
+    |> Map.fetch!(version)
+    |> Enum.filter(fn module -> Enum.any?(module.fields(), &(elem(&1, 1) in codecs)) end)
+    |> Enum.map(&null_message_bytes/1)
     |> Enum.max()
   end
 
-  # What the message costs around its one large field, measured by encoding the message with every
-  # field null, so a renamed or added field changes this number without anyone remembering to.
-  defp envelope_bytes_for(module, version) do
-    message = module.__struct__()
-    {:ok, ^module} = message_module(message, version)
-
+  defp null_message_bytes(module) do
     payload =
-      module
-      |> struct_fields()
-      |> Map.new(&{Atom.to_string(&1), nil})
+      module.fields()
+      |> Map.new(&{Atom.to_string(elem(&1, 0)), nil})
       |> Map.put("type", module.type())
 
     encoded_bytes(payload) - encoded_bytes(nil)

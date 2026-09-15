@@ -4,7 +4,6 @@ defmodule Biot.Server.ExpirySweepTest do
   alias Biot.Protocol.{CredentialId, SameOriginPath}
   alias Biot.Server.Credentials
   alias Biot.Server.ExpirySweep
-  alias Biot.Server.Id
   alias Biot.Server.PreviewHandoff
   alias Biot.Server.PreviewHandoff.Finished
   alias Biot.Server.Schema.{Credential, Publication, Session}
@@ -64,7 +63,7 @@ defmodule Biot.Server.ExpirySweepTest do
 
     credential =
       Repo.insert!(%Credential{
-        id: Id.generate(CredentialId),
+        id: CredentialId.generate(),
         principal_id: principal.id,
         label: "sweep",
         secret_digest: digest,

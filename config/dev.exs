@@ -1,5 +1,9 @@
 import Config
 
+config :biot_server,
+  node_registrations_file: System.get_env("BIOT_NODE_REGISTRATIONS"),
+  disabled_principals_file: System.get_env("BIOT_DISABLED_PRINCIPALS")
+
 config :biot_server, Biot.Server.Repo,
   database: Path.expand("../biot_dev.sqlite3", __DIR__),
   pool_size: 1

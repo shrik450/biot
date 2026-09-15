@@ -27,8 +27,8 @@ defmodule Biot.Node.Host do
   """
   @type result :: :ok | {:waiting_for, RepositorySource.t()} | {:error, Outcome.t()}
 
-  @spec context(BiotId.t()) :: {:ok, Context.t()} | {:error, term()}
-  def context(%BiotId{} = biot_id), do: Context.from_application(biot_id)
+  @spec context(BiotId.t()) :: {:ok, Context.t()} | {:error, :not_loaded}
+  def context(%BiotId{} = biot_id), do: Context.current(biot_id)
 
   @spec inspect_state(BiotId.t(), Context.t()) :: Inspection.t()
   def inspect_state(%BiotId{} = biot_id, %Context{biot_id: biot_id, config: config}) do

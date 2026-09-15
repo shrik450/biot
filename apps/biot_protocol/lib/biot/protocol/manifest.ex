@@ -4,28 +4,27 @@ defmodule Biot.Protocol.Manifest do
   alias Biot.Protocol.Digest
   alias Biot.Protocol.ParsedList
   alias Biot.Protocol.PinnedSource
-  alias Biot.Protocol.ProjectSnapshot
+  alias Biot.Protocol.Platform
   alias Biot.Protocol.StrictMap
 
-  @fields ["base_nixpkgs", "layers", "project_snapshot", "digest"]
-  @project_snapshot_fields ["snapshot_id", "digest"]
+  @fields ["platform", "base_nixpkgs", "layers", "digest"]
 
-  @enforce_keys [:base_nixpkgs, :layers, :project_snapshot, :digest]
-  defstruct [:base_nixpkgs, :layers, :project_snapshot, :digest]
+  @enforce_keys [:platform, :base_nixpkgs, :layers, :digest]
+  defstruct [:platform, :base_nixpkgs, :layers, :digest]
 
   @type t :: %__MODULE__{
+          platform: Platform.t(),
           base_nixpkgs: PinnedSource.t(),
           layers: [PinnedSource.t()],
-          project_snapshot: ProjectSnapshot.t() | nil,
           digest: Digest.t()
         }
 
   @spec encode(t()) :: map()
   def encode(%__MODULE__{} = manifest) do
     %{
+      "platform" => Platform.to_string(manifest.platform),
       "base_nixpkgs" => PinnedSource.to_string(manifest.base_nixpkgs),
       "layers" => Enum.map(manifest.layers, &PinnedSource.to_string/1),
-      "project_snapshot" => encode_project_snapshot(manifest.project_snapshot),
       "digest" => Digest.to_string(manifest.digest)
     }
   end
@@ -33,18 +32,14 @@ defmodule Biot.Protocol.Manifest do
   @spec parse(term()) :: {:ok, t()} | {:error, atom()}
   def parse(value) when is_map(value) do
     with {:ok, value} <- StrictMap.fetch_exact(value, @fields),
-         {:ok, base_nixpkgs} <- Map.fetch(value, "base_nixpkgs"),
-         {:ok, base_nixpkgs} <- PinnedSource.parse(base_nixpkgs),
-         {:ok, layers} <- Map.fetch(value, "layers"),
-         {:ok, layers} <- ParsedList.parse(layers, &PinnedSource.parse/1),
-         {:ok, project_snapshot} <- Map.fetch(value, "project_snapshot"),
-         {:ok, project_snapshot} <- parse_project_snapshot(project_snapshot),
-         {:ok, digest} <- Map.fetch(value, "digest"),
-         {:ok, digest} <- Digest.parse(digest),
+         {:ok, platform} <- Platform.parse(value["platform"]),
+         {:ok, base_nixpkgs} <- PinnedSource.parse(value["base_nixpkgs"]),
+         {:ok, layers} <- ParsedList.parse(value["layers"], &PinnedSource.parse/1),
+         {:ok, digest} <- Digest.parse(value["digest"]),
          manifest = %__MODULE__{
+           platform: platform,
            base_nixpkgs: base_nixpkgs,
            layers: layers,
-           project_snapshot: project_snapshot,
            digest: digest
          },
          true <- verify(manifest) do
@@ -56,74 +51,29 @@ defmodule Biot.Protocol.Manifest do
 
   def parse(_value), do: {:error, :invalid_format}
 
-  @spec build(PinnedSource.t(), [PinnedSource.t()], ProjectSnapshot.t() | nil) :: t()
-  def build(base_nixpkgs, layers, project_snapshot) do
-    digest = Digest.compute(:manifest_v1, manifest_v1(base_nixpkgs, layers, project_snapshot))
-
+  @spec build(Platform.t(), PinnedSource.t(), [PinnedSource.t()]) :: t()
+  def build(platform, base_nixpkgs, layers) do
     %__MODULE__{
+      platform: platform,
       base_nixpkgs: base_nixpkgs,
       layers: layers,
-      project_snapshot: project_snapshot,
-      digest: digest
+      digest: compute_digest(platform, base_nixpkgs, layers)
     }
   end
 
   @spec verify(t()) :: boolean()
-  def verify(%__MODULE__{
-        base_nixpkgs: base_nixpkgs,
-        layers: layers,
-        project_snapshot: project_snapshot,
-        digest: digest
-      }) do
-    Digest.compute(:manifest_v1, manifest_v1(base_nixpkgs, layers, project_snapshot)) == digest
+  def verify(%__MODULE__{} = manifest) do
+    compute_digest(manifest.platform, manifest.base_nixpkgs, manifest.layers) == manifest.digest
   end
 
-  defp manifest_v1(base_nixpkgs, layers, project_snapshot) do
-    [
+  defp compute_digest(platform, base_nixpkgs, layers) do
+    Digest.compute(:manifest_v1, [
+      encode_field(Platform.to_string(platform)),
       PinnedSource.canonical_fields(base_nixpkgs),
-      encode_count(layers),
-      encode_layers(layers),
-      encode_snapshot(project_snapshot)
-    ]
+      <<length(layers)::unsigned-big-32>>,
+      Enum.map(layers, &PinnedSource.canonical_fields/1)
+    ])
   end
 
-  defp encode_layers(layers) do
-    Enum.map(layers, &PinnedSource.canonical_fields/1)
-  end
-
-  defp encode_snapshot(nil), do: <<0>>
-
-  defp encode_snapshot(%ProjectSnapshot{
-         snapshot_id: snapshot_id,
-         digest: %Digest{value: digest}
-       }) do
-    [<<1>>, encode_field(snapshot_id), encode_field(digest)]
-  end
-
-  defp parse_project_snapshot(nil), do: {:ok, nil}
-
-  defp parse_project_snapshot(%{"snapshot_id" => snapshot_id, "digest" => digest} = snapshot) do
-    with {:ok, _snapshot} <- StrictMap.fetch_exact(snapshot, @project_snapshot_fields),
-         true <- is_binary(snapshot_id) and snapshot_id != "",
-         {:ok, digest} <- Digest.parse(digest) do
-      {:ok, %ProjectSnapshot{snapshot_id: snapshot_id, digest: digest}}
-    end
-  end
-
-  defp parse_project_snapshot(_value), do: {:error, :invalid_format}
-
-  defp encode_project_snapshot(nil), do: nil
-
-  defp encode_project_snapshot(%ProjectSnapshot{} = snapshot) do
-    %{
-      "snapshot_id" => snapshot.snapshot_id,
-      "digest" => Digest.to_string(snapshot.digest)
-    }
-  end
-
-  defp encode_count(values), do: <<length(values)::unsigned-big-32>>
-
-  defp encode_field(value) when is_binary(value) do
-    [<<byte_size(value)::unsigned-big-32>>, value]
-  end
+  defp encode_field(value), do: [<<byte_size(value)::unsigned-big-32>>, value]
 end

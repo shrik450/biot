@@ -1,5 +1,5 @@
 defmodule Biot.Server.Nodes.Registration do
-  @moduledoc "A parsed operator request that binds a node to one registration and certificate identity."
+  @moduledoc "A parsed entry of the operator's enrollment file that binds a node to one registration and certificate identity."
 
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.RegistrationId
@@ -17,7 +17,7 @@ defmodule Biot.Server.Nodes.Registration do
           status: status()
         }
 
-  @doc "Parses a map whose peer identity is the lowercase SHA-256 fingerprint of the certificate public key."
+  @doc "Parses one decoded JSON object whose peer identity is the lowercase SHA-256 fingerprint of the certificate public key."
   @spec parse(term()) :: {:ok, t()} | {:error, {atom(), atom()}}
   def parse(value) when is_map(value) do
     with {:ok, node_id} <- fetch(value, :node_id),
@@ -45,14 +45,11 @@ defmodule Biot.Server.Nodes.Registration do
   def parse(_value), do: {:error, {:registration, :invalid_format}}
 
   defp fetch(map, key) do
-    case Map.fetch(map, key) do
+    case Map.fetch(map, Atom.to_string(key)) do
       {:ok, value} -> {:ok, value}
-      :error -> map |> Map.fetch(Atom.to_string(key)) |> missing(key)
+      :error -> {:error, {key, :missing}}
     end
   end
-
-  defp missing(:error, key), do: {:error, {key, :missing}}
-  defp missing({:ok, value}, _key), do: {:ok, value}
 
   defp parse_value(module, field, value) do
     case module.parse(value) do
@@ -73,9 +70,6 @@ defmodule Biot.Server.Nodes.Registration do
 
   defp parse_max_biots(value) when is_integer(value) and value > 0, do: {:ok, value}
   defp parse_max_biots(_value), do: {:error, {:max_biots, :not_positive}}
-
-  defp parse_status(status) when status in [:enabled, :disabled, :retired, :abandoned],
-    do: {:ok, status}
 
   defp parse_status("enabled"), do: {:ok, :enabled}
   defp parse_status("disabled"), do: {:ok, :disabled}

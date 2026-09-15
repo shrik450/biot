@@ -8,11 +8,10 @@ defmodule Biot.Node.Host.ContainerInspection do
   @type container :: Biot.Node.NodeState.container()
 
   @spec parse(term()) :: {:ok, container()} | {:error, :invalid_format}
-  def parse(%{"Config" => %{"Labels" => labels}, "State" => state})
+  def parse(%{"Id" => id, "Config" => %{"Labels" => labels}, "State" => state})
       when is_map(labels) and is_map(state) do
     with {:ok, biot_id} <- Names.owner(labels),
-         {:ok, incarnation_id} <-
-           parse_label(labels, Names.incarnation_label(), IncarnationId),
+         {:ok, incarnation_id} <- IncarnationId.parse(id),
          {:ok, environment_id} <-
            parse_label(labels, Names.environment_label(), EnvironmentId),
          {:ok, container_state} <- parse_state(state) do

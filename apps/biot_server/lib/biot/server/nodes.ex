@@ -16,7 +16,7 @@ defmodule Biot.Server.Nodes do
   alias Biot.Server.Nodes.Plan
   alias Biot.Server.Nodes.RegistrationLoader
   alias Biot.Server.Repo
-  alias Biot.Server.Schema.{Biot, Node, Observation, Operation}
+  alias Biot.Server.Schema.{Biot, Node, NodeObservation, Observation, Operation}
 
   @type rejection ::
           Plan.rejection()
@@ -76,7 +76,7 @@ defmodule Biot.Server.Nodes do
   defp plan(repo, registrations) do
     existing_nodes = repo.all(Node)
 
-    nodes_with_allocations =
+    assigned_allocations =
       from(biot in Biot,
         left_join: observation in Observation,
         on: observation.biot_id == biot.id,
@@ -85,9 +85,16 @@ defmodule Biot.Server.Nodes do
         select: biot.node_id
       )
       |> repo.all()
-      |> MapSet.new()
 
-    Plan.plan(existing_nodes, registrations, nodes_with_allocations)
+    # An orphan is an allocation the server has no Biot for, so only the node's own report knows
+    # it exists. Retiring past one would leave it on a host that can never report again.
+    orphans =
+      NodeObservation
+      |> repo.all()
+      |> Enum.filter(&(&1.orphaned_allocations != []))
+      |> Enum.map(& &1.node_id)
+
+    Plan.plan(existing_nodes, registrations, MapSet.new(assigned_allocations ++ orphans))
   end
 
   defp apply_actions(actions) do

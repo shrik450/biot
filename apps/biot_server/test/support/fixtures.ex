@@ -2,6 +2,8 @@ defmodule Biot.Server.TestFixtures do
   @moduledoc false
 
   alias Biot.Protocol.BiotId
+  alias Biot.Protocol.BiotName
+  alias Biot.Protocol.Certificates
   alias Biot.Protocol.ConnectionId
   alias Biot.Protocol.Digest
   alias Biot.Protocol.EnvironmentId
@@ -15,6 +17,7 @@ defmodule Biot.Server.TestFixtures do
   alias Biot.Protocol.OperationId
   alias Biot.Protocol.OrphanedAllocation
   alias Biot.Protocol.PinnedSource
+  alias Biot.Protocol.Platform
   alias Biot.Protocol.Port
   alias Biot.Protocol.PrincipalId
   alias Biot.Protocol.RegistrationId
@@ -23,6 +26,7 @@ defmodule Biot.Server.TestFixtures do
   alias Biot.Server.Actor
   alias Biot.Server.Biots.Create
   alias Biot.Server.Nodes.Registration
+  alias Biot.Server.Principals.DisabledIdentities.Identity
   alias Biot.Server.Repo
   alias Biot.Server.Schema.AccessObservation
   alias Biot.Server.Schema.Biot, as: BiotSchema
@@ -80,7 +84,7 @@ defmodule Biot.Server.TestFixtures do
 
     biot = %BiotSchema{
       id: biot_id,
-      name: Keyword.get(opts, :name, "biot-#{number}"),
+      name: biot_name(Keyword.get(opts, :name, "biot-#{number}")),
       owner_id: owner.id,
       node_id: node.id,
       repository: repository(),
@@ -150,7 +154,7 @@ defmodule Biot.Server.TestFixtures do
 
   def create_command(opts \\ []) do
     %Create{
-      name: Keyword.get(opts, :name, "created-biot"),
+      name: biot_name(Keyword.get(opts, :name, "created-biot")),
       repository: Keyword.get(opts, :repository, repository()),
       environment: Keyword.get(opts, :environment, selection()),
       node_id: Keyword.get(opts, :node_id, :default),
@@ -170,16 +174,21 @@ defmodule Biot.Server.TestFixtures do
   end
 
   def running_container(number \\ 1) do
-    {:present, id(IncarnationId, number + 6_000), :running}
+    {:present, incarnation_id(number + 6_000), :running}
   end
 
   def connection_id(number), do: id(ConnectionId, number + 5_000)
 
+  @doc "A Podman native container ID, which is what a node reports as an incarnation."
+  def incarnation_id(number) do
+    {:ok, id} = IncarnationId.parse(String.pad_leading(Integer.to_string(number), 64, "0"))
+    id
+  end
+
   def selection(opts \\ []) do
     %EnvironmentSelection{
       base_nixpkgs: SourceSelector.nixpkgs(),
-      layers: Keyword.get(opts, :layers, []),
-      project_context: Keyword.get(opts, :project_context)
+      layers: Keyword.get(opts, :layers, [])
     }
   end
 
@@ -187,7 +196,8 @@ defmodule Biot.Server.TestFixtures do
     revision = String.duplicate(Keyword.get(opts, :revision_digit, "a"), 40)
     nar_hash = "sha256-" <> Base.encode64(:binary.copy(<<1>>, 32))
     {:ok, pinned} = PinnedSource.pin(SourceSelector.nixpkgs(), revision, nar_hash)
-    Manifest.build(pinned, [], nil)
+    {:ok, platform} = Platform.parse("x86_64-linux")
+    Manifest.build(platform, pinned, [])
   end
 
   def repository(url \\ "https://github.com/example/project.git") do
@@ -203,6 +213,63 @@ defmodule Biot.Server.TestFixtures do
       message: "container did not start",
       diagnostic_ref: nil
     }
+  end
+
+  @doc "Writes `registrations` as the operator's enrollment file and points the server at it."
+  def put_registrations(registrations) when is_list(registrations) do
+    put_operator_file(:node_registrations_file, Enum.map(registrations, &registration_json/1))
+  end
+
+  def put_registrations(document), do: put_operator_file(:node_registrations_file, document)
+
+  @doc "Writes `contents` as the disabled principals file and points the server at it."
+  def put_disabled_principals(identities) when is_list(identities) do
+    put_operator_file(:disabled_principals_file, Enum.map(identities, &identity_json/1))
+  end
+
+  def put_disabled_principals(document),
+    do: put_operator_file(:disabled_principals_file, document)
+
+  defp identity_json(%Identity{issuer: issuer, subject: subject}),
+    do: %{"issuer" => issuer, "subject" => subject}
+
+  defp identity_json(entry), do: entry
+
+  defp put_operator_file(key, contents) do
+    path = Path.join(System.tmp_dir!(), "biot-#{key}-#{System.unique_integer([:positive])}.json")
+    File.write!(path, Jason.encode!(contents))
+    Application.put_env(:biot_server, key, path)
+  end
+
+  defp registration_json(%Registration{} = registration) do
+    %{
+      "node_id" => to_string(registration.node_id),
+      "registration_id" => to_string(registration.registration_id),
+      "peer_identity" => registration.peer_identity,
+      "max_biots" => registration.max_biots,
+      "status" => Atom.to_string(registration.status)
+    }
+  end
+
+  defp registration_json(entry), do: entry
+
+  @doc "An authority, a server certificate, and `node_count` node certificates in `directory`."
+  def certificates(directory, node_count) do
+    {:ok, authority} = Certificates.create_authority(directory)
+    {:ok, server} = Certificates.issue(directory, :server)
+
+    nodes =
+      for number <- 1..node_count//1 do
+        {:ok, node} = Certificates.issue(directory, {:node, Integer.to_string(number)})
+        node
+      end
+
+    {:ok, %{ca: authority, server: server, nodes: nodes}}
+  end
+
+  def biot_name(value) do
+    {:ok, name} = BiotName.parse(value)
+    name
   end
 
   def port(number) do

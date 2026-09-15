@@ -8,6 +8,8 @@ import (
 	"io"
 )
 
+// The node writes request lines up to Biot.Protocol.Limits.max_agent_line_bytes/0, which must be
+// the same size, trailing newline included.
 const LineLimit = 16 * 1024
 
 var ErrInvalidRequest = errors.New("invalid request")

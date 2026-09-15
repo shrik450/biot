@@ -67,7 +67,8 @@ defmodule Biot.Server.Nodes.Plan do
   end
 
   def message({:retirement_blocked, node_id}) do
-    "node #{NodeId.to_string(node_id)} cannot retire while assigned biot allocations are not known absent"
+    "node #{NodeId.to_string(node_id)} cannot retire while an assigned biot's allocation is " <>
+      "not known absent or its latest report lists orphaned allocations"
   end
 
   defp validate_configuration(registrations) do

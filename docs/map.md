@@ -45,16 +45,25 @@ This app owns shared parsed values and wire codecs.
 - `Message.*` defines the protocol message structs. Version 1 includes the five secret and fetch-credential requests—`DeliverSecret`, `RemoveSecret`, `ListSecrets`, `DeliverFetchCredential`, and `RemoveFetchCredential`—and the three results `SecretResult`, `SecretListResult`, and `FetchCredentialResult`, alongside diagnostics and runtime logs. The stream messages are `Attach` and `Attached` in the handshake phase and `OpenStream` and `StreamFailed` in the main phase, and `Reject` adds `:unknown_stream`.
 - `SecretName`, `SecretValue`, and `AuthorizationValue` are parsed boundary values. Secret and authorization values redact themselves and expose bytes only through `reveal/1`; a bare value exists only in `parse/1` and the single file write that publishes it.
 - `SecretOutcome` owns one union and codec for `:ok`, `:no_allocation`, and `{:failure, :write_failed | :unavailable}`. The listing result uses the same codec with `{:ok, [SecretName]}`.
-- `Wire` lists all eight secret messages in the version 1 table and keeps strict field and value decoding. It enforces the 256 KiB version 1 `BiotSpec` bound and the `Limits.max_secret_value_bytes/1` bound. It lists `OpenStream` and `StreamFailed` in the main phase and `Attach` and `Attached` in the handshake phase. `Wire.min_frame_bytes/1` includes the largest base64-encoded secret delivery envelope and the `OpenStream` envelope near the agent line bound, and `check_frame_limit!/1` is checked at boot by both applications.
+- Each `Message.*` module declares its fields and codecs through `Biot.Protocol.Message`. `Wire`
+  iterates those declarations for strict encoding and decoding, phase checks, message bounds, and
+  the version 1 table. It enforces the 256 KiB `BiotSpec` bound and the
+  `Limits.max_secret_value_bytes/1` bound. `Wire.min_frame_bytes/1` includes the largest
+  base64-encoded secret delivery envelope and the `OpenStream` envelope near the agent line bound,
+  and `check_frame_limit!/1` is checked at boot by both applications.
 - `Frame` encodes and incrementally decodes length-prefixed frames. `take/2` takes exactly one frame and leaves every byte after it untouched.
 - `Version` selects the highest protocol version shared by both peers.
 - `Liveness` matches heartbeat responses.
 - `Platform` represents supported Linux host platforms.
 - `PeerIdentity` computes certificate public-key fingerprints.
-- `Certificates` and `mix biot.gen.certs` write deployment certificates and keys.
-  The task writes CA, server, and node certificates, keys with mode 0600, and `fingerprints.json`.
+- `Certificates` and `mix biot.certs` manage deployment certificates. `authority` creates and
+  preserves the CA certificate and mode-0600 private key; `server` and `node` issue or renew leaves
+  from that authority without changing their keys or fingerprints.
 - `OrphanedAllocation` represents node allocations absent from server intent.
-- `Limits` owns the versioned spec bound and the shared component limits. Version 1 allows a 256 KiB spec, a 64 KiB secret or authorization value, a 2,048-byte repository URL, a 256-byte source ref, a 1,024-byte relative directory, and 16 layers. `Limits.max_agent_line_bytes/0` is the agent's request-line bound, including the trailing newline.
+- `Limits` owns the versioned spec bound and shared component limits. Version 1 allows a 256 KiB
+  spec, a 64 KiB secret or authorization value, a 2,048-byte repository URL, a 256-byte source ref,
+  and 16 layers. `Limits.max_agent_line_bytes/0` is the agent's request-line bound, including the
+  trailing newline.
 - `StreamId` is an opaque canonical UUID that identifies one stream a node holds.
 - `StreamTarget` is the one target encoder. It encodes either a port or a shell request, and its encoded form is the agent's own request line.
 - `ShellRequest` parses one shell's terminal, initial size, and optional command. A nil command runs the bundle's shell entry as a login shell; a list runs through that same entry. It refuses an empty term, an out-of-range or non-integer size, an empty or non-list command, a NUL byte, and text that is not valid UTF-8.
@@ -64,14 +73,17 @@ This app owns shared parsed values and wire codecs.
 
 ### Value modules
 
-- **Identifiers:** `CanonicalUuid` parses canonical UUID strings.
-- **Identifiers:** `CredentialId` identifies one bearer credential, and `SshKeyId` identifies one registered SSH key. Both are canonical UUIDs.
+- **Identifiers:** `CanonicalUuid` parses canonical UUID strings. Eleven opaque UUID identity
+  modules use `UuidValue`, which supplies their common struct, parser, generator, and string form.
+- **Names:** `BiotName` is a lowercase DNS label and rejects UUID-shaped names, so clients can
+  distinguish a name from a `BiotId` without a lookup.
 - **Sources:** `RepositorySource` represents a credential-free Git repository URL and derives its normalized `origin/1` for credential attribution.
 - **Sources:** `SourceSelector` represents an unpinned source and its ref.
 - **Sources:** `PinnedSource` represents a source with a commit revision and Nix NAR hash.
-- **Environment:** `EnvironmentSelection` represents the sources and project directory for an environment.
-- **Environment:** `Manifest` represents resolved sources, a project snapshot, and a content digest.
-- **Environment:** `ProjectSnapshot` represents a project identifier and its digest.
+- **Environment:** `EnvironmentSelection` represents the base package set and ordered layer
+  sources for an environment.
+- **Environment:** `Manifest` freezes the platform and resolved sources and carries their content
+  digest.
 - **Environment:** `Digest` represents a raw SHA-256 digest with a named encoding. `Digest.compute/2` serializes with a named encoding; `Digest.sha256/1` returns the plain SHA-256 of bytes.
 - **Execution:** `Desired` represents execution intent and provides `transition/2`.
 - **Execution:** `BiotSpec` contains execution and access intent for an assigned node.
@@ -82,14 +94,17 @@ This app owns shared parsed values and wire codecs.
   `invalid_configuration`, and `ownership_mismatch`.
 - **Execution:** `ContainerState` represents the observed state of a container.
 - **Identifiers:** `ConnectionId` identifies an authenticated node connection.
-- **Identifiers:** `IncarnationId` identifies a container incarnation.
+- **Identifiers:** `IncarnationId` is Podman's full 64-hex native container ID. The node parses it
+  from inspection and never generates it.
 - **Other parsed values:** `Hostname` represents a lowercase DNS label.
 - **Other parsed values:** `Port` represents a valid user-facing TCP port.
-- **Other parsed values:** `RelativeDirectory` represents a safe relative checkout directory.
 - **Other parsed values:** `SshPublicKey` represents one OpenSSH public key line. It splits the line on any whitespace and parses the key type and blob through OTP `ssh_file`, so a comment, including one with spaces, is accepted and dropped from the stored canonical line. It computes the `SHA256:` fingerprint OpenSSH prints.
 - **Other parsed values:** `SameOriginPath` represents an absolute path with an optional query. It rejects a scheme, a host, a fragment, whitespace, a backslash, and a leading double slash.
 
-`RepositorySource`, `SourceSelector`, `RelativeDirectory`, and `EnvironmentSelection` enforce the shared limits. They return `:repository_url_too_long`, `:source_ref_too_long`, `:directory_too_long`, and `:too_many_layers` for those bound violations. `EnvironmentSelection` passes through component parser reasons.
+`RepositorySource`, `SourceSelector`, and `EnvironmentSelection` enforce the shared limits. They
+return `:repository_url_too_long`, `:source_ref_too_long`, and `:too_many_layers` for those bound
+violations. `Choice.parse/2` owns parsing for closed atom sets, and `StrictMap.fetch_exact/2` owns
+strict map shapes.
 
 Parsed values share `parse/1`, which returns `{:ok, t} | {:error, atom}`.
 Their `to_string/1` output round-trips through `parse/1`.
@@ -115,7 +130,8 @@ The other custom types wrap protocol `encode/1` and `parse/1` functions.
 last-seen email lookup.
 `Principals.require_enabled/2` is the one rule for a disabled principal, and every application boundary that accepts an `Actor` calls it.
 `Principals.reload/0` applies the operator's disabled identity set.
-`Principals.DisabledIdentities` loads and parses the operator file named by `BIOT_DISABLED_PRINCIPALS`.
+`OperatorFile` owns reading an optional operator-managed JSON list.
+`Principals.DisabledIdentities` and `Nodes.RegistrationLoader` parse their respective list entries.
 `Principals.Startup` runs `reload/0` before the control listener and fails boot with a readable message on invalid configuration.
 `Nodes.reload/0` is the one enrollment entry point.
 `Nodes.Startup` calls it at boot and fails boot with a readable message on rejection.
@@ -137,10 +153,12 @@ Peer identity changes are allowed.
 Its six functions are `terminal?/1`, `serves_access?/1`, `written_off?/1`, `accepts_connection/1`, `accepts_new_biots/1`, and `accepts_lifecycle_change/1`.
 Every status appears in every function.
 A new status cannot compile until all six functions answer it.
-`Nodes.RegistrationLoader` reads the JSON file named by `BIOT_NODE_REGISTRATIONS`.
 `Actor` is the authenticated caller.
 `CommandError` is the model's error union.
 `CommandError` includes `destroyed` for lifecycle changes against a destroyed Biot.
+`DomainName` parses the control host and publication domain and enforces that no preview hostname
+can overlap the control host. `Login.Settings` parses the required HTTPS OIDC configuration once at
+release boot.
 
 ### Application modules
 
@@ -524,20 +542,14 @@ Those commands still work on a disabled node.
 
 ### Migrations
 
-Migrations live under `priv/repo/migrations`.
-`20260908000500` creates `Schema.AccessObservation`, which stores the latest
-access revision accepted for each Biot.
-Raw SQL is used only for `biots` and `view_grants`.
-SQLite needs their composite foreign keys inline. Step 18 adds the retry-state and server observation
-migrations for `waiting_for`.
-Step 19 adds `20260912000100_add_principal_status`, `20260912000200_create_sessions`,
-`20260912000300_create_preview_handoffs`, `20260912000400_create_credentials`, and
-`20260912000500_create_ssh_keys`. The status migration adds a non-null
-`principals.status` column defaulting to `enabled`. The four new tables are
-`sessions`, `preview_handoffs`, `credentials`, and `ssh_keys`. The `sessions`,
-`credentials`, and `ssh_keys` references to `principals` use `on_delete: :nothing`,
-because principals are never deleted. Preview sessions and handoffs cascade from
-their control session.
+Server migrations live under `priv/repo/migrations`. `Biot.Server.Migrator` runs them at boot before
+anything reads the database, so a release can start against a new SQLite file without a separate
+migration command. Raw SQL is used only where SQLite requires composite foreign keys inline.
+
+The schema includes principals and nodes, Biot intent and environments, access policy and applied
+access observations, operations and node observations, browser sessions and preview handoffs,
+bearer credentials, and SSH keys. Principals are never deleted, so sessions, credentials, and keys
+do not cascade from them. Preview sessions and handoffs do cascade from their control session.
 
 ### Tests
 
@@ -545,108 +557,24 @@ their control session.
 `test/support/fixtures.ex` builds rows.
 Integration tests hit the real SQLite test database.
 
-Focused server evidence includes:
-
-- `policy/enforcement_test.exs` proves current-connection checks and access
-  enforcement for missing, stale, and caught-up access observations.
-- `queries/publication_view_test.exs` proves role-based publication visibility,
-  HTTPS URL projection, port sorting, and empty-list handling.
-- `queries/access_view_test.exs` proves owner projection and deterministic shell
-  and view grant ordering, including empty lists.
-- `queries/biot_view_test.exs` proves role, exposure, current connection state,
-  node status, and access enforcement in the product view.
-- `queries/operation_view_test.exs` proves operation kinds and outcomes remain
-  unchanged in the projection, including failures.
-- `policy_records_test.exs` uses real SQLite transactions to prove policy
-  idempotence, authorization, revision and wake behavior, destroyed checks,
-  publication state, view-grant cleanup, and enforcement progress.
-- `authorization_test.exs` proves owner, policy-change, grant-read, role, and
-  view predicates.
-- `sessions_integration_test.exs` covers control start and lookup, disabled and
-  missing principals, expiry, preview hostname and parent checks, logout
-  cascading to previews and handoffs, and `Validity.control_session/3`.
-- `access_admission_integration_test.exs` covers admitted owners and their closure
-  keys, denied admission, admission races, the single `stale_access` retry within
-  one deadline, absolute expiry, control loss, and several admissions in turn in
-  one process.
-- `access_closure_integration_test.exs` covers owner closure after policy
-  withdrawal, destroy, principal disable, node disable, the access sweep, node
-  reconnection, and proof deletion.
-- `access_closure_commit_test.exs` proves that each close is sent only after its
-  transaction or delete commits.
-- `access_proof_check_integration_test.exs` covers `close_invalid_proof_owners/0`,
-  distinct proof keys, the periodic `AuthSweep`, and a nil interval.
-- `authentication/validity_proof_keys_test.exs` covers `Validity.proof_keys/1` and
-  `proof_key?/1`.
-- `stream_predicates_test.exs` covers `may_read?/3`, `may_view?/4`, and
-  `may_shell?/3`, and checks that the three agree.
-- `support/access_harness.ex` provides a fake node that plays the real control
-  protocol against the real listener, plus session owner processes driven by message.
-- `credentials_integration_test.exs` covers the control-proof requirement, label
-  and expiry bounds, digest-only storage, authenticate, coarse `last_used_at`,
-  list, revoke, and disabled owners.
-- `ssh_keys_integration_test.exs` covers OTP parsing, fingerprints, duplicate
-  rejection, add, list, remove, authenticate, and disabled owners.
-- `preview_handoff_integration_test.exs` covers the control-proof requirement,
-  view authority, single use, hostname and challenge binding, expiry, and revoked
-  authority.
-- `principals_reload_test.exs` covers proof deletion, ownership and grant
-  preservation, one revision bump per affected Biot, idempotent reload, no proof
-  restoration on re-enable, and the disabled-principal rule at every application
-  boundary.
-- `principals/disabled_identities_test.exs` covers file and inline loading,
-  malformed elements with their index, unknown keys, repeated identities, and
-  typed file errors.
-- `streams_integration_test.exs` covers `Biot.Server.Streams.open_until/5` over a real
-  listener, a real node, and the real Go agent.
-- `streams_pending_test.exs` covers `Pending` claim order, timeouts, late attach,
-  node and connection identity, control loss, and `Streams.stream/2` events.
-
-Node enrollment and abandonment evidence includes:
-
-- `test/nodes/status_test.exs` is new. It covers the complete status table.
-- `nodes/registration_test.exs` covers all four registration status values.
-- `nodes_test.exs`, `nodes/plan_test.exs`, `nodes/startup_test.exs`, and
-  `control_protocol_integration_test.exs` cover reload, abandonment, peer replacement,
-  and the reject reasons.
-- `control_protocol_test.exs` and `failure_test.exs` cover the new `Reject` and
-  `Failure` values.
-
-Lifecycle, access, query, publication, and redelivery evidence includes:
-
-- `authorization_test.exs` covers owner-only commands and the owner and collaborator roles.
-- `biots/create_test.exs` covers running and stopped creation, capacity, fingerprints, exposure, and retries.
-- `biots/creation_fingerprint_test.exs` covers the `:biot_creation_v2` fields and boundaries.
-- `biots/lifecycle_test.exs` covers lifecycle transitions, destroy cleanup, and access revisions.
-- `control_protocol_integration_test.exs` covers synchronization, interval sweeps, dropped wakes, reports, reconnects, heartbeats, and diagnostics.
-- `nodes_test.exs` covers status reloads, abandoned nodes, access revisions, failed operations, and connection closure.
-- `operations/completion_test.exs` covers completion for create and environment updates in each desired state.
-- `policy_records_test.exs` covers random hostnames, inactive publication rows, republish behavior, and grant cleanup.
-- `queries/biot_view_test.exs` covers roles, exposure markers, live connection state, and access enforcement.
-- `queries/publication_view_test.exs` covers role-based visibility and URL projection.
-- `access_readable_test.exs` property-tests the single owner, shell-grant, and view-grant read rule.
-- `biots/capacity_test.exs` covers room and counts, including destroyed Biots waiting for release.
-- `biots/create_command_test.exs` property-tests accepted initial states and the running default.
-- `biots/spec_test.exs` covers `BiotSpecs.build/1`, selected environments, and access revisions.
-- `control/synchronization_behind_test.exs` covers connection-specific execution and access acceptance, plus cleanup exclusion.
-- `control/synchronization_test.exs` covers the shared inclusion rule for desired state and observed data.
-- `publications/hostname_test.exs` property-tests 128-bit lowercase unpadded base32 allocation.
-- `queries/biots_test.exs` covers readable get and list results, roles, collaborator visibility, pagination, and operation selection.
-- `queries/deployment_test.exs` covers authenticated deployment settings and runtime reads.
-- `queries/node_view_test.exs` covers node facts, capacity, connection state, status, and orphan reports.
-- `queries/nodes_test.exs` covers node listing, capacity counts, live connections, and orphan reports.
+The suite exercises lifecycle, enrollment, policy, projections, authentication, stream admission,
+control synchronization, and failure handling through real SQLite transactions and real OTP
+processes. Pure planner, authorization, projection, and parser tests use properties and exhaustive
+tables. Integration harnesses speak the actual TLS control protocol and, where stream behavior is
+under test, run the real Go agent. No tests mock internal module calls.
 
 ## `apps/biot_web`
 
-Step 22 adds the HTTP API and browser access boundaries. `BiotWeb.Layouts` and
-the `/live` socket remain the scaffold for the later UI. The preview proxy and
-the preview callback consumer are outside this step.
+The web app owns the HTTP API, browser login, and browser access boundaries. `BiotWeb.Layouts` and
+the `/live` socket remain the scaffold for the UI. The preview proxy and preview callback consumer
+are not built yet.
 
 ### Application and request boundaries
 
 - `BiotWeb.Application` starts `BiotWeb.PubSub` and `BiotWeb.Endpoint`.
 - `BiotWeb.Endpoint` serves static assets and the LiveView socket, parses requests, applies the
   Phoenix session, and installs `BiotWeb.Router`. It resolves the client address before telemetry.
+  Both LiveView transports accept only the endpoint's exact origin.
 - `BiotWeb.Router` has a browser pipeline with sessions, CSRF, control-origin checks, and
   `ControlSession`. Its API pipeline accepts JSON and requires a bearer credential. The API fallback
   handles unknown paths with the same error body.
@@ -725,7 +653,7 @@ fallbacks. Credential creation has no API route; it is reserved for the control 
 - `BiotWeb.SessionController` logs out the current control session and redirects to `/`; the server
   closes its previews and handoffs while other logins and credentials remain valid.
 
-### Step 22 web tests
+### Tests
 
 `BiotWeb.ConnCase` owns the SQL sandbox and JSON request helpers. `TestFixtures`
 builds principals, nodes, Biots, and environments through server records.
@@ -733,22 +661,10 @@ builds principals, nodes, Biots, and environments through server records.
 It records state, nonce, and S256 challenge values, verifies client credentials and PKCE, signs
 RS256 ID tokens, and consumes authorization codes once.
 
-- `api_contract_test.exs` covers bearer parsing and HTTP response and error status tables.
-- `api_integration_test.exs` checks every model route, bearer-only authentication, fallback errors,
-  lifecycle and policy responses, JSON projections, and unavailable node-backed routes against real SQLite.
-- `boundary_robustness_test.exs` fuzzes bearer, callback, parameter, and client-address boundaries;
-  its three properties run 100 cases each and cover positive revisions, page limits, path/body
-  separation, trusted peers, mapped addresses, and the final forwarded entry.
-- `browser_auth_integration_test.exs` covers CSRF, same-origin rules, cookie attributes, dead
-  sessions, logout closure, and the separation between browser and bearer authentication.
-- `oidc_login_integration_test.exs` covers callback state, real provider discovery, PKCE, nonce,
-  principal creation and reuse, disabled principals, unavailable providers, sealed browser state,
-  and session rotation.
-- `preview_authorize_integration_test.exs` covers authorized and login-mediated handoffs, callback
-  host binding, single use, view denial, inactive hosts, and malformed parameters.
-
-The clean web suite passes 37 tests: three properties and 34 tests. `mix
-format --check-formatted` and `mix check` pass for the step 22 tree.
+The web suite exercises every API route against real SQLite, browser and bearer separation, CSRF
+and exact-origin rules, cookie scope, logout closure, OIDC discovery and PKCE against a real local
+provider, and preview handoffs. Property tests fuzz bearer, callback, parameter, and client-address
+boundaries.
 
 ## `apps/biot_node`
 
@@ -893,7 +809,9 @@ The effect modules own host resources:
   the private store, and deletes the resolution record last.
 - `Host.Container` starts and retires rootless Podman containers. `run_container` uses the bundle's
   physical `--rootfs`, `--read-only`, `/tmp` and `/run` tmpfs mounts, the five allocation mounts,
-  and a read-only `/nix/store` mount. `Host.Network` creates, inspects, and removes named private
+  and a read-only `/nix/store` mount. Its stable runtime name is `biot-<BiotId>`. Inspection resolves
+  that name to Podman's native container ID, and retirement removes that exact inspected ID so it
+  cannot remove a later incarnation. `Host.Network` creates, inspects, and removes named private
   networks.
 - `Host.Worker` owns the disposable build worker. `run/4` cancels any existing worker, runs one
   phase command, and cancels again on every exit; `cancel/2` is destructive and confirms absence;
@@ -915,8 +833,8 @@ The effect modules own host resources:
   nested sandbox; `SYS_ADMIN` lets that sandbox mount its namespace; `--rm` and log driver `none`
   keep the disposable worker from retaining a root or logs. The probe uses the same boundary with
   no allocation, no network, and a throwaway store.
-- `Host.SourceStaging` owns trusted fetch, copying `nix/` and `agent/` support, running
-  `nix/fetch.nix`, and reading the staged out-link. `pins.json` is the one output contract.
+- `Host.SourceStaging` owns trusted fetch, copying the release's `nix/` and `agent/` support,
+  running `nix/fetch.nix`, and reading the staged out-link. `pins.json` is the one output contract.
   `Host.StagedInputs` is its pure, strict value: build support, Nixpkgs, layers, store paths,
   hashes, and revisions. The staged out-link is the GC root for that complete input set.
 - `Host.PrivateStore` owns `host_path/3`, which maps a logical `/nix/store` object into the Biot's
@@ -947,7 +865,8 @@ Support modules provide the smaller boundaries:
 - `Host.Command` runs one executable through `setsid` with a timeout and bounded stdout and stderr.
   Its process-group handshake and `Host.Command.Reaper` ensure commands stop when their caller dies.
   `run/5` returns bounded output and truncation flags; `open/5` returns a `Command.Stream` for a
-  long-running command. `Host.Podman` adds the configured Podman module and recognizes absent resources.
+  long-running command. `Host.Podman` adds the configured Podman module; `exists/3` distinguishes
+  present, absent, and failed checks from `podman <resource> exists` exit statuses.
 - `Host.ContainerEvents` reads Podman's `events` stream through `Command.open/5`, closes and
   reopens it after `container_events_retry_ms`, and uses `Names.owner/1` for ownership.
 - `Host.Secrets` publishes runtime secret files atomically under the allocation's `secrets` directory.
@@ -970,17 +889,17 @@ Support modules provide the smaller boundaries:
   networks with Podman's `--opt isolate=true` option. `Host.FileSystem` provides tri-state
   inspection, atomic writes, and tree removal.
 - `Host.Podman.grant/3` gives a tree to the mapped allocation user. `reclaim/2` uses `podman unshare`
-  to restore node ownership and write permission before removal. `Host.Config` parses and validates
-  operator settings, while `Host.Context` binds them to one Biot ID.
+  to restore node ownership and write permission before removal. `Host.Config.load/0` parses and
+  validates operator settings once at boot and keeps the result in `:persistent_term`; later effects
+  use `current/0` or the boot-order invariant behind `current!/0`. `Host.Context` binds those settings
+  to one Biot ID.
 - `Host.Setup` creates the node layout, the empty Git template, and the worker `nix.conf`. That
   configuration contains operator substituters and trusted keys, `sandbox = true`,
   `sandbox-fallback = false`, and `require-sigs = true`. Its startup sandbox probe rejects a host
   without nested isolation rather than allowing Nix to build unsandboxed.
 
-The step removes `Host.SourceResolver`, `nix/pin.nix`, node-wide environment storage, and the
-host's former `/nix/store` runtime mount. Environment storage and the runtime store now belong to
-the Biot's private allocation; the runtime still receives that private store read-only at
-`/nix/store`.
+Environment storage and the runtime store belong to the Biot's private allocation; the runtime
+receives that private store read-only at `/nix/store`.
 
 `Host.Command.Reaper` monitors the command caller. It ends the whole process
 group and removes the stderr file when the caller dies. Normal completion calls
@@ -998,7 +917,9 @@ node-local domain API. The journal schemas are
 holds one retry row per Biot. `Journal.Ecto.ParsedValue` stores canonical parsed
 values as strings. `Journal.Ecto.Manifest`, `Journal.Ecto.BiotSpec`, `Journal.Ecto.Attempts`,
 `Journal.Ecto.Failure`, and `Journal.Ecto.ExecutionReport` store validated JSON values.
-`Journal.Migrator` runs `priv/repo/migrations/20260909000100_create_node_journal.exs`.
+`Journal.Migrator` runs the compiled migrations under `Biot.Node.Journal.Migrations`. Compiled
+modules load once even though tests create many journals in one VM, avoiding repeated module
+redefinition from dynamically compiled migration files.
 
 Journal queries scope resolution and installation reads and writes by Biot ID,
 then check environment ownership before cross-resource changes. Its ownership
@@ -1043,9 +964,11 @@ cross-field rules such as reserved environment names and safe relative paths
 with the schema. Compatible module definitions merge; conflicting definitions
 fail with their source locations.
 
-`nix/agent.nix` builds the vendored Go agent with `buildGoModule` and no module download. `nix/build.nix`
-reads manifest JSON and writes bundle JSON. It builds `rootfs`, `entrypoint`, `shell_entrypoint`, and
-one environment file. `loadEnvironment` is the one secret-loading rule: it loads the bundle
+`nix/agent.nix` builds the vendored Go agent with `buildGoModule` and no module download.
+`nix/fetch.nix` resolves refs and stages source trees, hashes, and this release's build support.
+`nix/build.nix` accepts only those staged paths and hashes under pure evaluation and writes bundle
+JSON. It builds `rootfs`, `entrypoint`, `shell_entrypoint`, and one environment file.
+`loadEnvironment` is the one secret-loading rule: it loads the bundle
 environment, then entry-specific variables, then files under `/biot/secrets`; its sentinel read
 preserves empty values and trailing newlines. `cleanEnvironment` is
 the one clean-environment rule.
@@ -1115,17 +1038,15 @@ documented in `Host.Config` and `nix/README.md`. The request, capture, controlle
 | `fetch_ca_bundle` | none | `BIOT_NODE_FETCH_CA_BUNDLE` |
 | `binary_cache_urls` | `https://cache.nixos.org` | `BIOT_NODE_BINARY_CACHE_URLS` |
 | `binary_cache_keys` | cache.nixos.org key | `BIOT_NODE_BINARY_CACHE_KEYS` |
-| `build_support_dir` | release support directory | `BIOT_NODE_BUILD_SUPPORT_DIR` |
 | `worker_timeout_ms` | `3_600_000` | `BIOT_NODE_WORKER_TIMEOUT_MS` |
 
 `max_frame_bytes` is read from application configuration only by the node
-connection. `config/runtime.exs` also reads the data root, UID/GID range, executable, connection, heartbeat,
-reconnect, Podman, and TLS settings. The node's build settings are `builder_image` (required to
-include a digest), `binary_cache_urls`, `binary_cache_keys`, `build_support_dir`, and
-`worker_timeout_ms`; the node no longer needs Nix installed. The removed settings are
-`nix_executable`, `nix_instantiate_executable`, `nix_build_file`, and `nix_pin_file`. The numeric
-`BIOT_NODE_*` overrides must be positive integers. `Host.Config.from_application!/0` requires
-complete, valid host configuration before node effects use it.
+connection. `config/releases/node.exs` reads data-root, UID/GID range, executable, connection,
+heartbeat, reconnect, Podman, TLS, and build settings for the node release. The node release carries
+the exact `nix/` and `agent/` sources it was built with under `biot_node/priv/build_support`; that
+path is not an operator setting. Builder images must include a digest. Numeric `BIOT_NODE_*`
+overrides must meet the bounds in release configuration. `Host.Setup` loads complete host
+configuration before any effect reads it.
 
 ### Stream boundary
 
@@ -1161,8 +1082,9 @@ agent. It sends the target line and parses the bounded reply into `AgentReply`.
 `Streams.Attach` dials the server through `Control.Dial` and completes the
 attach handshake. Its first frame is `attach`, not `hello`, and it returns the
 bytes that arrived with `attached` untouched. `Control.Dial` is the one mutual
-TLS dial for the control connection and every attach, and it verifies the server
-fingerprint. `Deadline` is a monotonic deadline for the node's bounded reads.
+TLS dial for the control connection and every attach. It verifies the server fingerprint and sets
+`nodelay` because control requests, heartbeats, and shell keystrokes are small writes that wait on
+replies. `Deadline` is a monotonic deadline for the node's bounded reads.
 
 ### Diagnostics, runtime logs, and control
 
@@ -1176,8 +1098,8 @@ truncation flag. `Biot.Node.Host.Outcome` carries the diagnostic for an effect r
 revision, and stage. A journal-owned sequence orders retention, so the newest
 `diagnostic_max_entries_per_biot` rows stay. A same-key write replaces both the row and file.
 `fetch/2` reads only an indexed file and applies a read bound. `forget/1` removes every indexed
-file for a Biot. The index is authoritative. Unlink failures are logged. `Config.from_application!/0`
-is the host configuration precondition for these operations.
+file for a Biot. The index is authoritative. Unlink failures are logged. `put/4` returns the stored
+diagnostic ID or a typed failure, and `Journal.diagnostic_truncated/1` answers the retained metadata.
 
 `Biot.Node.RuntimeLogs` is a Supervisor over a Registry and a DynamicSupervisor.
 `Biot.Node.BiotController.observe/1` calls `attach/3` with the inspected container. One `Capture`
@@ -1224,56 +1146,23 @@ the journal, and the controller tree are ready. Linux is required for the node c
 ### Tests
 
 `test/test_helper.exs` excludes `:linux` tests outside Linux and `:nix` tests when
-`nix` is unavailable. The node tests cover host derivations, journal ownership,
-real Linux effects, and the controller shell:
+`nix` is unavailable. Pure tests cover the reconciliation decision tables, retry rules, staged-input
+parsing, layouts, Git hardening, and stream-group state. Integration tests use real SQLite journals,
+OTP supervision, Unix sockets, the Go agent, Podman, and Nix as appropriate. The Linux host suite
+covers worker isolation, cancellation, mounts, ownership, private stores, environment release,
+runtime logs, secrets, credentials, and state across container restarts.
 
-- `action_test.exs` covers action stages and cancellation rules.
-- `controller_pure_test.exs` covers pure controller projections, retry rules, and `RetryState`.
-- `diagnostics_integration_test.exs` covers journal-indexed files, source and read truncation, replacement, retention, missing files, and logged unlink failures.
-- `runtime_logs_metadata_integration_test.exs` covers metadata round trips and strict JSON validation.
-- `host_command_ownership_test.exs` covers bounded stderr capture, overflow flags, FIFO drain cleanup, cancellation, and reaper ownership.
-- `host_journal_integration_test.exs` covers diagnostic indexing, same-key replacement, retention order, omitted Biot IDs, retry rows, intent replacement, and destruction reports.
-- `host_linux_integration_test.exs` covers Podman log-driver bounds and stream cleanup with real Linux commands. Its step 17 stateful fixture remains skipped: the fetch phase now succeeds with a complete CA bundle, but the build phase fails after the binary-cache listing and its cause is not yet known.
-- `secret_values_test.exs` covers the three redacting protocol values, `SecretOutcome`, all eight messages, strict fields, and frame sizing.
-- `secrets_pure_test.exs` covers Git attribution, credential scopes, retry waiting, request phases, phase-aware layout, and allocation directories.
-- `secrets_integration_test.exs` covers server delivery, authorization, exposure-marker ordering, pending requests, failures, timeouts, and `waiting_for` projections.
-- `secrets_linux_integration_test.exs` covers real secret and credential publication, mapped ownership, Podman mounts, private Git fetches, queue ordering, and credential wakeup.
-- `streams_groups_test.exs` covers the pure `Streams.Groups` core: revision order (lower, equal, higher, and another connection), admission against every group state, both limits, child bookkeeping, and `close_all/1`.
-- `streams_boundary_integration_test.exs` covers the boundary with real children and a real Go agent: refusals, limits, live-child termination before `apply_revision/3` returns, `close_all/0`, and bytes that arrive with `attached`.
-- `streams_agent_integration_test.exs` covers the agent UID check against a real Unix socket, plus the stream child's refusal path.
-- `streams_supervisor_test.exs` covers `:one_for_all` restart: killing either child restarts both with an empty boundary.
-- `support/streams_fixture.ex` provides the real TLS attach server, a real Unix-socket fake agent, a real echo service, journal allocation seeding, and the real Go agent.
-- `host_pure_test.exs` covers diagnostic selection, data markers, per-environment prepared resources, strict staged-input parsing, private-store mapping, exact worker layouts, Git hardening, owner labels, and retry map types.
-- `node_values_test.exs` covers node-owned parsed values, including `NetworkId`.
-- `reconcile_important_cases_test.exs` covers unknown desired and sibling environments.
-- `reconcile_invariants_test.exs` covers `Reconcile.next/3` result shapes and safety invariants.
-- `reconcile_release_test.exs` covers release eligibility and ordering.
-- `reconcile_sequences_test.exs` covers running, stopped, and destroyed convergence sequences.
-- `support/reconcile_fixtures.ex` defines diagnostic-bearing inspection failures and current state shapes; `support/reconcile_generators.ex` defines property generators.
-
-The Go tests cover `protocol/request_test.go`, `protocol/frame_test.go`,
-`shellsession/session_test.go`, and `cmd/biot-agent/main_test.go`. They include fuzz targets for
-requests, frames, and frame round trips, plus real Unix-socket, TCP-relay, and PTY tests.
-
-The node tests cover the rewritten pure and Linux suites. The protocol suite property-tests
-HTTPS-only `RepositorySource` parsing. `host_linux_integration_test.exs` covers real worker
-cancellation, Podman inspection, mounts, rootfs, ownership, private-store use, and environment
-release; its stateful environment fixture remains skipped because the fetch phase now passes with a
-complete CA bundle but the build phase fails after the binary-cache listing and the cause is not yet
-found. The two server proof scripts are skipped while that large stateful evidence is replaced by
-bounded per-contract tests. The strict staged-input
-parser test remains red for the production gap it exposes: extra keys and invalid NAR hashes are
-not yet rejected. The evidence driver still covers worker isolation, hostile reads, cache use,
-recovery, release, and startup sandboxing.
-
-`docker/linux-host/run-tests.sh` runs `go test ./...` in `agent/` before the full Mix test suite
-inside the Linux host image.
+The Go agent suite includes request and frame fuzz targets plus real Unix-socket, TCP-relay, and PTY
+tests. CI runs it directly; `docker/linux-host/run-tests.sh` runs the full Mix suite in the privileged
+Linux host image.
 
 ## Releases
 
 The root Mix project defines two releases.
 The `server` release includes `biot_protocol`, `biot_server`, and `biot_web`.
-The `node` release includes `biot_protocol` and `biot_node`.
+The `node` release includes `biot_protocol` and `biot_node`; the node app's private files contain
+the Nix and agent source trees used by its build workers. Each release has its own parsed runtime
+configuration under `config/releases/`.
 
 Build them with `MIX_ENV=prod mix release server` and `MIX_ENV=prod mix release node`.
 
@@ -1297,47 +1186,38 @@ mise exec -- mix test
 
 The root and `apps/biot_server` `test` aliases load `mix/test_env.exs`. Its `Biot.Mix.TestEnv.require_test_env!/1` refuses to run unless `Mix.env()` is `:test`, and it runs before `ecto.drop`, so `MIX_ENV=dev mix test` cannot drop the dev database.
 
-Build and vet the CLI with:
+Build and vet the CLI, and vet and test the agent, with:
 
 ```sh
 cd cli
 go build ./...
 go vet ./...
+
+cd ../agent
+go vet ./...
+go test ./...
 ```
 
 ## CI
 
-`.github/workflows/ci.yml` installs Nix, checks Podman, and sets up Erlang 28.5, Elixir 1.20.4, and Go 1.26.x.
-It runs `mix deps.get`, `mix check`, `mix test`, `go build ./...`, and `go vet ./...`.
+`.github/workflows/ci.yml` installs Nix and sets up Erlang 28.5, Elixir 1.20.4, and Go 1.26.x.
+The checks job runs `mix check`, the non-Podman Mix suite with warnings as errors, and the CLI and
+agent Go checks. The host-tests job runs the full Mix suite in the privileged Linux host image.
 
-## Configuration and tests
+## Configuration
 
 `config/test.exs` uses `_build/test/biot_server_test.sqlite3` and the Ecto SQL sandbox.
-`config/runtime.exs` also reads node data-root, UID-range, command, Podman, and control settings
-for the production node release.
-
-Server configuration includes `publication_domain`, `ssh_advertised_host`,
-integer `ssh_port`, and `desired_sweep_interval_ms`. Production reads them from
-`BIOT_SERVER_PUBLICATION_DOMAIN`, `BIOT_SSH_ADVERTISED_HOST`, `BIOT_SSH_PORT`,
-and `BIOT_DESIRED_SWEEP_INTERVAL_MS`. Step 19 adds `control_session_lifetime_ms`,
-`credential_max_lifetime_ms`, `credential_last_used_interval_ms`,
-`preview_handoff_ttl_ms`, and the `disabled_principals` and
-`disabled_principals_file` settings. Production reads
-`BIOT_SESSION_LIFETIME_HOURS` (default 168), `BIOT_CREDENTIAL_MAX_LIFETIME_DAYS`
-(default 90), and `BIOT_DISABLED_PRINCIPALS` for the server release.
-Fix round 4 adds `expiry_sweep_interval_ms`, the interval for `ExpirySweep`. It
-has no environment variable, and `config/test.exs` sets it to nil.
-Step 20 adds `stream_open_timeout_ms`, the deadline for one admission's stream opens.
-Production reads `BIOT_STREAM_OPEN_TIMEOUT_MS` (default 30_000).
-Step 21 adds `auth_check_interval_ms`, the interval for `Access.AuthSweep`.
-Production reads `BIOT_AUTH_CHECK_INTERVAL_MS` (default 60_000), and
-`config/test.exs` sets it to nil. Step 22 adds `oidc` settings and
-`trusted_edge_peers`. Production reads `BIOT_OIDC_ISSUER`,
-`BIOT_OIDC_CLIENT_ID`, `BIOT_OIDC_CLIENT_SECRET`, `PHX_HOST`, and
-`BIOT_TRUSTED_EDGE_PEERS`; the login callback is
-`https://<PHX_HOST>/login/callback`. All three OIDC settings must be present
-together. Phoenix filters `value`, `code`, `state`, and `challenge` from
+`config/releases/server.exs` requires an absolute `BIOT_SERVER_DATABASE`, parses the control host
+and publication domain as DNS names, rejects an overlapping control host, and requires complete
+HTTPS OIDC settings. It also owns server TLS, listener, heartbeat, sweep, request, stream, SSH,
+session, credential, operator-file, and trusted-edge settings. The login callback is
+`https://<PHX_HOST>/login/callback`. Phoenix filters `value`, `code`, `state`, and `challenge` from
 request logs.
+
+`config/releases/node.exs` requires the data root, builder image, binary-cache configuration,
+server identity, registration ID, and node TLS files. It parses numeric bounds and configures the
+host tools, UID ranges, retries, observation, diagnostics, runtime logs, stream limits, and control
+connection. The node release supplies build support itself.
 
 ## Host tests in Docker
 
@@ -1348,4 +1228,6 @@ docker build -t biot-linux-host docker/linux-host
 docker run --privileged --rm -it biot-linux-host
 ```
 
-Run the full suite on Linux with `docker/linux-host/run-tests.sh` from the repository root.
+Run the full suite on Linux with `docker/linux-host/run-tests.sh` from the repository root. The
+script archives tracked and unignored source inputs into a clean container workspace, so ignored
+test output cannot affect the run.

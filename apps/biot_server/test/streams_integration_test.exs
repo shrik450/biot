@@ -4,21 +4,21 @@ defmodule Biot.Server.StreamsIntegrationTest do
 
   alias Biot.Node.Host.Config, as: NodeConfig
   alias Biot.Node.Host.Paths, as: NodePaths
+  alias Biot.Node.Journal.Migrator
   alias Biot.Node.Repo, as: NodeRepo
   alias Biot.Node.Streams, as: NodeStreams
   alias Biot.Node.StreamsFixture
   alias Biot.Protocol.BiotId
-  alias Biot.Protocol.Certificates
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.Platform
   alias Biot.Protocol.Port
   alias Biot.Protocol.RegistrationId
   alias Biot.Protocol.ShellRequest
   alias Biot.Server.Control.Listener
-  alias Biot.Server.Id
   alias Biot.Server.NodeConnections
   alias Biot.Server.Schema.Node
   alias Biot.Server.Streams
+  alias Biot.Server.TestFixtures
 
   defmodule Reader do
     @moduledoc false
@@ -48,32 +48,44 @@ defmodule Biot.Server.StreamsIntegrationTest do
 
   setup_all do
     data_root = StreamsFixture.temporary_directory("biot-server-streams")
-    previous_data_root = Application.get_env(:biot_node, :data_root)
-    Application.put_env(:biot_node, :data_root, data_root)
-    Application.put_env(:biot_node, :uid_range_base, StreamsFixture.host_uid())
-    Application.put_env(:biot_node, :uid_range_count, 1)
-    Application.put_env(:biot_node, :uid_range_limit, 65_536)
+
+    host_settings = [
+      data_root: data_root,
+      uid_range_base: StreamsFixture.host_uid(),
+      uid_range_count: 1,
+      uid_range_limit: 65_536
+    ]
+
+    previous_settings =
+      Map.new(host_settings, fn {key, _value} -> {key, Application.get_env(:biot_node, key)} end)
+
+    Enum.each(host_settings, fn {key, value} -> Application.put_env(:biot_node, key, value) end)
+    {:ok, _config} = NodeConfig.load()
 
     start_supervised!(NodeRepo)
 
-    Ecto.Migrator.run(NodeRepo, Application.app_dir(:biot_node, "priv/repo/migrations"), :up,
-      all: true,
-      log: false
-    )
+    Migrator.migrate(log: false)
 
     start_supervised!({Task.Supervisor, name: Biot.Node.Control.RequestSupervisor})
     start_supervised!(Biot.Node.RuntimeLogs)
     start_supervised!(Biot.Node.Controllers)
 
     {:ok, certificates} =
-      Certificates.generate(StreamsFixture.temporary_directory("biot-server-streams-certs"), 1)
+      TestFixtures.certificates(
+        StreamsFixture.temporary_directory("biot-server-streams-certs"),
+        1
+      )
 
+    # Later modules share the node settings. A UID range left behind configures their host and
+    # starts real host actions in tests that expect none.
     on_exit(fn ->
       File.rm_rf!(data_root)
+      :persistent_term.erase(NodeConfig)
 
-      if previous_data_root,
-        do: Application.put_env(:biot_node, :data_root, previous_data_root),
-        else: Application.delete_env(:biot_node, :data_root)
+      Enum.each(previous_settings, fn
+        {key, nil} -> Application.delete_env(:biot_node, key)
+        {key, value} -> Application.put_env(:biot_node, key, value)
+      end)
     end)
 
     {:ok, certificates: certificates}
@@ -103,8 +115,8 @@ defmodule Biot.Server.StreamsIntegrationTest do
 
     {:ok, {_address, port}} = ThousandIsland.listener_info(listener)
 
-    node_id = Id.generate(NodeId)
-    registration_id = Id.generate(RegistrationId)
+    node_id = NodeId.generate()
+    registration_id = RegistrationId.generate()
     {:ok, platform} = Platform.current()
     node_cert = hd(certificates.nodes)
 
@@ -215,15 +227,15 @@ defmodule Biot.Server.StreamsIntegrationTest do
   end
 
   test "open_until/5 reports node_unavailable when the node has no ready link", %{} do
-    node_id = Id.generate(NodeId)
-    biot_id = Id.generate(BiotId)
+    node_id = NodeId.generate()
+    biot_id = BiotId.generate()
 
     assert Streams.open_until(node_id, biot_id, 1, port_target(1), open_deadline()) ==
              {:error, :node_unavailable}
   end
 
   defp prepare_port_stream(context) do
-    biot_id = Id.generate(BiotId)
+    biot_id = BiotId.generate()
     assert :applied = NodeStreams.apply_revision(biot_id, context.connection_id, 1)
     biot_id
   end
@@ -237,7 +249,7 @@ defmodule Biot.Server.StreamsIntegrationTest do
   end
 
   defp prepare_shell_stream(context) do
-    biot_id = Id.generate(BiotId)
+    biot_id = BiotId.generate()
 
     socket_path =
       StreamsFixture.seed_allocation(biot_id, %{start: StreamsFixture.host_uid(), count: 1})
@@ -248,7 +260,7 @@ defmodule Biot.Server.StreamsIntegrationTest do
   end
 
   defp kill_agent(biot_id) do
-    config = NodeConfig.from_application!()
+    config = NodeConfig.current!()
     socket_path = Path.join(NodePaths.run(config, biot_id), "agent.sock")
 
     StreamsFixture.wait_until(fn -> if File.exists?(socket_path), do: :ok end, "the agent socket")

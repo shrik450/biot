@@ -18,6 +18,7 @@ defmodule Biot.Node.Host.StagedInputs do
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.NarHash
   alias Biot.Protocol.PinnedSource
+  alias Biot.Protocol.Platform
   alias Biot.Protocol.StrictMap
 
   @fields ["build_support", "base_nixpkgs", "layers"]
@@ -75,11 +76,12 @@ defmodule Biot.Node.Host.StagedInputs do
   Only the selection knows which selector each entry came from, so the pins become protocol values
   here rather than in the fetch output.
   """
-  @spec manifest(t(), EnvironmentSelection.t()) :: {:ok, Manifest.t()} | {:error, :invalid_format}
-  def manifest(%__MODULE__{} = staged, %EnvironmentSelection{} = selection) do
+  @spec manifest(t(), EnvironmentSelection.t(), Platform.t()) ::
+          {:ok, Manifest.t()} | {:error, :invalid_format}
+  def manifest(%__MODULE__{} = staged, %EnvironmentSelection{} = selection, platform) do
     with {:ok, base_nixpkgs} <- pin(selection.base_nixpkgs, staged.base_nixpkgs),
          {:ok, layers} <- pin_layers(selection.layers, staged.layers) do
-      {:ok, Manifest.build(base_nixpkgs, layers, nil)}
+      {:ok, Manifest.build(platform, base_nixpkgs, layers)}
     end
   end
 

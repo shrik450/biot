@@ -219,9 +219,4 @@ defmodule Biot.Node.Host.Paths do
   def checkout_staging(config, biot_id) do
     Path.join(biot(config, biot_id), ".checkout.staging")
   end
-
-  @spec container_identity(Config.t(), BiotId.t()) :: String.t()
-  def container_identity(config, biot_id) do
-    Path.join(biot(config, biot_id), "container-id")
-  end
 end

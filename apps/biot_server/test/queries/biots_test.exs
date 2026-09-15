@@ -51,7 +51,7 @@ defmodule Biot.Server.Queries.BiotsTest do
 
     biot = Repo.get!(BiotRow, context.biot_id)
     assert view.id == context.biot_id
-    assert view.name == "worker"
+    assert view.name == TestFixtures.biot_name("worker")
     assert view.owner_id == context.owner.id
     assert view.node_id == context.node.id
     assert view.role == :owner

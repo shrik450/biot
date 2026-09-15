@@ -9,6 +9,7 @@ defmodule Biot.Node.HostJournalIntegrationTest do
   alias Biot.Node.Host.Config
   alias Biot.Node.Host.Context
   alias Biot.Node.Journal
+  alias Biot.Node.Journal.Migrator
   alias Biot.Node.Journal.Schema.Allocation, as: AllocationRow
   alias Biot.Node.Journal.Schema.Diagnostic, as: DiagnosticRow
   alias Biot.Node.Journal.Schema.LocalIntent, as: LocalIntentRow
@@ -28,8 +29,7 @@ defmodule Biot.Node.HostJournalIntegrationTest do
     Application.put_env(:biot_node, :data_root, data_root)
 
     start_supervised!(Repo)
-    migrations = Application.app_dir(:biot_node, "priv/repo/migrations")
-    Ecto.Migrator.run(Repo, migrations, :up, all: true, log: false)
+    Migrator.migrate(log: false)
 
     on_exit(fn ->
       File.rm_rf!(data_root)
@@ -130,8 +130,8 @@ defmodule Biot.Node.HostJournalIntegrationTest do
 
       assert Journal.index_diagnostic(first, biot_id(), 1, :prepare, false, 5) == {:ok, []}
       assert Journal.index_diagnostic(second, biot_id(), 1, :prepare, true, 5) == {:ok, [first]}
-      assert Journal.diagnostic(first) == nil
-      assert Journal.diagnostic(second) == true
+      assert Journal.diagnostic_truncated(first) == :not_found
+      assert Journal.diagnostic_truncated(second) == {:ok, true}
     end
 
     test "retention keeps the newest sequences across revisions" do

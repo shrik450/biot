@@ -9,9 +9,9 @@ defmodule Biot.Node.Host.Context do
 
   @type t :: %__MODULE__{biot_id: BiotId.t(), config: Config.t()}
 
-  @spec from_application(BiotId.t()) :: {:ok, t()} | {:error, term()}
-  def from_application(%BiotId{} = biot_id) do
-    with {:ok, config} <- Config.from_application() do
+  @spec current(BiotId.t()) :: {:ok, t()} | {:error, :not_loaded}
+  def current(%BiotId{} = biot_id) do
+    with {:ok, config} <- Config.current() do
       {:ok, %__MODULE__{biot_id: biot_id, config: config}}
     end
   end

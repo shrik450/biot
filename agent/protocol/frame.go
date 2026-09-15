@@ -6,6 +6,8 @@ import (
 	"io"
 )
 
+// The node checks agent frames with Biot.Protocol.ShellFrame, which must hold the same limit, or
+// it drops a frame this agent considers valid.
 const FramePayloadLimit = 64 * 1024
 
 const (

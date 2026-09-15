@@ -52,7 +52,7 @@ defmodule Biot.Node.RuntimeLogs do
   @doc "Stops capture and removes runtime output after a snapshot omits the Biot."
   @spec forget(BiotId.t()) :: :ok
   def forget(%BiotId{} = biot_id) do
-    config = Config.from_application!()
+    config = Config.current!()
     stop_capture(biot_id)
     remove_files(config, biot_id)
     :ok
@@ -62,7 +62,7 @@ defmodule Biot.Node.RuntimeLogs do
           {:ok, {IncarnationId.t(), binary(), boolean()}} | :not_found
   def fetch(%BiotId{} = biot_id, max_bytes)
       when is_integer(max_bytes) and max_bytes > 0 do
-    config = Config.from_application!()
+    config = Config.current!()
 
     with {:ok, {incarnation_id, capture_truncated}} <- Metadata.read(config, biot_id),
          {:ok, content} <- File.read(Paths.runtime_log(config, biot_id)) do

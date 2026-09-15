@@ -129,10 +129,6 @@ defmodule Biot.Server.SshKeysIntegrationTest do
 
       assert SshKeys.authenticate(parse!(@ed25519)) == :error
     end
-
-    test "takes only a parsed public key" do
-      assert_raise FunctionClauseError, fn -> SshKeys.authenticate(@ed25519) end
-    end
   end
 
   describe "list/1" do

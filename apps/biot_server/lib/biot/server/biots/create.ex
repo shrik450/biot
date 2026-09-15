@@ -1,6 +1,7 @@
 defmodule Biot.Server.Biots.Create do
   @moduledoc "The parsed inputs that create one biot."
 
+  alias Biot.Protocol.BiotName
   alias Biot.Protocol.EnvironmentSelection
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.RepositorySource
@@ -9,7 +10,7 @@ defmodule Biot.Server.Biots.Create do
   defstruct [:name, :repository, :environment, :node_id, initial_state: :running]
 
   @type t :: %__MODULE__{
-          name: String.t(),
+          name: BiotName.t(),
           repository: RepositorySource.t(),
           environment: EnvironmentSelection.t(),
           node_id: NodeId.t() | :default,

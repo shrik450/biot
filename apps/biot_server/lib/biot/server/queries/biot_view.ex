@@ -2,6 +2,7 @@ defmodule Biot.Server.Queries.BiotView do
   @moduledoc "Projects durable biot records and live connection state into product-facing data."
 
   alias Biot.Protocol.BiotId
+  alias Biot.Protocol.BiotName
   alias Biot.Protocol.Desired
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.Port
@@ -81,7 +82,7 @@ defmodule Biot.Server.Queries.BiotView do
 
   @type t :: %__MODULE__{
           id: BiotId.t(),
-          name: String.t(),
+          name: BiotName.t(),
           owner_id: PrincipalId.t(),
           node_id: NodeId.t(),
           role: Authorization.role(),

@@ -6,6 +6,7 @@ defmodule Biot.Protocol.AgentReply do
   forwards the agent's own text.
   """
 
+  alias Biot.Protocol.Choice
   alias Biot.Protocol.StrictMap
 
   @rejections ~w(invalid_request connection_refused)a
@@ -23,19 +24,10 @@ defmodule Biot.Protocol.AgentReply do
 
   def parse(%{"ok" => false, "error" => error} = value) do
     with {:ok, _value} <- StrictMap.fetch_exact(value, ["ok", "error"]),
-         {:ok, rejection} <- parse_rejection(error) do
+         {:ok, rejection} <- Choice.parse(error, @rejections) do
       {:ok, {:error, rejection}}
     end
   end
 
   def parse(_value), do: {:error, :invalid_format}
-
-  defp parse_rejection(value) when is_binary(value) do
-    case Enum.find(@rejections, &(Atom.to_string(&1) == value)) do
-      nil -> {:error, :invalid_format}
-      rejection -> {:ok, rejection}
-    end
-  end
-
-  defp parse_rejection(_value), do: {:error, :invalid_format}
 end

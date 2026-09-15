@@ -7,11 +7,9 @@ defmodule Biot.Server.Principals.StartupTest do
   alias Biot.Server.TestFixtures
 
   setup do
-    Application.delete_env(:biot_server, :disabled_principals)
     Application.delete_env(:biot_server, :disabled_principals_file)
 
     on_exit(fn ->
-      Application.delete_env(:biot_server, :disabled_principals)
       Application.delete_env(:biot_server, :disabled_principals_file)
     end)
 
@@ -19,12 +17,12 @@ defmodule Biot.Server.Principals.StartupTest do
   end
 
   test "an empty configuration succeeds and starts nothing" do
-    Application.put_env(:biot_server, :disabled_principals, [])
+    TestFixtures.put_disabled_principals([])
     assert Startup.start_link([]) == :ignore
   end
 
   test "a non-list configuration fails boot with a readable message" do
-    Application.put_env(:biot_server, :disabled_principals, %{"issuer" => "a"})
+    TestFixtures.put_disabled_principals(%{"issuer" => "a"})
 
     assert {:error, message} = Startup.start_link([])
     assert message == "principal configuration failed: disabled principals must be a list"
@@ -41,7 +39,7 @@ defmodule Biot.Server.Principals.StartupTest do
   test "a valid configuration disables before the listener starts" do
     principal = TestFixtures.principal(1)
 
-    Application.put_env(:biot_server, :disabled_principals, [
+    TestFixtures.put_disabled_principals([
       %{"issuer" => principal.issuer, "subject" => principal.subject}
     ])
 

@@ -27,7 +27,7 @@ defmodule Biot.Server.Reports do
 
   @type ingestion_error ::
           :not_assigned | :not_found | :resolution_mismatch | :temporarily_unavailable
-  @type ignore_reason :: :revision_ahead | :stale_connection
+  @type ignore_reason :: :revision_ahead | :revision_not_newer | :stale_connection
   @type ignored :: {:ignored, ignore_reason()}
 
   @spec observation(
@@ -100,7 +100,9 @@ defmodule Biot.Server.Reports do
   end
 
   @spec node_observation(NodeId.t(), ConnectionId.t(), list()) ::
-          {:ok, NodeObservation.t()} | {:error, :not_found | :temporarily_unavailable}
+          {:ok, NodeObservation.t()}
+          | {:ok, ignored()}
+          | {:error, :not_found | :temporarily_unavailable}
   def node_observation(
         %NodeId{} = node_id,
         %ConnectionId{} = connection_id,
@@ -110,6 +112,7 @@ defmodule Biot.Server.Reports do
     now = DateTime.utc_now()
 
     with %Node{} <- Repo.get(Node, node_id),
+         :ok <- current_connection(node_id, connection_id),
          {:ok, observation} <-
            upsert_node_observation(node_id, connection_id, orphaned_allocations, now) do
       Logger.info("node observation received",
@@ -122,8 +125,16 @@ defmodule Biot.Server.Reports do
       {:ok, observation}
     else
       nil -> {:error, :not_found}
+      {:ignored, _reason} = ignored -> {:ok, ignored}
       {:error, _changeset} -> {:error, :temporarily_unavailable}
     end
+  end
+
+  # A replaced connection's orphan report is older than whatever the current one will send.
+  defp current_connection(node_id, connection_id) do
+    if NodeConnections.current?(connection_id, NodeConnections.current(node_id)),
+      do: :ok,
+      else: {:ignored, :stale_connection}
   end
 
   defp plan_observation(repo, node_id, connection_id, biot_id, report) do
@@ -277,7 +288,7 @@ defmodule Biot.Server.Reports do
          revision
        )
        when revision <= applied_revision,
-       do: {:ignored, :revision_ahead}
+       do: {:ignored, :revision_not_newer}
 
   defp plan_progress(_access_observation, %Biot{} = biot, connection_id, revision) do
     {:store,

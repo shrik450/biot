@@ -10,6 +10,7 @@ defmodule BiotWeb.Params do
 
   alias Biot.Protocol.AuthorizationValue
   alias Biot.Protocol.BiotId
+  alias Biot.Protocol.BiotName
   alias Biot.Protocol.CredentialId
   alias Biot.Protocol.Digest
   alias Biot.Protocol.EnvironmentSelection
@@ -48,7 +49,7 @@ defmodule BiotWeb.Params do
     with {:ok, fields} <-
            collect(
              id: required(path, "id", &BiotId.parse/1),
-             name: required(body, "name", &string/1),
+             name: required(body, "name", &BiotName.parse/1),
              repository: required(body, "repository", &RepositorySource.parse/1),
              environment: required(body, "environment", &EnvironmentSelection.parse/1),
              node_id: optional(body, "node_id", &NodeId.parse/1, :default),

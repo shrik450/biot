@@ -9,9 +9,9 @@ defmodule Biot.Protocol.Limits do
   @max_secret_value_bytes_v1 65_536
   @max_repository_url_bytes 2_048
   @max_source_ref_bytes 256
-  @max_relative_directory_bytes 1_024
   @max_layers 16
-  # 16 KiB including the trailing newline: the agent reads its request line through this bound.
+  # 16 KiB including the trailing newline: the agent reads its request line through this bound,
+  # which `LineLimit` in `agent/protocol/request.go` repeats.
   @max_agent_line_bytes 16 * 1024
 
   @spec max_biot_spec_bytes(pos_integer()) :: pos_integer()
@@ -25,9 +25,6 @@ defmodule Biot.Protocol.Limits do
 
   @spec max_source_ref_bytes() :: pos_integer()
   def max_source_ref_bytes, do: @max_source_ref_bytes
-
-  @spec max_relative_directory_bytes() :: pos_integer()
-  def max_relative_directory_bytes, do: @max_relative_directory_bytes
 
   @spec max_layers() :: pos_integer()
   def max_layers, do: @max_layers

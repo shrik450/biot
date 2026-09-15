@@ -169,6 +169,8 @@ defmodule Biot.Node.HostPureTest do
       labels = document["Config"]["Labels"]
 
       invalid = [
+        Map.delete(document, "Id"),
+        Map.put(document, "Id", "not-a-native-id"),
         Map.delete(document, "Config"),
         Map.delete(document, "State"),
         put_in(document, ["Config"], Map.delete(document["Config"], "Labels")),
@@ -178,7 +180,7 @@ defmodule Biot.Node.HostPureTest do
       invalid =
         invalid ++
           Enum.map(
-            [Names.biot_label(), Names.incarnation_label(), Names.environment_label()],
+            [Names.biot_label(), Names.environment_label()],
             &put_in(document, ["Config", "Labels"], Map.delete(labels, &1))
           )
 
@@ -348,7 +350,8 @@ defmodule Biot.Node.HostPureTest do
 
     test "manifest rejects a layer count that differs from the selection" do
       assert {:ok, staged} = StagedInputs.parse(staged_document())
-      assert StagedInputs.manifest(staged, selection()) == {:error, :invalid_format}
+      {:ok, platform} = Platform.parse("x86_64-linux")
+      assert StagedInputs.manifest(staged, selection(), platform) == {:error, :invalid_format}
     end
 
     property "parse is total over random maps and binaries" do
@@ -464,13 +467,12 @@ defmodule Biot.Node.HostPureTest do
   end
 
   test "names include every owner and stable resource identity" do
-    labels = Names.label_arguments(biot_id(), incarnation(), e1())
+    labels = Names.label_arguments(biot_id(), e1())
 
     assert label_value(labels, Names.biot_label()) == to_string(biot_id())
-    assert label_value(labels, Names.incarnation_label()) == to_string(incarnation())
     assert label_value(labels, Names.environment_label()) == to_string(e1())
     assert Names.network(allocation().network_id) == "biot-network-#{allocation().network_id}"
-    assert Names.container(incarnation()) == "biot-#{incarnation()}"
+    assert Names.container(biot_id()) == "biot-#{biot_id()}"
   end
 
   test "names parse the owner label" do
@@ -544,13 +546,12 @@ defmodule Biot.Node.HostPureTest do
       "Config" => %{
         "Labels" => %{
           Names.biot_label() => to_string(biot_id()),
-          Names.incarnation_label() => to_string(incarnation()),
           Names.environment_label() => to_string(e1())
         }
       },
       "State" => %{"Running" => running, "ExitCode" => exit_code},
-      "Id" => String.duplicate("a", 64),
-      "Name" => Names.container(incarnation())
+      "Id" => to_string(incarnation()),
+      "Name" => Names.container(biot_id())
     }
   end
 

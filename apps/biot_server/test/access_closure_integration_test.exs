@@ -4,7 +4,7 @@ defmodule Biot.Server.AccessClosureIntegrationTest do
 
   import Ecto.Query
 
-  alias Biot.Protocol.{Certificates, Message, SshPublicKey}
+  alias Biot.Protocol.{Message, SshPublicKey}
   alias Biot.Server.Access
   alias Biot.Server.Access.Owners
   alias Biot.Server.AccessHarness
@@ -41,18 +41,18 @@ defmodule Biot.Server.AccessClosureIntegrationTest do
 
   setup_all do
     directory = Path.join(System.tmp_dir!(), "biot-closure-#{System.unique_integer([:positive])}")
-    {:ok, certificates} = Certificates.generate(directory, 3)
+    {:ok, certificates} = TestFixtures.certificates(directory, 3)
     on_exit(fn -> File.rm_rf!(directory) end)
     %{certificates: certificates}
   end
 
   setup %{certificates: certificates} do
-    previous_principals = Application.fetch_env(:biot_server, :disabled_principals)
-    previous_registrations = Application.fetch_env(:biot_server, :node_registrations)
+    previous_principals = Application.fetch_env(:biot_server, :disabled_principals_file)
+    previous_registrations = Application.fetch_env(:biot_server, :node_registrations_file)
 
     on_exit(fn ->
-      restore_env(:disabled_principals, previous_principals)
-      restore_env(:node_registrations, previous_registrations)
+      restore_env(:disabled_principals_file, previous_principals)
+      restore_env(:node_registrations_file, previous_registrations)
     end)
 
     listener_port = AccessHarness.start_listener(certificates)
@@ -190,7 +190,7 @@ defmodule Biot.Server.AccessClosureIntegrationTest do
     register_self(context.biot, control)
     :ok = NodeWake.subscribe(context.node_a.id)
 
-    Application.put_env(:biot_server, :disabled_principals, [
+    TestFixtures.put_disabled_principals([
       %Identity{issuer: context.collaborator.issuer, subject: context.collaborator.subject}
     ])
 
@@ -219,7 +219,7 @@ defmodule Biot.Server.AccessClosureIntegrationTest do
 
     on_node_b = Registered.start(context.elsewhere.id, control, probe)
 
-    Application.put_env(:biot_server, :node_registrations, [
+    TestFixtures.put_registrations([
       registration(context.node_a, :disabled),
       registration(context.node_b, :enabled)
     ])

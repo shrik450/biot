@@ -11,7 +11,7 @@ defmodule Biot.Node.RuntimeLogs.MetadataIntegrationTest do
   setup do
     root = temporary_directory("runtime-log-metadata")
     on_exit(fn -> File.rm_rf!(root) end)
-    %{config: config(root), biot_id: id(BiotId), incarnation_id: id(IncarnationId)}
+    %{config: config(root), biot_id: id(BiotId), incarnation_id: incarnation_id()}
   end
 
   test "metadata round-trips its incarnation and truncation flag", context do
@@ -68,6 +68,11 @@ defmodule Biot.Node.RuntimeLogs.MetadataIntegrationTest do
       runtime_log_max_bytes: 1_000,
       platform: platform
     )
+  end
+
+  defp incarnation_id do
+    {:ok, id} = IncarnationId.parse(Base.encode16(:crypto.strong_rand_bytes(32), case: :lower))
+    id
   end
 
   defp id(module) do

@@ -33,7 +33,7 @@ defmodule Biot.Protocol.ShellFrameTest do
 
     test "exit takes one byte status" do
       for status <- [0, 1, 127, 255] do
-        assert {:ok, [<<2, 0, 0, 0, 1>>, <<status>>]} = ShellFrame.encode({:exit, status})
+        assert {:ok, [<<2, 0, 0, 0, 1>>, <<^status>>]} = ShellFrame.encode({:exit, status})
       end
 
       for status <- [-1, 256, 1.0, "0", nil] do

@@ -17,9 +17,6 @@ defmodule Biot.Protocol.SshPublicKey do
 
   def parse(_line), do: {:error, :invalid_format}
 
-  @spec fingerprint(t()) :: String.t()
-  def fingerprint(%__MODULE__{fingerprint: fingerprint}), do: fingerprint
-
   @spec to_string(t()) :: String.t()
   def to_string(%__MODULE__{line: line}), do: line
 

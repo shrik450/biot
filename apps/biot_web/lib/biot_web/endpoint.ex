@@ -2,8 +2,14 @@ defmodule BiotWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :biot_web
 
   socket "/live", Phoenix.LiveView.Socket,
-    websocket: [connect_info: [session: {BiotWeb.Cookies, :session_options, []}]],
-    longpoll: [connect_info: [session: {BiotWeb.Cookies, :session_options, []}]]
+    websocket: [
+      check_origin: {BiotWeb.Plugs.ControlOrigin, :socket_origin?, []},
+      connect_info: [session: {BiotWeb.Cookies, :session_options, []}]
+    ],
+    longpoll: [
+      check_origin: {BiotWeb.Plugs.ControlOrigin, :socket_origin?, []},
+      connect_info: [session: {BiotWeb.Cookies, :session_options, []}]
+    ]
 
   plug Plug.Static,
     at: "/",

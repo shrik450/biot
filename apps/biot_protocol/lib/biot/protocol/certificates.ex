@@ -1,6 +1,20 @@
 defmodule Biot.Protocol.Certificates do
-  @moduledoc "Writes minimal operator-managed CA, server, and node certificate files with their fingerprints."
+  @moduledoc """
+  Operator certificate tooling for the control link: one authority per deployment, and the server
+  and node certificates issued from it.
 
+  The authority's private key stays in the operator's directory, so a node added later gets a
+  certificate from the same authority and nothing else is reissued. An operator with an existing
+  authority puts its `ca.pem` and `ca-key.pem` in the directory instead of creating one.
+
+  Issuing a leaf again renews it. The leaf's existing key is reused, and a peer's identity is the
+  SHA-256 of its public key, so a renewed certificate keeps every registration and pinned
+  fingerprint valid.
+
+  Every private key file is readable by its owner alone before any key material is written to it.
+  """
+
+  alias Biot.Protocol.Hostname
   alias Biot.Protocol.PeerIdentity
   alias X509.Certificate
   alias X509.Certificate.Extension
@@ -8,84 +22,115 @@ defmodule Biot.Protocol.Certificates do
   alias X509.PrivateKey
   alias X509.PublicKey
 
-  @spec generate(Path.t(), non_neg_integer()) :: {:ok, map()} | {:error, term()}
-  def generate(directory, node_count) when is_binary(directory) and node_count >= 0 do
-    with :ok <- File.mkdir_p(directory) do
-      ca_key = PrivateKey.new_ec(:secp256r1)
-      ca_cert = Certificate.self_signed(ca_key, "/CN=Biot Development CA", template: :root_ca)
-      server_key = PrivateKey.new_ec(:secp256r1)
+  @authority_certificate "ca.pem"
+  @authority_key "ca-key.pem"
 
-      server_cert =
-        Certificate.new(PublicKey.derive(server_key), "/CN=biot-server", ca_cert, ca_key,
-          template: :server
-        )
+  @typedoc "`{:node, name}` takes a lowercase DNS label, which names the node's files."
+  @type role :: :server | {:node, String.t()}
+  @type leaf :: %{cert: Path.t(), key: Path.t(), fingerprint: String.t()}
+  @type issue_error ::
+          :invalid_node_name
+          | :missing_authority
+          | :malformed_authority
+          | :malformed_key
+          | File.posix()
 
-      :ok = write(directory, "ca.pem", Certificate.to_pem(ca_cert))
-      :ok = write(directory, "server-cert.pem", Certificate.to_pem(server_cert))
-      :ok = write_key(directory, "server-key.pem", PrivateKey.to_pem(server_key))
+  @doc "Creates the deployment's authority. An existing authority is never replaced."
+  @spec create_authority(Path.t()) :: {:ok, Path.t()} | {:error, :authority_exists | File.posix()}
+  def create_authority(directory) do
+    certificate_path = Path.join(directory, @authority_certificate)
+    key_path = Path.join(directory, @authority_key)
 
-      {:ok, server_fingerprint} = PeerIdentity.from_certificate(Certificate.to_der(server_cert))
-      nodes = Enum.map(1..node_count//1, &generate_node(directory, &1, ca_cert, ca_key))
+    if File.exists?(certificate_path) or File.exists?(key_path) do
+      {:error, :authority_exists}
+    else
+      key = PrivateKey.new_ec(:secp256r1)
+      certificate = Certificate.self_signed(key, "/CN=Biot CA", template: :root_ca)
 
-      node_fingerprints =
-        nodes
-        |> Enum.with_index(1)
-        |> Map.new(fn {node, number} -> {"node-#{number}", node.fingerprint} end)
-
-      :ok =
-        write(
-          directory,
-          "fingerprints.json",
-          Jason.encode!(%{"server" => server_fingerprint, "nodes" => node_fingerprints},
-            pretty: true
-          )
-        )
-
-      {:ok,
-       %{
-         ca: Path.join(directory, "ca.pem"),
-         server: %{
-           cert: Path.join(directory, "server-cert.pem"),
-           key: Path.join(directory, "server-key.pem"),
-           fingerprint: server_fingerprint
-         },
-         nodes: nodes
-       }}
+      with :ok <- File.mkdir_p(directory),
+           :ok <- write_private(key_path, PrivateKey.to_pem(key)),
+           :ok <- File.write(certificate_path, Certificate.to_pem(certificate), [:exclusive]) do
+        {:ok, certificate_path}
+      end
     end
   end
 
-  defp generate_node(directory, number, ca_cert, ca_key) do
-    key = PrivateKey.new_ec(:secp256r1)
-
-    cert =
-      Certificate.new(PublicKey.derive(key), "/CN=biot-node-#{number}", ca_cert, ca_key,
-        template: client_template()
-      )
-
-    cert_name = "node-#{number}-cert.pem"
-    key_name = "node-#{number}-key.pem"
-    :ok = write(directory, cert_name, Certificate.to_pem(cert))
-    :ok = write_key(directory, key_name, PrivateKey.to_pem(key))
-    {:ok, fingerprint} = PeerIdentity.from_certificate(Certificate.to_der(cert))
-
-    %{
-      cert: Path.join(directory, cert_name),
-      key: Path.join(directory, key_name),
-      fingerprint: fingerprint
-    }
+  @doc "Issues the certificate for one role from the directory's authority, or renews it."
+  @spec issue(Path.t(), role()) :: {:ok, leaf()} | {:error, issue_error()}
+  def issue(directory, role) do
+    with {:ok, name, subject, template} <- leaf(role),
+         {:ok, authority_certificate, authority_key} <- read_authority(directory),
+         key_path = Path.join(directory, name <> "-key.pem"),
+         {:ok, key} <- leaf_key(key_path),
+         certificate =
+           Certificate.new(
+             PublicKey.derive(key),
+             subject,
+             authority_certificate,
+             authority_key,
+             template: template
+           ),
+         certificate_path = Path.join(directory, name <> "-cert.pem"),
+         :ok <- File.write(certificate_path, Certificate.to_pem(certificate)),
+         {:ok, fingerprint} <- PeerIdentity.from_certificate(Certificate.to_der(certificate)) do
+      {:ok, %{cert: certificate_path, key: key_path, fingerprint: fingerprint}}
+    end
   end
 
-  defp write(directory, name, content), do: File.write(Path.join(directory, name), content)
+  defp leaf(:server), do: {:ok, "server", "/CN=biot-server", :server}
 
-  defp write_key(directory, name, content) do
-    path = Path.join(directory, name)
-
-    with :ok <- File.write(path, content), do: File.chmod(path, 0o600)
+  defp leaf({:node, name}) do
+    case Hostname.parse(name) do
+      {:ok, _label} -> {:ok, "node-" <> name, "/CN=biot-node-" <> name, node_template()}
+      {:error, :invalid_format} -> {:error, :invalid_node_name}
+    end
   end
 
-  defp client_template do
-    Template.new(:server,
-      extensions: [ext_key_usage: Extension.ext_key_usage([:clientAuth])]
-    )
+  # A node only ever dials the server, so its certificate authenticates a client and nothing else.
+  defp node_template do
+    Template.new(:server, extensions: [ext_key_usage: Extension.ext_key_usage([:clientAuth])])
+  end
+
+  defp read_authority(directory) do
+    with {:ok, certificate_pem} <- File.read(Path.join(directory, @authority_certificate)),
+         {:ok, key_pem} <- File.read(Path.join(directory, @authority_key)),
+         {:ok, certificate} <- Certificate.from_pem(certificate_pem),
+         {:ok, key} <- PrivateKey.from_pem(key_pem) do
+      {:ok, certificate, key}
+    else
+      {:error, :enoent} -> {:error, :missing_authority}
+      {:error, reason} when reason in [:malformed, :not_found] -> {:error, :malformed_authority}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp leaf_key(path) do
+    case File.read(path) do
+      {:ok, pem} ->
+        case PrivateKey.from_pem(pem) do
+          {:ok, key} -> {:ok, key}
+          {:error, _reason} -> {:error, :malformed_key}
+        end
+
+      {:error, :enoent} ->
+        key = PrivateKey.new_ec(:secp256r1)
+        with :ok <- write_private(path, PrivateKey.to_pem(key)), do: {:ok, key}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # The file is created empty, restricted, and only then written, so no reader ever sees the key
+  # under the umask's wider mode.
+  defp write_private(path, content) do
+    case File.open(path, [:write, :exclusive, :binary], &restrict_and_write(&1, path, content)) do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp restrict_and_write(file, path, content) do
+    with :ok <- File.chmod(path, 0o600), do: IO.binwrite(file, content)
   end
 end

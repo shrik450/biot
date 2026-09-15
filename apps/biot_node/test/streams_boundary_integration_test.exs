@@ -2,6 +2,7 @@ defmodule Biot.Node.StreamsBoundaryIntegrationTest do
   @moduledoc false
   use ExUnit.Case, async: false
 
+  alias Biot.Node.Journal.Migrator
   alias Biot.Node.Repo
   alias Biot.Node.Streams
   alias Biot.Node.StreamsFixture
@@ -16,8 +17,7 @@ defmodule Biot.Node.StreamsBoundaryIntegrationTest do
     :ok = StreamsFixture.put_host_config("biot-streams-boundary")
 
     start_supervised!(Repo)
-    migrations = Application.app_dir(:biot_node, "priv/repo/migrations")
-    Ecto.Migrator.run(Repo, migrations, :up, all: true, log: false)
+    Migrator.migrate(log: false)
 
     {:ok, certificates} =
       StreamsFixture.certificates(StreamsFixture.temporary_directory("biot-streams-certs"))
@@ -43,14 +43,15 @@ defmodule Biot.Node.StreamsBoundaryIntegrationTest do
   defp connection_id, do: elem(ConnectionId.parse(Ecto.UUID.generate()), 1)
   defp stream_id, do: elem(StreamId.parse(Ecto.UUID.generate()), 1)
 
-  defp dial_options(certificates, connection_pid) do
+  # A stream admitted with these fails its attach at once and reports that to the test process.
+  defp unreachable(certificates) do
     %{
       server_host: "127.0.0.1",
       server_port: 1,
       server_fingerprint: certificates.server.fingerprint,
       registration_id: StreamsFixture.registration_id(),
       tls: node_tls(certificates),
-      connection_pid: connection_pid
+      connection_pid: self()
     }
   end
 
@@ -59,10 +60,10 @@ defmodule Biot.Node.StreamsBoundaryIntegrationTest do
     [certfile: node.cert, keyfile: node.key, cacertfile: certificates.ca]
   end
 
-  defp children(biot_id) do
-    :sys.get_state(Streams).groups.groups
-    |> Map.get(biot_id, %{children: MapSet.new()})
-    |> Map.fetch!(:children)
+  defp live_children do
+    for {_id, pid, _type, _modules} <- DynamicSupervisor.which_children(Streams.Children),
+        is_pid(pid),
+        do: pid
   end
 
   test "refuses an unknown biot, an obsolete revision, and another connection", %{
@@ -75,7 +76,7 @@ defmodule Biot.Node.StreamsBoundaryIntegrationTest do
 
     assert :applied = Streams.apply_revision(biot, cid, 3)
 
-    dial = dial_options(certificates, self())
+    dial = unreachable(certificates)
 
     assert {:error, :stale_access} =
              Streams.admit(biot, cid, 2, stream_id(), @stream_target, dial)
@@ -90,27 +91,32 @@ defmodule Biot.Node.StreamsBoundaryIntegrationTest do
              Streams.admit(other, cid, 3, stream_id(), @stream_target, dial)
   end
 
-  test "refuses a biot over the per-biot limit and the node over the total limit", %{
-    certificates: certificates
-  } do
-    start_boundary(max_streams: 2, max_streams_per_biot: 1)
-    first = biot_id()
-    second = biot_id()
+  # A stream counts against the limits only while it lives, so the admitted stream in each limit
+  # test is real. Each test uses one, because the agent must run as the test's own UID and two
+  # allocations cannot share a UID range.
+  test "refuses a biot over the per-biot limit", %{certificates: certificates, uid: uid} do
+    start_boundary(max_streams: 10, max_streams_per_biot: 1)
+    biot = biot_id()
     cid = connection_id()
-    dial = dial_options(certificates, self())
 
-    assert :applied = Streams.apply_revision(first, cid, 1)
-    assert :applied = Streams.apply_revision(second, cid, 1)
+    {target, dial, _service} = live_port_stream(biot, certificates, uid)
+    assert :applied = Streams.apply_revision(biot, cid, 1)
+    assert :ok = Streams.admit(biot, cid, 1, stream_id(), target, dial)
 
-    assert :ok = Streams.admit(first, cid, 1, stream_id(), @stream_target, dial)
+    assert {:error, :too_many_streams} = Streams.admit(biot, cid, 1, stream_id(), target, dial)
+  end
+
+  test "refuses the node over the total limit", %{certificates: certificates, uid: uid} do
+    start_boundary(max_streams: 1, max_streams_per_biot: 10)
+    [first, second] = [biot_id(), biot_id()]
+    cid = connection_id()
+
+    {target, dial, _service} = live_port_stream(first, certificates, uid)
+    for biot <- [first, second], do: assert(:applied = Streams.apply_revision(biot, cid, 1))
+    assert :ok = Streams.admit(first, cid, 1, stream_id(), target, dial)
 
     assert {:error, :too_many_streams} =
-             Streams.admit(first, cid, 1, stream_id(), @stream_target, dial)
-
-    assert :ok = Streams.admit(second, cid, 1, stream_id(), @stream_target, dial)
-
-    assert {:error, :too_many_streams} =
-             Streams.admit(first, cid, 1, stream_id(), @stream_target, dial)
+             Streams.admit(second, cid, 1, stream_id(), @stream_target, dial)
   end
 
   test "a higher revision terminates the live children before apply_revision returns", %{
@@ -124,17 +130,14 @@ defmodule Biot.Node.StreamsBoundaryIntegrationTest do
     {target, dial, _service} = live_port_stream(biot, certificates, uid)
     assert :applied = Streams.apply_revision(biot, cid, 1)
     assert :ok = Streams.admit(biot, cid, 1, stream_id(), target, dial)
-
-    child =
-      StreamsFixture.wait_until(
-        fn -> children(biot) |> Enum.find(&Process.alive?/1) end,
-        "a live child"
-      )
+    [child] = live_children()
 
     assert :applied = Streams.apply_revision(biot, cid, 2)
     refute Process.alive?(child)
-    assert children(biot) == MapSet.new()
-    assert Map.fetch!(:sys.get_state(Streams).groups.groups, biot).revision == 2
+    assert live_children() == []
+
+    assert {:error, :stale_access} = Streams.admit(biot, cid, 1, stream_id(), target, dial)
+    assert :ok = Streams.admit(biot, cid, 2, stream_id(), target, unreachable(certificates))
   end
 
   test "repeating an applied revision re-acknowledges and a lower one is ignored", %{
@@ -148,17 +151,14 @@ defmodule Biot.Node.StreamsBoundaryIntegrationTest do
     {target, dial, _service} = live_port_stream(biot, certificates, uid)
     assert :applied = Streams.apply_revision(biot, cid, 5)
     assert :ok = Streams.admit(biot, cid, 5, stream_id(), target, dial)
-
-    child =
-      StreamsFixture.wait_until(
-        fn -> children(biot) |> Enum.find(&Process.alive?/1) end,
-        "a live child"
-      )
+    [child] = live_children()
 
     assert :applied = Streams.apply_revision(biot, cid, 5)
     assert Process.alive?(child)
     assert :ignored = Streams.apply_revision(biot, cid, 4)
-    assert Map.fetch!(:sys.get_state(Streams).groups.groups, biot).revision == 5
+
+    assert {:error, :stale_access} = Streams.admit(biot, cid, 4, stream_id(), target, dial)
+    assert :ok = Streams.admit(biot, cid, 5, stream_id(), target, unreachable(certificates))
   end
 
   test "close_all terminates every child and empties every group", %{
@@ -172,16 +172,12 @@ defmodule Biot.Node.StreamsBoundaryIntegrationTest do
     {target, dial, _service} = live_port_stream(biot, certificates, uid)
     assert :applied = Streams.apply_revision(biot, cid, 1)
     assert :ok = Streams.admit(biot, cid, 1, stream_id(), target, dial)
-
-    child =
-      StreamsFixture.wait_until(
-        fn -> children(biot) |> Enum.find(&Process.alive?/1) end,
-        "a live child"
-      )
+    [child] = live_children()
 
     assert :ok = Streams.close_all()
     refute Process.alive?(child)
-    assert :sys.get_state(Streams).groups.groups == %{}
+    assert live_children() == []
+    assert {:error, :unknown_biot} = Streams.admit(biot, cid, 1, stream_id(), target, dial)
   end
 
   test "bytes that arrive in the same read as attached reach the agent at once", %{

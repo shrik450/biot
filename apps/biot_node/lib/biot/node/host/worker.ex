@@ -184,18 +184,25 @@ defmodule Biot.Node.Host.Worker do
   def state(config, biot_id), do: claimed_state(config, {:worker, biot_id})
 
   defp claimed_state(config, claim) do
-    case Podman.run(config, ["inspect", "--type", "container", name(claim)]) do
-      {:ok, %Command.Result{status: 0, stdout: stdout}} ->
-        parse_inspection(stdout, claim)
-
-      {:ok, %Command.Result{} = result} ->
-        if Podman.absent?(:container, result),
-          do: :absent,
-          else: unknown(HostDiagnostic.from_command(result))
-
-      {:error, reason} ->
-        unknown(Diagnostic.text("Podman could not inspect the build worker: #{inspect(reason)}"))
+    case Podman.exists(config, :container, name(claim)) do
+      :absent -> :absent
+      :present -> inspect_claim(config, claim)
+      {:error, %Command.Result{} = result} -> unknown(HostDiagnostic.from_command(result))
+      {:error, reason} -> unreachable(reason)
     end
+  end
+
+  # A worker that ends between the two commands reads as unknown here, and recovery inspects again.
+  defp inspect_claim(config, claim) do
+    case Podman.run(config, ["container", "inspect", name(claim)]) do
+      {:ok, %Command.Result{status: 0, stdout: stdout}} -> parse_inspection(stdout, claim)
+      {:ok, %Command.Result{} = result} -> unknown(HostDiagnostic.from_command(result))
+      {:error, reason} -> unreachable(reason)
+    end
+  end
+
+  defp unreachable(reason) do
+    unknown(Diagnostic.text("Podman could not inspect the build worker: #{inspect(reason)}"))
   end
 
   defp start(config, %Spec{} = spec) do

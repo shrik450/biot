@@ -1,10 +1,9 @@
 defmodule Biot.Node.Host.Podman do
-  @moduledoc "Runs Podman commands and recognizes when a named resource is absent."
+  @moduledoc "Runs Podman commands and asks whether a named resource exists."
 
   alias Biot.Node.Allocation
   alias Biot.Node.Host.Command
   alias Biot.Node.Host.Config
-  alias Biot.Node.Host.Diagnostic, as: HostDiagnostic
   alias Biot.Node.Host.FileSystem
   alias Biot.Node.Host.Outcome
   alias Biot.Node.Host.Paths
@@ -159,18 +158,18 @@ defmodule Biot.Node.Host.Podman do
     end)
   end
 
-  @spec absent?(resource(), Command.Result.t()) :: boolean()
-  def absent?(resource, result) do
-    {content, _truncated} = HostDiagnostic.from_command(result)
-    diagnostic = String.downcase(content)
-
-    # Podman exposes absence through unstable diagnostic prose instead of a distinct exit status.
-    Enum.any?(absence_phrases(resource), &String.contains?(diagnostic, &1))
+  @doc """
+  Whether a named container or network exists. `podman <resource> exists` answers with its exit
+  status alone: 0 is present, 1 is absent, and anything else is an error that is neither.
+  """
+  @spec exists(Config.t(), resource(), String.t()) ::
+          :present | :absent | {:error, Command.Result.t() | term()}
+  def exists(config, resource, name) do
+    case run(config, [Atom.to_string(resource), "exists", name]) do
+      {:ok, %Command.Result{status: 0}} -> :present
+      {:ok, %Command.Result{status: 1}} -> :absent
+      {:ok, %Command.Result{} = result} -> {:error, result}
+      {:error, reason} -> {:error, reason}
+    end
   end
-
-  defp absence_phrases(:container) do
-    ["no such container", "no such object", "no container with name or id", "not found"]
-  end
-
-  defp absence_phrases(:network), do: ["no such network", "not found"]
 end

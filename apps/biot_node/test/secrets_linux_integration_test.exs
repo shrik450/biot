@@ -38,10 +38,9 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
   @unauthorized_delay_ms 6_000
 
   setup_all do
-    project_root = Path.expand("../../..", __DIR__)
     data_root = temporary_directory("biot-secrets-linux")
     repository_root = temporary_directory("biot-secrets-git")
-    settings = host_settings(data_root, project_root)
+    settings = host_settings(data_root)
 
     previous =
       Map.new(settings, fn {key, _value} -> {key, Application.get_env(:biot_node, key)} end)
@@ -60,6 +59,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
 
     on_exit(fn ->
       if Port.info(server), do: Port.close(server)
+      :persistent_term.erase(Biot.Node.Host.Config)
 
       System.cmd("podman", ["unshare", "chown", "-R", "0:0", data_root], stderr_to_stdout: true)
       System.cmd("podman", ["unshare", "chmod", "-R", "u+rwX", data_root], stderr_to_stdout: true)
@@ -305,8 +305,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
 
     selection = %EnvironmentSelection{
       base_nixpkgs: SourceSelector.nixpkgs(),
-      layers: [],
-      project_context: nil
+      layers: []
     }
 
     %ExecutionSpec{
@@ -551,7 +550,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
     path
   end
 
-  defp host_settings(data_root, project_root) do
+  defp host_settings(data_root) do
     [
       data_root: data_root,
       uid_range_base: 100_000,
@@ -568,7 +567,6 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
       sleep_executable: "sleep",
       builder_image:
         "docker.io/nixos/nix@sha256:29fc5fe207f159ceb0143c25c19c774062fee02ce5eda118f3067547b3054894",
-      build_support_dir: project_root,
       binary_cache_urls: ["https://cache.nixos.org"],
       binary_cache_keys: [
         "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="

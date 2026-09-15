@@ -4,7 +4,7 @@ defmodule Biot.Server.AccessAdmissionIntegrationTest do
 
   import Ecto.Query
 
-  alias Biot.Protocol.{BiotId, Certificates, ShellRequest, SshPublicKey}
+  alias Biot.Protocol.{BiotId, ShellRequest, SshPublicKey}
   alias Biot.Server.Access
   alias Biot.Server.Access.Owners
   alias Biot.Server.AccessHarness
@@ -13,7 +13,6 @@ defmodule Biot.Server.AccessAdmissionIntegrationTest do
   alias Biot.Server.Authentication
   alias Biot.Server.AuthenticationProof
   alias Biot.Server.Credentials
-  alias Biot.Server.Id
   alias Biot.Server.NodeConnections
   alias Biot.Server.Schema.Biot, as: BiotRow
   alias Biot.Server.Schema.{Principal, Publication, Session, ShellGrant, SshKey}
@@ -31,7 +30,7 @@ defmodule Biot.Server.AccessAdmissionIntegrationTest do
     directory =
       Path.join(System.tmp_dir!(), "biot-admission-#{System.unique_integer([:positive])}")
 
-    {:ok, certificates} = Certificates.generate(directory, 2)
+    {:ok, certificates} = TestFixtures.certificates(directory, 2)
     on_exit(fn -> File.rm_rf!(directory) end)
     %{certificates: certificates}
   end
@@ -323,7 +322,7 @@ defmodule Biot.Server.AccessAdmissionIntegrationTest do
       assert_denied(
         context,
         fn ->
-          Access.open_shell(owner_authentication, Id.generate(BiotId), @shell)
+          Access.open_shell(owner_authentication, BiotId.generate(), @shell)
         end,
         :not_found
       )

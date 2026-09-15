@@ -227,9 +227,13 @@ defmodule Biot.Node.Host.SourceStaging do
     end
   end
 
+  # Outside a release the build support trees are links to the source checkout; a release copies
+  # the linked files in, so following links gives the same bytes either way.
   defp copy_support_trees(config, destination) do
     Enum.reduce_while(["nix", "agent"], :ok, fn tree, :ok ->
-      case File.cp_r(Path.join(config.build_support_dir, tree), Path.join(destination, tree)) do
+      source = Path.join(config.build_support_dir, tree)
+
+      case File.cp_r(source, Path.join(destination, tree), dereference_symlinks: true) do
         {:ok, _copied} -> {:cont, :ok}
         {:error, reason, _path} -> {:halt, {:error, reason}}
       end

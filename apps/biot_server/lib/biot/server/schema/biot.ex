@@ -4,6 +4,7 @@ defmodule Biot.Server.Schema.Biot do
   use Ecto.Schema
 
   alias Biot.Protocol.BiotId
+  alias Biot.Protocol.BiotName
   alias Biot.Protocol.Desired
   alias Biot.Protocol.Digest
   alias Biot.Protocol.EnvironmentId
@@ -15,7 +16,7 @@ defmodule Biot.Server.Schema.Biot do
   @primary_key false
   schema "biots" do
     field(:id, ProtocolValue, module: BiotId, primary_key: true)
-    field(:name, :string)
+    field(:name, ProtocolValue, module: BiotName)
     field(:owner_id, ProtocolValue, module: PrincipalId)
     field(:node_id, ProtocolValue, module: NodeId)
     field(:repository, ProtocolValue, module: RepositorySource)

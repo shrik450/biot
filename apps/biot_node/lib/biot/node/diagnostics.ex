@@ -13,39 +13,42 @@ defmodule Biot.Node.Diagnostics do
   alias Biot.Node.Host.Paths
   alias Biot.Node.Journal
   alias Biot.Protocol.BiotId
-  alias Biot.Protocol.CanonicalUuid
   alias Biot.Protocol.Failure
   alias Biot.Protocol.PrivateDiagnosticId
 
   require Logger
 
-  @doc "Stores one failed stage and returns the private ID carried by its failure."
+  @doc """
+  Stores one failed stage and returns the private ID carried by its failure.
+
+  A diagnostic the node cannot store, such as on a full disk, is an error the caller reports
+  without it; the failure it describes still has to be recorded.
+  """
   @spec put(BiotId.t(), pos_integer(), Failure.stage(), Diagnostic.t()) ::
-          PrivateDiagnosticId.t()
+          {:ok, PrivateDiagnosticId.t()} | {:error, term()}
   def put(%BiotId{} = biot_id, revision, stage, {content, source_truncated})
       when is_integer(revision) and revision > 0 and is_atom(stage) and is_binary(content) and
              is_boolean(source_truncated) do
-    config = Config.from_application!()
-    diagnostic_id = mint()
+    config = Config.current!()
+    diagnostic_id = PrivateDiagnosticId.generate()
     {stored, entry_truncated} = truncate_head(content, max_entry_bytes())
-    path = Paths.diagnostic(config, diagnostic_id)
-    :ok = FileSystem.write_atomic(path, stored)
 
-    case Journal.index_diagnostic(
-           diagnostic_id,
-           biot_id,
-           revision,
-           stage,
-           source_truncated or entry_truncated,
-           max_entries_per_biot()
-         ) do
-      {:ok, stale_ids} ->
-        remove_files(config, stale_ids)
-        diagnostic_id
-
+    with :ok <- FileSystem.write_atomic(Paths.diagnostic(config, diagnostic_id), stored),
+         {:ok, stale_ids} <-
+           Journal.index_diagnostic(
+             diagnostic_id,
+             biot_id,
+             revision,
+             stage,
+             source_truncated or entry_truncated,
+             max_entries_per_biot()
+           ) do
+      remove_files(config, stale_ids)
+      {:ok, diagnostic_id}
+    else
       {:error, reason} ->
         remove_files(config, [diagnostic_id])
-        raise "could not index diagnostic: #{inspect(reason)}"
+        {:error, reason}
     end
   end
 
@@ -53,21 +56,18 @@ defmodule Biot.Node.Diagnostics do
   @spec fetch(PrivateDiagnosticId.t(), pos_integer()) :: {:ok, Diagnostic.t()} | :not_found
   def fetch(%PrivateDiagnosticId{} = diagnostic_id, max_bytes)
       when is_integer(max_bytes) and max_bytes > 0 do
-    config = Config.from_application!()
+    config = Config.current!()
 
-    case Journal.diagnostic(diagnostic_id) do
-      nil ->
-        :not_found
-
-      truncated ->
-        fetch_file(config, diagnostic_id, truncated, max_bytes)
+    case Journal.diagnostic_truncated(diagnostic_id) do
+      {:ok, truncated} -> fetch_file(config, diagnostic_id, truncated, max_bytes)
+      :not_found -> :not_found
     end
   end
 
   @doc "Forgets every diagnostic after a server snapshot stops assigning the Biot to this node."
   @spec forget(BiotId.t()) :: :ok
   def forget(%BiotId{} = biot_id) do
-    config = Config.from_application!()
+    config = Config.current!()
     {:ok, diagnostic_ids} = Journal.forget_diagnostics(biot_id)
     remove_files(config, diagnostic_ids)
   end
@@ -105,11 +105,6 @@ defmodule Biot.Node.Diagnostics do
   end
 
   defp truncate_head(content, _max_bytes), do: {content, false}
-
-  defp mint do
-    {:ok, diagnostic_id} = PrivateDiagnosticId.parse(CanonicalUuid.generate())
-    diagnostic_id
-  end
 
   defp max_entry_bytes do
     Application.fetch_env!(:biot_node, :diagnostic_max_entry_bytes)

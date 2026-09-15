@@ -50,6 +50,15 @@ defmodule BiotWeb.BrowserAuthIntegrationTest do
            )
   end
 
+  test "the LiveView socket accepts only the exact control origin", _context do
+    control = URI.parse(BiotWeb.Endpoint.url())
+
+    assert ControlOrigin.socket_origin?(control)
+    refute ControlOrigin.socket_origin?(%{control | scheme: "https", port: 443})
+    refute ControlOrigin.socket_origin?(%{control | port: control.port + 1})
+    refute ControlOrigin.socket_origin?(%{control | host: "preview." <> control.host})
+  end
+
   test "the control session cookie has the scoped lifetime and attributes", context do
     conn = browser_session(context.control_token)
     response = get(conn, "/login?return=/biots")

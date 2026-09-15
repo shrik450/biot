@@ -64,9 +64,9 @@ defmodule BiotWeb.OidcPeer do
   @spec client_secret(t()) :: String.t()
   def client_secret(peer), do: GenServer.call(peer, :client_secret)
 
-  @spec configuration(t(), String.t()) :: map()
+  @spec configuration(t(), String.t()) :: Biot.Server.Login.Settings.t()
   def configuration(peer, redirect_uri),
-    do: %{
+    do: %Biot.Server.Login.Settings{
       issuer: issuer(peer),
       client_id: client_id(peer),
       client_secret: client_secret(peer),

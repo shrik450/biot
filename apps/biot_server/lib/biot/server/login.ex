@@ -4,6 +4,7 @@ defmodule Biot.Server.Login do
   alias Biot.Protocol.SameOriginPath
   alias Biot.Server.Login.Callback
   alias Biot.Server.Login.Pending
+  alias Biot.Server.Login.Settings
   alias Biot.Server.Principals
   alias Biot.Server.Schema.Principal
   alias Biot.Server.Sessions
@@ -51,25 +52,9 @@ defmodule Biot.Server.Login do
   def finish(_pending, _callback_params), do: {:error, :unauthenticated}
 
   defp oidc_settings do
-    case Application.get_env(:biot_server, :oidc) do
-      %{
-        issuer: issuer,
-        client_id: client_id,
-        client_secret: client_secret,
-        redirect_uri: redirect_uri
-      }
-      when is_binary(issuer) and is_binary(client_id) and is_binary(client_secret) and
-             is_binary(redirect_uri) ->
-        {:ok,
-         %{
-           issuer: issuer,
-           client_id: client_id,
-           client_secret: client_secret,
-           redirect_uri: redirect_uri
-         }}
-
-      _missing_or_invalid ->
-        :error
+    case Application.fetch_env!(:biot_server, :oidc) do
+      %Settings{} = settings -> {:ok, settings}
+      nil -> :error
     end
   end
 
@@ -132,6 +117,9 @@ defmodule Biot.Server.Login do
     if provider_unavailable?(reason), do: :temporarily_unavailable, else: :unauthenticated
   end
 
+  # oidcc reports an unreachable provider in several shapes: a bare reason, an HTTP status, or a
+  # transport error nested inside its own error tuples and lists. Any of them means the login can
+  # be retried; every other error means the login itself was refused.
   defp provider_unavailable?(:provider_not_ready), do: true
   defp provider_unavailable?(:timeout), do: true
   defp provider_unavailable?(:nxdomain), do: true

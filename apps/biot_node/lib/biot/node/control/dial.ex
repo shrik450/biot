@@ -29,12 +29,16 @@ defmodule Biot.Node.Control.Dial do
     end
   end
 
+  # Both links send small frames that wait on a reply: control requests, heartbeats, and shell
+  # keystrokes. Nagle's algorithm holds a small write until the previous one is acknowledged, and
+  # delayed acknowledgement stretches that to about 40 ms.
   defp tls_options(tls) do
     Keyword.merge(tls,
       verify: :verify_peer,
       active: false,
       mode: :binary,
       packet: :raw,
+      nodelay: true,
       server_name_indication: :disable
     )
   end

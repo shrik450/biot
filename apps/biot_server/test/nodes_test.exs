@@ -22,12 +22,10 @@ defmodule Biot.Server.NodesTest do
   alias Biot.Server.TestFixtures
 
   setup do
-    previous = Application.fetch_env(:biot_server, :node_registrations)
-    previous_file = Application.fetch_env(:biot_server, :node_registrations_file)
+    previous = Application.fetch_env(:biot_server, :node_registrations_file)
 
     on_exit(fn ->
-      restore_env(:node_registrations, previous)
-      restore_env(:node_registrations_file, previous_file)
+      restore_env(:node_registrations_file, previous)
     end)
 
     :ok
@@ -114,6 +112,25 @@ defmodule Biot.Server.NodesTest do
     observation |> Ecto.Changeset.change(data: :no_allocation) |> Repo.update!()
     assert {:ok, _nodes} = reload([retired])
     assert %Node{status: :retired, max_biots: 20} = Repo.get!(Node, registration.node_id)
+  end
+
+  test "retirement waits until the node's latest report lists no orphaned allocation" do
+    registration = TestFixtures.registration(1)
+    assert {:ok, _nodes} = reload([registration])
+    node = Repo.get!(Node, registration.node_id)
+    retired = %{registration | status: :retired}
+
+    report =
+      TestFixtures.node_observation(node, 1,
+        orphaned_allocations: [TestFixtures.orphaned_allocation(1)]
+      )
+
+    assert reload([retired]) == {:error, {:retirement_blocked, registration.node_id}}
+    assert %Node{status: :enabled} = Repo.get!(Node, registration.node_id)
+
+    report |> Ecto.Changeset.change(orphaned_allocations: []) |> Repo.update!()
+    assert {:ok, _nodes} = reload([retired])
+    assert %Node{status: :retired} = Repo.get!(Node, registration.node_id)
   end
 
   test "abandonment fails only active assigned operations and increments each assigned Biot once" do
@@ -301,7 +318,7 @@ defmodule Biot.Server.NodesTest do
     invalid_json = Path.join(tmp_dir, "invalid.json")
     File.write!(invalid_json, "[")
     on_exit(fn -> File.rm(invalid_json) end)
-    Application.delete_env(:biot_server, :node_registrations)
+    Application.delete_env(:biot_server, :node_registrations_file)
     Application.put_env(:biot_server, :node_registrations_file, invalid_json)
 
     assert {:error, {:enrollment_file, _error} = rejection} = Nodes.reload()
@@ -331,7 +348,7 @@ defmodule Biot.Server.NodesTest do
   end
 
   defp reload(registrations) do
-    Application.put_env(:biot_server, :node_registrations, registrations)
+    TestFixtures.put_registrations(registrations)
     Nodes.reload()
   end
 

@@ -12,7 +12,6 @@ defmodule Biot.Server.AccessProofCheckIntegrationTest do
   alias Biot.Server.AccessHarness.Registered
   alias Biot.Server.Actor
   alias Biot.Server.Credentials
-  alias Biot.Server.Id
   alias Biot.Server.Schema.{Credential, Principal, Session, SshKey}
   alias Biot.Server.Sessions
   alias Biot.Server.SshKeys
@@ -101,7 +100,7 @@ defmodule Biot.Server.AccessProofCheckIntegrationTest do
     preview = preview_authentication(context.owner, digest(control), hours(1))
     _first = Registered.start(context.biot.id, control)
     _second = Registered.start(context.biot.id, control)
-    _preview = Registered.start(Id.generate(BiotId), preview)
+    _preview = Registered.start(BiotId.generate(), preview)
 
     assert Enum.sort(Owners.proof_keys()) ==
              Enum.sort([

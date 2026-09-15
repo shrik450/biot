@@ -26,8 +26,7 @@ defmodule Biot.Server.Secrets do
   def deliver(nil, %BiotId{}, %SecretName{}, _value), do: {:error, :unauthenticated}
 
   def deliver(%Actor{} = actor, %BiotId{} = biot_id, %SecretName{} = name, value) do
-    with {:ok, biot} <- mark_exposure(actor, biot_id),
-         {:ok, {pid, timeout_ms}} <- Delivery.connection(biot) do
+    with {:ok, {pid, timeout_ms}} <- mark_exposure(actor, biot_id) do
       Connection.deliver_secret(pid, biot_id, name, value, timeout_ms)
     end
   end
@@ -49,21 +48,21 @@ defmodule Biot.Server.Secrets do
   end
 
   # The marker is committed on its own, before anything is sent, so every later outcome including
-  # a crash leaves it true.
+  # a crash leaves it true. It is set only once the assigned node is ready to take the value, so an
+  # unreachable node leaves no marker for a value that was never sent.
   defp mark_exposure(actor, biot_id) do
     Repo.transaction(
       fn ->
-        case Delivery.owned_biot(actor, biot_id) do
-          {:ok, biot} ->
-            Repo.update_all(
-              from(row in BiotRow, where: row.id == ^biot.id),
-              set: [direct_secret_exposure_possible: true, updated_at: DateTime.utc_now()]
-            )
+        with {:ok, biot} <- Delivery.owned_biot(actor, biot_id),
+             {:ok, connection} <- Delivery.connection(biot) do
+          Repo.update_all(
+            from(row in BiotRow, where: row.id == ^biot.id),
+            set: [direct_secret_exposure_possible: true, updated_at: DateTime.utc_now()]
+          )
 
-            biot
-
-          {:error, reason} ->
-            Repo.rollback(reason)
+          connection
+        else
+          {:error, reason} -> Repo.rollback(reason)
         end
       end,
       mode: :immediate

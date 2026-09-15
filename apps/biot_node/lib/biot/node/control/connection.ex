@@ -57,17 +57,17 @@ defmodule Biot.Node.Control.Connection do
       heartbeat_challenge: nil,
       pending_reads: %{},
       reconnect_token: nil,
-      backoff_ms: 250,
+      backoff_ms: nil,
       server_host: nil,
       server_port: nil,
       server_fingerprint: nil,
       registration_id: nil,
       platform: nil,
       tls: nil,
-      heartbeat_interval_ms: 30_000,
-      heartbeat_timeout_ms: 10_000,
-      backoff_min_ms: 250,
-      backoff_max_ms: 30_000
+      heartbeat_interval_ms: nil,
+      heartbeat_timeout_ms: nil,
+      backoff_min_ms: nil,
+      backoff_max_ms: nil
     ]
   end
 
@@ -252,12 +252,6 @@ defmodule Biot.Node.Control.Connection do
   @impl true
   def terminate(_reason, %State{socket: nil}), do: :ok
   def terminate(_reason, %State{socket: socket}), do: :ssl.close(socket)
-
-  defp connect(%State{server_host: nil} = state), do: {:noreply, state}
-  defp connect(%State{server_port: nil} = state), do: {:noreply, state}
-  defp connect(%State{server_fingerprint: nil} = state), do: {:noreply, state}
-  defp connect(%State{registration_id: nil} = state), do: {:noreply, state}
-  defp connect(%State{tls: nil} = state), do: {:noreply, state}
 
   defp connect(state) do
     dial = %{
@@ -593,34 +587,28 @@ defmodule Biot.Node.Control.Connection do
   end
 
   defp build_state(options) do
-    backoff_min = option(options, :reconnect_backoff_min_ms, 250)
+    backoff_min = setting(options, :reconnect_backoff_min_ms)
 
     %State{
-      server_host: option(options, :server_host, nil),
-      server_port: option(options, :server_port, nil),
-      server_fingerprint: option(options, :server_fingerprint, nil),
-      registration_id: registration_id(option(options, :registration_id, nil)),
-      tls: option(options, :tls, nil),
-      max_frame_bytes: Application.fetch_env!(:biot_node, :max_frame_bytes),
-      max_staged_specs: Application.fetch_env!(:biot_node, :max_staged_specs),
-      heartbeat_interval_ms: option(options, :heartbeat_interval_ms, 30_000),
-      heartbeat_timeout_ms: option(options, :heartbeat_timeout_ms, 10_000),
+      server_host: setting(options, :server_host),
+      server_port: setting(options, :server_port),
+      server_fingerprint: setting(options, :server_fingerprint),
+      registration_id: %RegistrationId{} = setting(options, :registration_id),
+      tls: setting(options, :tls),
+      max_frame_bytes: setting(options, :max_frame_bytes),
+      max_staged_specs: setting(options, :max_staged_specs),
+      heartbeat_interval_ms: setting(options, :heartbeat_interval_ms),
+      heartbeat_timeout_ms: setting(options, :heartbeat_timeout_ms),
       backoff_min_ms: backoff_min,
-      backoff_max_ms: option(options, :reconnect_backoff_max_ms, 30_000),
+      backoff_max_ms: setting(options, :reconnect_backoff_max_ms),
       backoff_ms: backoff_min
     }
   end
 
-  defp option(options, key, default) do
-    Keyword.get(options, key, Application.get_env(:biot_node, key, default))
-  end
-
-  defp registration_id(nil), do: nil
-  defp registration_id(%RegistrationId{} = registration_id), do: registration_id
-
-  defp registration_id(value) do
-    {:ok, registration_id} = RegistrationId.parse(value)
-    registration_id
+  # The application starts this connection only when every setting is configured, and a test passes
+  # its own values as options, so a missing one is a start failure rather than a default.
+  defp setting(options, key) do
+    Keyword.get_lazy(options, key, fn -> Application.fetch_env!(:biot_node, key) end)
   end
 
   defp start_read(state, timeout_ms, query, reply) do

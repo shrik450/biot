@@ -2,6 +2,7 @@ defmodule Biot.Node.StreamsAgentIntegrationTest do
   @moduledoc false
   use ExUnit.Case, async: false
 
+  alias Biot.Node.Journal.Migrator
   alias Biot.Node.Repo
   alias Biot.Node.Streams
   alias Biot.Node.Streams.Agent
@@ -16,10 +17,7 @@ defmodule Biot.Node.StreamsAgentIntegrationTest do
 
     start_supervised!(Repo)
 
-    Ecto.Migrator.run(Repo, Application.app_dir(:biot_node, "priv/repo/migrations"), :up,
-      all: true,
-      log: false
-    )
+    Migrator.migrate(log: false)
 
     {:ok, uid: StreamsFixture.host_uid()}
   end

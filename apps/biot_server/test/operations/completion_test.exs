@@ -13,7 +13,7 @@ defmodule Biot.Server.Operations.CompletionTest do
 
   @desired_environment "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
   @other_environment "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-  @incarnation "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+  @incarnation String.duplicate("c", 64)
 
   setup_all do
     {:ok, desired_environment} = EnvironmentId.parse(@desired_environment)

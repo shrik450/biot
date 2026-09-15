@@ -39,7 +39,7 @@ defmodule Biot.Server.Biots.CreateTest do
     assert accepted.revision == 1
 
     biot = Repo.get!(BiotRow, context.biot_id)
-    assert biot.name == "worker"
+    assert biot.name == TestFixtures.biot_name("worker")
     assert biot.owner_id == context.owner.id
     assert biot.node_id == context.node.id
     assert biot.repository == command.repository
@@ -140,7 +140,7 @@ defmodule Biot.Server.Biots.CreateTest do
     assert Biots.create(context.actor, context.biot_id, conflicting) ==
              {:error, :creation_conflict}
 
-    assert Repo.get!(BiotRow, context.biot_id).name == "worker"
+    assert Repo.get!(BiotRow, context.biot_id).name == TestFixtures.biot_name("worker")
     assert Repo.aggregate(Operation, :count) == 1
   end
 

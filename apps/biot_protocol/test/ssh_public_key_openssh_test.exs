@@ -36,7 +36,7 @@ defmodule Biot.Protocol.SshPublicKeyOpenSshTest do
   test "every algorithm and shape matches the ssh-keygen fingerprint", %{keys: keys} do
     for {name, key} <- keys, {label, line} <- variants(key) do
       assert {:ok, parsed} = SshPublicKey.parse(line)
-      assert SshPublicKey.fingerprint(parsed) == key.fingerprint, "#{name} #{label} fingerprint"
+      assert parsed.fingerprint == key.fingerprint, "#{name} #{label} fingerprint"
       assert SshPublicKey.to_string(parsed) == bare(key), "#{name} #{label} canonical line"
     end
   end
@@ -46,7 +46,7 @@ defmodule Biot.Protocol.SshPublicKeyOpenSshTest do
       fingerprints =
         for {_label, line} <- variants(key) do
           {:ok, parsed} = SshPublicKey.parse(line)
-          SshPublicKey.fingerprint(parsed)
+          parsed.fingerprint
         end
 
       assert Enum.uniq(fingerprints) == [key.fingerprint]

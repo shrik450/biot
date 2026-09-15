@@ -241,8 +241,7 @@ defmodule BiotWeb.ApiIntegrationTest do
       "repository" => "https://github.com/example/project.git",
       "environment" => %{
         "base_nixpkgs" => "nixpkgs",
-        "layers" => [],
-        "project_context" => nil
+        "layers" => []
       },
       "node_id" => to_string(context.node.id),
       "initial_state" => "stopped"
@@ -296,8 +295,7 @@ defmodule BiotWeb.ApiIntegrationTest do
 
     environment = %{
       "base_nixpkgs" => "nixpkgs",
-      "layers" => [],
-      "project_context" => nil
+      "layers" => []
     }
 
     updated =

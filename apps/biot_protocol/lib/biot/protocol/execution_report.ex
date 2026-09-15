@@ -1,6 +1,7 @@
 defmodule Biot.Protocol.ExecutionReport do
   @moduledoc "The node-supplied execution facts stored as a biot observation."
 
+  alias Biot.Protocol.Choice
   alias Biot.Protocol.ContainerState
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.Failure
@@ -90,7 +91,7 @@ defmodule Biot.Protocol.ExecutionReport do
          true <- is_integer(accepted_revision) and accepted_revision > 0,
          {:ok, installed_environment_id} <- parse_environment_id(installed_environment_id),
          {:ok, container} <- parse_container(container),
-         {:ok, data} <- parse_data(data),
+         {:ok, data} <- Choice.parse(data, @data_states),
          {:ok, waiting_for} <- parse_waiting_for(waiting_for),
          {:ok, failure} <- parse_failure(failure) do
       {:ok,
@@ -149,15 +150,6 @@ defmodule Biot.Protocol.ExecutionReport do
   end
 
   def parse_container(_container), do: {:error, :invalid_format}
-
-  defp parse_data(value) when is_binary(value) do
-    case Enum.find(@data_states, &(Atom.to_string(&1) == value)) do
-      nil -> {:error, :invalid_format}
-      data -> {:ok, data}
-    end
-  end
-
-  defp parse_data(_value), do: {:error, :invalid_format}
 
   @spec encode_waiting_for(waiting_for()) :: map() | nil
   def encode_waiting_for(nil), do: nil

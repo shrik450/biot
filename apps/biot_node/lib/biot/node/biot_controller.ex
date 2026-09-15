@@ -758,15 +758,15 @@ defmodule Biot.Node.BiotController do
          %State{} = state,
          %Outcome{diagnostic: diagnostic}
        ) do
-    diagnostic_ref =
-      Diagnostics.put(
-        state.biot_id,
-        revision(state.spec),
-        failure.stage,
-        diagnostic
-      )
+    case Diagnostics.put(state.biot_id, revision(state.spec), failure.stage, diagnostic) do
+      {:ok, diagnostic_ref} ->
+        %{failure | diagnostic_ref: diagnostic_ref}
 
-    %{failure | diagnostic_ref: diagnostic_ref}
+      # The failure matters more than its detail: it is recorded and reported without one.
+      {:error, reason} ->
+        Logger.warning("could not store a diagnostic for #{state.biot_id}: #{inspect(reason)}")
+        failure
+    end
   end
 
   defp revision(%BiotSpec{execution: execution}), do: execution.desired.revision

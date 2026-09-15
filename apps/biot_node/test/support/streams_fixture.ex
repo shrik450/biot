@@ -16,13 +16,19 @@ defmodule Biot.Node.StreamsFixture do
   defmodule AgentHandle do
     @moduledoc false
     @enforce_keys [:port, :os_pid]
-    defstruct [:port, :os_pid, :binary, :log]
+    defstruct [:port, :os_pid, :directory]
   end
 
-  @doc "A unique temporary directory under the system temp root."
+  @doc """
+  A fresh temporary directory under the system temp root, removed when the calling test or module
+  exits. The name is random because the temp root outlives test runs, and a counter restarts with
+  every run and would find an earlier run's leftovers.
+  """
   def temporary_directory(prefix) do
-    path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(path)
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+    path = Path.join(System.tmp_dir!(), "#{prefix}-#{suffix}")
+    :ok = File.mkdir(path)
+    ExUnit.Callbacks.on_exit(fn -> File.rm_rf(path) end)
     path
   end
 
@@ -44,9 +50,11 @@ defmodule Biot.Node.StreamsFixture do
       Map.new(settings, fn {key, _value} -> {key, Application.fetch_env(:biot_node, key)} end)
 
     Enum.each(settings, fn {key, value} -> Application.put_env(:biot_node, key, value) end)
+    {:ok, _config} = Config.load()
 
     ExUnit.Callbacks.on_exit(fn ->
       File.rm_rf!(data_root)
+      :persistent_term.erase(Config)
 
       Enum.each(previous, fn
         {key, {:ok, value}} -> Application.put_env(:biot_node, key, value)
@@ -57,7 +65,12 @@ defmodule Biot.Node.StreamsFixture do
     :ok
   end
 
-  def certificates(directory), do: Certificates.generate(directory, 1)
+  def certificates(directory) do
+    {:ok, authority} = Certificates.create_authority(directory)
+    {:ok, server} = Certificates.issue(directory, :server)
+    {:ok, node} = Certificates.issue(directory, {:node, "1"})
+    {:ok, %{ca: authority, server: server, nodes: [node]}}
+  end
 
   @doc "The host UID the test process runs as, which the seeded allocation must cover."
   def host_uid do
@@ -65,15 +78,13 @@ defmodule Biot.Node.StreamsFixture do
     String.trim(output) |> String.to_integer()
   end
 
-  @doc "Builds the real Go agent from the current source."
-  def agent_binary do
-    repo_root = Path.expand("../../../..", __DIR__)
-    binary = Path.join(repo_root, ".work/biot-agent-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(Path.dirname(binary))
+  @doc "Builds the real Go agent from the current source into `directory`."
+  def agent_binary(directory) do
+    binary = Path.join(directory, "biot-agent")
 
     {output, status} =
       System.cmd("go", ["build", "-o", binary, "./cmd/biot-agent"],
-        cd: Path.join(repo_root, "agent"),
+        cd: Path.expand("../../../../agent", __DIR__),
         stderr_to_stdout: true
       )
 
@@ -83,7 +94,7 @@ defmodule Biot.Node.StreamsFixture do
 
   @doc "Seeds a journal allocation and run directory, and returns the agent socket path."
   def seed_allocation(biot_id, uid_range) do
-    config = Config.from_application!()
+    config = Config.current!()
     {:ok, data_path} = NodePrivatePath.parse(Paths.biot(config, biot_id))
 
     {:ok, _allocation} =
@@ -102,10 +113,9 @@ defmodule Biot.Node.StreamsFixture do
 
   @doc "Starts the real agent as an OS process and waits for its socket."
   def start_agent(socket_path, entrypoint \\ "/bin/sh") do
-    binary = agent_binary()
-    repo_root = Path.expand("../../../..", __DIR__)
-    log = Path.join(repo_root, ".work/biot-agent-#{System.unique_integer([:positive])}.log")
-    File.mkdir_p!(Path.dirname(log))
+    directory = temporary_directory("biot-agent-build")
+    binary = agent_binary(directory)
+    log = Path.join(directory, "agent.log")
 
     # The agent's output goes to a file rather than this process's stdout, so a leaked agent can
     # never hold a pipe open after the test process exits.
@@ -124,7 +134,7 @@ defmodule Biot.Node.StreamsFixture do
       ])
 
     {:os_pid, os_pid} = Port.info(port, :os_pid)
-    agent = %AgentHandle{port: port, os_pid: os_pid, binary: binary, log: log}
+    agent = %AgentHandle{port: port, os_pid: os_pid, directory: directory}
     ExUnit.Callbacks.on_exit(fn -> stop_agent(agent) end)
     wait_until(fn -> if File.exists?(socket_path), do: :ok end, "agent socket #{socket_path}")
     agent
@@ -132,7 +142,7 @@ defmodule Biot.Node.StreamsFixture do
 
   def stop_agent(nil), do: :ok
 
-  def stop_agent(%AgentHandle{port: port, os_pid: os_pid, binary: binary, log: log}) do
+  def stop_agent(%AgentHandle{port: port, os_pid: os_pid, directory: directory}) do
     _ = System.cmd("kill", ["-KILL", Integer.to_string(os_pid)], stderr_to_stdout: true)
 
     try do
@@ -141,8 +151,7 @@ defmodule Biot.Node.StreamsFixture do
       ArgumentError -> :ok
     end
 
-    _ = remove_file(binary)
-    _ = remove_file(log)
+    if directory, do: File.rm_rf(directory)
     :ok
   end
 
@@ -152,9 +161,6 @@ defmodule Biot.Node.StreamsFixture do
       _other -> :ok
     end
   end
-
-  defp remove_file(nil), do: :ok
-  defp remove_file(path), do: File.rm(path)
 
   @doc "A real 127.0.0.1 echo service. Returns its port."
   def start_echo_service do
@@ -212,7 +218,7 @@ defmodule Biot.Node.StreamsFixture do
   @doc "Reads one framed control frame, the node's `attach`."
   def read_attach_result(task), do: Task.await(task, 20_000)
 
-  def registration_id, do: elem(RegistrationId.parse(Ecto.UUID.generate()), 1)
+  def registration_id, do: RegistrationId.generate()
 
   def wait_until(fun, label, attempts \\ 300) do
     result =

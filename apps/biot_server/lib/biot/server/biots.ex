@@ -19,7 +19,6 @@ defmodule Biot.Server.Biots do
   alias Biot.Server.Biots.SelectEnvironment
   alias Biot.Server.Biots.Unchanged
   alias Biot.Server.CommandError
-  alias Biot.Server.Id
   alias Biot.Server.Nodes
   alias Biot.Server.Nodes.Status
   alias Biot.Server.Principals
@@ -51,7 +50,7 @@ defmodule Biot.Server.Biots do
 
     multi
     |> Repo.transaction(mode: :immediate)
-    |> lifecycle_transaction_result()
+    |> after_commit()
   end
 
   @spec start(Actor.t() | nil, BiotId.t(), pos_integer()) :: lifecycle_result()
@@ -76,7 +75,7 @@ defmodule Biot.Server.Biots do
         %SelectEnvironment{selection: selection},
         expected_revision
       ) do
-    environment_id = Id.generate(EnvironmentId)
+    environment_id = EnvironmentId.generate()
 
     lifecycle_change(
       actor,
@@ -100,7 +99,7 @@ defmodule Biot.Server.Biots do
 
     multi
     |> Repo.transaction(mode: :immediate)
-    |> lifecycle_transaction_result()
+    |> after_commit()
   end
 
   defp plan_creation(repo, actor, biot_id, command, fingerprint) do
@@ -126,8 +125,8 @@ defmodule Biot.Server.Biots do
          {:ok, node} <- available_node(repo, node_id),
          :ok <- require_capacity(repo, node),
          :ok <- require_name_available(repo, actor.principal_id, command.name) do
-      environment_id = Id.generate(EnvironmentId)
-      operation_id = Id.generate(OperationId)
+      environment_id = EnvironmentId.generate()
+      operation_id = OperationId.generate()
 
       biot = %BiotRow{
         id: biot_id,
@@ -191,7 +190,7 @@ defmodule Biot.Server.Biots do
 
     multi
     |> Repo.transaction(mode: :immediate)
-    |> lifecycle_transaction_result()
+    |> after_commit()
   end
 
   defp plan_lifecycle_change(
@@ -225,7 +224,7 @@ defmodule Biot.Server.Biots do
         kind = operation_kind(change)
 
         operation =
-          Id.generate(OperationId)
+          OperationId.generate()
           |> operation(actor_id, biot.id, kind, desired.revision)
           |> fail_for_abandoned_node(node)
 
@@ -408,14 +407,14 @@ defmodule Biot.Server.Biots do
     }
   end
 
-  defp lifecycle_transaction_result({:ok, %{result: result, close: owner_keys, wake: wakes}}) do
+  defp after_commit({:ok, %{result: result, close: owner_keys, wake: wakes}}) do
     Withdrawal.enforce(owner_keys, wakes)
     {:ok, result}
   end
 
-  defp lifecycle_transaction_result({:error, :plan, error, _changes}), do: {:error, error}
+  defp after_commit({:error, :plan, error, _changes}), do: {:error, error}
 
-  defp lifecycle_transaction_result({:error, :biot, %Ecto.Changeset{} = changeset, _changes}) do
+  defp after_commit({:error, :biot, %Ecto.Changeset{} = changeset, _changes}) do
     if name_conflict?(changeset) do
       {:error, :name_conflict}
     else

@@ -74,7 +74,7 @@ defmodule Biot.Server.Biots.LifecycleTest do
 
   test "update_environment inserts a new environment and selects it", context do
     original = Repo.get!(BiotRow, context.biot_id).desired_environment_id
-    selection = TestFixtures.selection(project_context: nil)
+    selection = TestFixtures.selection()
     command = %SelectEnvironment{selection: selection}
 
     assert {:ok, %Accepted{revision: 2}} =

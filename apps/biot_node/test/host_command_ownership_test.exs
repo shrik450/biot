@@ -58,7 +58,7 @@ defmodule Biot.Node.Host.CommandOwnershipTest do
         )
       end)
 
-    {_group, stderr_path} = eventually_value(&running_command/0)
+    {_group, stderr_path} = eventually_value(fn -> running_command("0123456789abcdef") end)
     assert eventually(fn -> file_size(stderr_path) == 128 end)
     assert Process.alive?(task.pid)
     Process.sleep(100)
@@ -67,7 +67,6 @@ defmodule Biot.Node.Host.CommandOwnershipTest do
     assert {:ok, result} = Task.await(task, 10_000)
     assert byte_size(result.stderr) == 127
     assert result.stderr_truncated
-    assert :sys.get_state(Command.Reaper) == %{}
     refute File.exists?(stderr_path)
     refute File.exists?(stderr_path <> ".pipe")
   end
@@ -104,7 +103,9 @@ defmodule Biot.Node.Host.CommandOwnershipTest do
         )
       end)
 
-    {process_group, _stderr_path} = eventually_value(&running_command/0)
+    {process_group, _stderr_path} =
+      eventually_value(fn -> running_command("sleep 3 >/dev/null") end)
+
     assert {:ok, result} = Task.await(task, 2_000)
     assert System.monotonic_time(:millisecond) - started < 2_000
     assert result.stderr == ""
@@ -125,7 +126,7 @@ defmodule Biot.Node.Host.CommandOwnershipTest do
         )
       end)
 
-    {process_group, _stderr_path} = eventually_value(&running_command/0)
+    {process_group, _stderr_path} = eventually_value(fn -> running_command("/bin/sleep 1") end)
     cat = eventually_value(fn -> direct_child(process_group, "cat") end)
     assert is_integer(cat)
     assert {:ok, result} = Task.await(task, 2_000)
@@ -137,14 +138,13 @@ defmodule Biot.Node.Host.CommandOwnershipTest do
     assert readers == []
   end
 
-  test "a failed fifo setup returns its own error and leaves no reaper record" do
+  test "a failed fifo setup returns its own error and leaves no capture files" do
     before = MapSet.new(Path.wildcard(Path.join(System.tmp_dir!(), "biot-command-*")))
     tools = %{capture_tools() | mkfifo: "/bin/false"}
 
     assert Command.run("setsid", tools, "/bin/true", [], []) ==
              {:error, :stderr_capture_failed}
 
-    assert :sys.get_state(Command.Reaper) == %{}
     after_files = MapSet.new(Path.wildcard(Path.join(System.tmp_dir!(), "biot-command-*")))
     assert MapSet.difference(after_files, before) == MapSet.new()
   end
@@ -155,10 +155,9 @@ defmodule Biot.Node.Host.CommandOwnershipTest do
         Command.run("setsid", capture_tools(), "sleep", ["99141"], timeout_ms: 20_000)
       end)
 
-    {_group, stderr_path} = eventually_value(&running_command/0)
+    {_group, stderr_path} = eventually_value(fn -> running_command("sleep 99141") end)
     assert :ok = Command.cancel(task.pid)
     assert Task.await(task, 5_000) == {:error, :cancelled}
-    assert :sys.get_state(Command.Reaper) == %{}
     refute File.exists?(stderr_path)
     refute File.exists?(stderr_path <> ".pipe")
   end
@@ -207,11 +206,24 @@ defmodule Biot.Node.Host.CommandOwnershipTest do
     end
   end
 
-  defp running_command do
-    case :sys.get_state(Command.Reaper) |> Map.values() do
-      [{process_group, stderr_path}] -> {process_group, stderr_path}
-      _other -> nil
-    end
+  # `setsid` and the command's own processes all carry the test's command in their command line, and
+  # `setsid` leads a group of its own. Only the command's group is led by the wrapper shell, which
+  # holds the capture file in its environment.
+  defp running_command(marker) do
+    Enum.find_value(process_ids(marker), fn process_id ->
+      with {output, 0} <- System.cmd("ps", ["-o", "pgid=", "-p", process_id]),
+           process_group = output |> String.trim() |> String.to_integer(),
+           "/bin/sh -c" <- command_line(process_group),
+           {:ok, environment} <- File.read("/proc/#{process_group}/environ"),
+           "BIOT_COMMAND_STDERR=" <> stderr_path <-
+             environment
+             |> String.split(<<0>>)
+             |> Enum.find(&String.starts_with?(&1, "BIOT_COMMAND_STDERR=")) do
+        {process_group, stderr_path}
+      else
+        _gone -> nil
+      end
+    end)
   end
 
   defp file_size(path) do

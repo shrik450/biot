@@ -198,7 +198,7 @@ defmodule Biot.Server.SchemaConstraintsTest do
     assert_raise Ecto.ConstraintError, fn ->
       Repo.insert!(%BiotSchema{
         id: TestFixtures.id(BiotId, 1),
-        name: "unknown-node",
+        name: TestFixtures.biot_name("unknown-node"),
         owner_id: owner.id,
         node_id: TestFixtures.id(NodeId, 999),
         repository: repository(),
@@ -224,7 +224,7 @@ defmodule Biot.Server.SchemaConstraintsTest do
             Repo.transaction(fn ->
               Repo.insert!(%BiotSchema{
                 id: TestFixtures.id(BiotId, 902_002),
-                name: "cross-biot-environment",
+                name: TestFixtures.biot_name("cross-biot-environment"),
                 owner_id: owner.id,
                 node_id: node.id,
                 repository: repository(),

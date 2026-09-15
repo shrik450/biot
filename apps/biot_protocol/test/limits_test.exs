@@ -9,7 +9,6 @@ defmodule Biot.Protocol.LimitsTest do
   alias Biot.Protocol.Frame
   alias Biot.Protocol.Limits
   alias Biot.Protocol.Message
-  alias Biot.Protocol.RelativeDirectory
   alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.SourceSelector
   alias Biot.Protocol.TestGenerators, as: Generators
@@ -38,17 +37,6 @@ defmodule Biot.Protocol.LimitsTest do
              {:error, :source_ref_too_long}
   end
 
-  test "relative directories enforce the byte limit" do
-    limit = Limits.max_relative_directory_bytes()
-
-    for size <- [limit - 1, limit] do
-      assert {:ok, _directory} = RelativeDirectory.parse(String.duplicate("d", size))
-    end
-
-    assert RelativeDirectory.parse(String.duplicate("d", limit + 1)) ==
-             {:error, :directory_too_long}
-  end
-
   test "environment selections enforce every component limit" do
     layer_limit = Limits.max_layers()
 
@@ -62,14 +50,12 @@ defmodule Biot.Protocol.LimitsTest do
 
     assert_selection_bound(:base_nixpkgs, :repository_url_too_long)
     assert_selection_bound(:source_ref, :source_ref_too_long)
-    assert_selection_bound(:project_context, :directory_too_long)
   end
 
   property "bounded parsers handle random binary input without raising" do
     check all(value <- StreamData.binary()) do
       assert_parser_result(RepositorySource.parse(value))
       assert_parser_result(SourceSelector.parse(value))
-      assert_parser_result(RelativeDirectory.parse(value))
       assert EnvironmentSelection.parse(value) == {:error, :invalid_format}
     end
   end
@@ -153,10 +139,10 @@ defmodule Biot.Protocol.LimitsTest do
 
     for size <- [limit - 1, limit] do
       assert {:ok, _selection} =
-               EnvironmentSelection.parse(selection([], repository_url(size) <> "#main", nil))
+               EnvironmentSelection.parse(selection([], repository_url(size) <> "#main"))
     end
 
-    assert EnvironmentSelection.parse(selection([], repository_url(limit + 1) <> "#main", nil)) ==
+    assert EnvironmentSelection.parse(selection([], repository_url(limit + 1) <> "#main")) ==
              {:error, reason}
   end
 
@@ -166,25 +152,10 @@ defmodule Biot.Protocol.LimitsTest do
 
     for size <- [limit - 1, limit] do
       assert {:ok, _selection} =
-               EnvironmentSelection.parse(
-                 selection([], prefix <> String.duplicate("r", size), nil)
-               )
+               EnvironmentSelection.parse(selection([], prefix <> String.duplicate("r", size)))
     end
 
-    assert EnvironmentSelection.parse(
-             selection([], prefix <> String.duplicate("r", limit + 1), nil)
-           ) == {:error, reason}
-  end
-
-  defp assert_selection_bound(:project_context, reason) do
-    limit = Limits.max_relative_directory_bytes()
-
-    for size <- [limit - 1, limit] do
-      assert {:ok, _selection} =
-               EnvironmentSelection.parse(selection([], "nixpkgs", String.duplicate("d", size)))
-    end
-
-    assert EnvironmentSelection.parse(selection([], "nixpkgs", String.duplicate("d", limit + 1))) ==
+    assert EnvironmentSelection.parse(selection([], prefix <> String.duplicate("r", limit + 1))) ==
              {:error, reason}
   end
 
@@ -197,9 +168,6 @@ defmodule Biot.Protocol.LimitsTest do
 
     {:ok, selector} = SourceSelector.parse(selector_text)
 
-    {:ok, directory} =
-      RelativeDirectory.parse(String.duplicate("d", Limits.max_relative_directory_bytes()))
-
     environment_id = pick(Generators.environment_id())
 
     %BiotSpec{
@@ -211,8 +179,7 @@ defmodule Biot.Protocol.LimitsTest do
           id: environment_id,
           selection: %EnvironmentSelection{
             base_nixpkgs: selector,
-            layers: List.duplicate(selector, Limits.max_layers()),
-            project_context: directory
+            layers: List.duplicate(selector, Limits.max_layers())
           }
         }
       },
@@ -220,8 +187,8 @@ defmodule Biot.Protocol.LimitsTest do
     }
   end
 
-  defp selection(layers, base \\ "nixpkgs", project_context \\ nil) do
-    %{"base_nixpkgs" => base, "layers" => layers, "project_context" => project_context}
+  defp selection(layers, base \\ "nixpkgs") do
+    %{"base_nixpkgs" => base, "layers" => layers}
   end
 
   defp repository_url(size) do

@@ -281,11 +281,12 @@ defmodule Biot.Node.Journal do
     )
   end
 
-  @spec diagnostic(PrivateDiagnosticId.t()) :: boolean() | nil
-  def diagnostic(%PrivateDiagnosticId{} = diagnostic_id) do
+  @doc "Whether an indexed diagnostic's stored content was cut, or that no such diagnostic is indexed."
+  @spec diagnostic_truncated(PrivateDiagnosticId.t()) :: {:ok, boolean()} | :not_found
+  def diagnostic_truncated(%PrivateDiagnosticId{} = diagnostic_id) do
     case Repo.get(DiagnosticRow, diagnostic_id) do
-      nil -> nil
-      row -> row.truncated
+      nil -> :not_found
+      row -> {:ok, row.truncated}
     end
   end
 
@@ -615,8 +616,7 @@ defmodule Biot.Node.Journal do
   defp resolution_value(row) do
     %Resolution{
       environment_id: row.environment_id,
-      manifest: row.manifest,
-      snapshot_path: row.snapshot_path
+      manifest: row.manifest
     }
   end
 
@@ -656,8 +656,7 @@ defmodule Biot.Node.Journal do
     |> Ecto.Changeset.change(
       environment_id: environment_id,
       biot_id: biot_id,
-      manifest: manifest,
-      snapshot_path: nil
+      manifest: manifest
     )
     |> Repo.insert!()
     |> resolution_value()

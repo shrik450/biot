@@ -30,8 +30,7 @@ defmodule Biot.Server.RuntimeLogs do
     end
   end
 
-  @spec authorize(Authorization.role()) :: :ok | {:error, :forbidden}
-  defp authorize(:owner), do: :ok
-  defp authorize({:collaborator, %{shell: true}}), do: :ok
-  defp authorize({:collaborator, %{shell: false}}), do: {:error, :forbidden}
+  defp authorize(role) do
+    if Authorization.may_read_runtime_logs?(role), do: :ok, else: {:error, :forbidden}
+  end
 end

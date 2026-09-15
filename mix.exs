@@ -24,13 +24,8 @@ defmodule Biot.MixProject do
     [
       "ecto.setup": ["ecto.create", "ecto.migrate"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
-      test: [
-        &Biot.Mix.TestEnv.require_test_env!/1,
-        "ecto.drop --quiet",
-        "ecto.create --quiet",
-        "ecto.migrate --quiet",
-        "test"
-      ],
+      # The server migrates its database at boot, so a dropped database is a fresh one.
+      test: [&Biot.Mix.TestEnv.require_test_env!/1, "ecto.drop --quiet", "test"],
       check: [
         "format --check-formatted",
         "credo --strict",
@@ -46,13 +41,15 @@ defmodule Biot.MixProject do
           biot_protocol: :permanent,
           biot_server: :permanent,
           biot_web: :permanent
-        ]
+        ],
+        runtime_config_path: "config/releases/server.exs"
       ],
       node: [
         applications: [
           biot_protocol: :permanent,
           biot_node: :permanent
-        ]
+        ],
+        runtime_config_path: "config/releases/node.exs"
       ]
     ]
   end

@@ -1,5 +1,13 @@
 defmodule Biot.Node.Host.Container do
-  @moduledoc "Runs and inspects rootless Podman containers owned by one allocation."
+  @moduledoc """
+  Runs and inspects the one rootless Podman runtime container an allocation owns.
+
+  The container's name derives from the Biot ID, so it is the same for every incarnation and a
+  lost create reply needs no remembered ID: inspection resolves the name to Podman's native ID.
+  Retirement removes that exact ID, so a later incarnation under the same name is never the one
+  removed. Ownership labels keep a container that someone else gave the same name from being
+  adopted or removed.
+  """
 
   alias Biot.Node.Allocation
   alias Biot.Node.Diagnostic
@@ -9,7 +17,6 @@ defmodule Biot.Node.Host.Container do
   alias Biot.Node.Host.Context
   alias Biot.Node.Host.Diagnostic, as: HostDiagnostic
   alias Biot.Node.Host.Environment
-  alias Biot.Node.Host.FileSystem
   alias Biot.Node.Host.Names
   alias Biot.Node.Host.Network
   alias Biot.Node.Host.Outcome
@@ -25,15 +32,13 @@ defmodule Biot.Node.Host.Container do
 
   @spec state(Config.t(), BiotId.t()) :: resource()
   def state(config, biot_id) do
-    case FileSystem.read(Paths.container_identity(config, biot_id)) do
-      {:present, value} ->
-        state_for_identity(config, String.trim(value))
+    name = Names.container(biot_id)
 
-      :absent ->
-        state_for_owner(config, biot_id)
-
-      {:error, reason} ->
-        unknown(reason, Diagnostic.text("the container identity could not be read"))
+    case Podman.exists(config, :container, name) do
+      :absent -> :absent
+      :present -> inspect_present(config, name)
+      {:error, %Command.Result{} = result} -> unknown_from(result)
+      {:error, reason} -> unreachable(reason)
     end
   end
 
@@ -46,100 +51,37 @@ defmodule Biot.Node.Host.Container do
       ) do
     with {:ok, bundle} <- Environment.bundle(config, biot_id, installation.environment_id),
          {:ok, _network} <- ensure_network(config, allocation),
-         {:ok, incarnation_id} <- start_identity(config, biot_id),
-         {:ok, _container} <- create(config, allocation, installation, bundle, incarnation_id),
+         {:ok, _container} <- create(config, allocation, installation, bundle),
          do: :ok
   end
 
   @spec retire(Context.t(), IncarnationId.t()) :: :ok | {:error, Outcome.t()}
   def retire(%Context{biot_id: biot_id, config: config}, incarnation_id) do
-    case state_for_name(config, incarnation_id) do
-      :absent -> remove_identity(config, biot_id, incarnation_id)
-      {:present, container} -> retire_present(config, biot_id, incarnation_id, container)
-      {:unknown, failure} -> {:error, Outcome.from_reason(failure)}
+    case state(config, biot_id) do
+      :absent ->
+        :ok
+
+      {:present, %{biot_id: owner}} when owner != biot_id ->
+        {:error, Outcome.new(:ownership_mismatch)}
+
+      {:present, %{incarnation_id: ^incarnation_id}} ->
+        remove(config, incarnation_id)
+
+      {:present, _later_incarnation} ->
+        :ok
+
+      {:unknown, failure} ->
+        {:error, Outcome.from_reason(failure)}
     end
   end
 
-  defp state_for_identity(config, value) do
-    case IncarnationId.parse(value) do
-      {:ok, incarnation_id} ->
-        state_for_name(config, incarnation_id)
-
-      {:error, _reason} ->
-        unknown(:unreadable, Diagnostic.text("the container identity is invalid"))
-    end
-  end
-
-  # The role filter matters: a build worker carries the same owner label, and it is not a runtime.
-  defp state_for_owner(config, biot_id) do
-    arguments = [
-      "ps",
-      "--all",
-      "--filter",
-      Names.owner_filter(biot_id),
-      "--filter",
-      Names.role_filter(:runtime),
-      "--format",
-      "json"
-    ]
-
-    case Podman.run(config, arguments) do
-      {:ok, %Command.Result{status: 0, stdout: stdout}} ->
-        parse_owned_list(config, stdout)
-
-      {:ok, %Command.Result{} = result} ->
-        unknown({:podman, result.status}, HostDiagnostic.from_command(result))
-
-      {:error, reason} ->
-        unknown(reason, Diagnostic.text("Podman could not list containers"))
-    end
-  end
-
-  defp parse_owned_list(config, stdout) do
-    case Jason.decode(stdout) do
-      {:ok, []} ->
-        :absent
-
-      {:ok, values} when is_list(values) ->
-        values
-        |> Enum.map(&(Map.get(&1, "Id") || Map.get(&1, "ID")))
-        |> Enum.filter(&is_binary/1)
-        |> Enum.sort()
-        |> case do
-          [reference | _rest] ->
-            state_for_reference(config, reference)
-
-          [] ->
-            unknown(
-              :unreadable,
-              Diagnostic.text("Podman returned a container without an identity")
-            )
-        end
-
-      {:error, _reason} ->
-        unknown(:unreadable, Diagnostic.text("Podman returned invalid container JSON"))
-
-      {:ok, _other} ->
-        unknown(:unreadable, Diagnostic.text("Podman returned invalid container JSON"))
-    end
-  end
-
-  defp state_for_name(config, incarnation_id) do
-    state_for_reference(config, Names.container(incarnation_id))
-  end
-
-  defp state_for_reference(config, reference) do
-    case Podman.run(config, ["inspect", reference]) do
-      {:ok, %Command.Result{status: 0, stdout: stdout}} ->
-        parse_inspection(stdout)
-
-      {:ok, %Command.Result{} = result} ->
-        if Podman.absent?(:container, result),
-          do: :absent,
-          else: unknown({:podman, result.status}, HostDiagnostic.from_command(result))
-
-      {:error, reason} ->
-        unknown(reason, Diagnostic.text("Podman could not inspect the container"))
+  # A container removed between the two commands reads as unknown, and reconciliation inspects
+  # again.
+  defp inspect_present(config, name) do
+    case Podman.run(config, ["container", "inspect", name]) do
+      {:ok, %Command.Result{status: 0, stdout: stdout}} -> parse_inspection(stdout)
+      {:ok, %Command.Result{} = result} -> unknown_from(result)
+      {:error, reason} -> unreachable(reason)
     end
   end
 
@@ -152,20 +94,20 @@ defmodule Biot.Node.Host.Container do
     end
   end
 
-  defp create(config, allocation, installation, bundle, incarnation_id) do
-    case state_for_name(config, incarnation_id) do
-      :absent -> run_container(config, allocation, installation, bundle, incarnation_id)
-      {:present, container} -> verify_started(container, allocation, installation, incarnation_id)
+  defp create(config, allocation, installation, bundle) do
+    case state(config, allocation.biot_id) do
+      :absent -> run_container(config, allocation, installation, bundle)
+      {:present, container} -> verify_started(container, allocation, installation)
       {:unknown, failure} -> {:error, Outcome.from_reason(failure)}
     end
   end
 
-  defp run_container(config, allocation, installation, bundle, incarnation_id) do
+  defp run_container(config, allocation, installation, bundle) do
     arguments =
       [
         "run",
         "--name",
-        Names.container(incarnation_id),
+        Names.container(allocation.biot_id),
         "--detach",
         "--read-only",
         "--tmpfs",
@@ -179,11 +121,7 @@ defmodule Biot.Node.Host.Container do
         "--gidmap",
         uid_map(config, allocation)
       ] ++
-        Names.label_arguments(
-          allocation.biot_id,
-          incarnation_id,
-          installation.environment_id
-        ) ++
+        Names.label_arguments(allocation.biot_id, installation.environment_id) ++
         runtime_log_arguments(config) ++
         volume_arguments(config, allocation.biot_id) ++
         [
@@ -200,17 +138,18 @@ defmodule Biot.Node.Host.Container do
         {:ok, :started}
 
       {:ok, %Command.Result{} = result} ->
-        recover_create(config, allocation, installation, incarnation_id, result)
+        recover_create(config, allocation, installation, result)
 
       {:error, reason} ->
         {:error, Outcome.from_reason(reason)}
     end
   end
 
-  defp recover_create(config, allocation, installation, incarnation_id, result) do
-    case state_for_name(config, incarnation_id) do
+  # A failed create may still have made the container, and the stable name is how to tell.
+  defp recover_create(config, allocation, installation, result) do
+    case state(config, allocation.biot_id) do
       {:present, container} ->
-        verify_started(container, allocation, installation, incarnation_id)
+        verify_started(container, allocation, installation)
 
       :absent ->
         {:error, Outcome.from_command(:host_unavailable, result)}
@@ -221,105 +160,28 @@ defmodule Biot.Node.Host.Container do
   end
 
   defp verify_started(
-         %{
-           biot_id: biot_id,
-           incarnation_id: incarnation_id,
-           environment_id: environment_id
-         },
+         %{biot_id: biot_id, environment_id: environment_id},
          %Allocation{biot_id: biot_id},
-         %Installation{environment_id: environment_id},
-         incarnation_id
+         %Installation{environment_id: environment_id}
        ),
        do: {:ok, :started}
 
-  defp verify_started(%{biot_id: owner}, %Allocation{biot_id: expected}, _installation, _id)
+  defp verify_started(%{biot_id: owner}, %Allocation{biot_id: expected}, _installation)
        when owner != expected,
        do: {:error, Outcome.new(:ownership_mismatch)}
 
-  defp verify_started(_container, _allocation, _installation, _incarnation_id),
-    do: {:ok, :stale}
+  defp verify_started(_container, _allocation, _installation), do: {:ok, :stale}
 
-  defp retire_present(_config, biot_id, _incarnation_id, %{biot_id: owner})
-       when owner != biot_id do
-    {:error, Outcome.new(:ownership_mismatch)}
-  end
-
-  defp retire_present(
-         config,
-         biot_id,
-         incarnation_id,
-         %{biot_id: biot_id, incarnation_id: incarnation_id}
-       ) do
-    case Podman.run(config, ["rm", "--force", Names.container(incarnation_id)]) do
+  defp remove(config, incarnation_id) do
+    case Podman.run(config, ["rm", "--force", IncarnationId.to_string(incarnation_id)]) do
       {:ok, %Command.Result{status: 0}} ->
-        remove_identity(config, biot_id, incarnation_id)
+        :ok
 
       {:ok, %Command.Result{} = result} ->
         {:error, Outcome.from_command(:host_unavailable, result)}
 
       {:error, reason} ->
         {:error, Outcome.from_reason(reason)}
-    end
-  end
-
-  defp retire_present(_config, _biot_id, _incarnation_id, _container), do: :ok
-
-  defp start_identity(config, biot_id) do
-    path = Paths.container_identity(config, biot_id)
-
-    case FileSystem.read(path) do
-      {:present, value} -> parse_start_identity(value)
-      :absent -> write_start_identity(path)
-      {:error, reason} -> {:error, Outcome.from_reason(reason)}
-    end
-  end
-
-  defp parse_start_identity(value) do
-    case IncarnationId.parse(String.trim(value)) do
-      {:ok, incarnation_id} ->
-        {:ok, incarnation_id}
-
-      {:error, _reason} ->
-        {:error,
-         Outcome.new(
-           :host_unavailable,
-           Diagnostic.text("the container identity is invalid")
-         )}
-    end
-  end
-
-  defp write_start_identity(path) do
-    incarnation_id = IncarnationId.generate()
-
-    # The file keeps the container name stable if Podman starts it before the effect task exits.
-    case FileSystem.write_atomic(path, [IncarnationId.to_string(incarnation_id), "\n"]) do
-      :ok -> {:ok, incarnation_id}
-      {:error, reason} -> {:error, Outcome.from_reason(reason)}
-    end
-  end
-
-  defp remove_identity(config, biot_id, incarnation_id) do
-    path = Paths.container_identity(config, biot_id)
-
-    case FileSystem.read(path) do
-      :absent ->
-        :ok
-
-      {:present, value} ->
-        if String.trim(value) == IncarnationId.to_string(incarnation_id),
-          do: remove_identity_file(path),
-          else: :ok
-
-      {:error, reason} ->
-        {:error, Outcome.from_reason(reason)}
-    end
-  end
-
-  defp remove_identity_file(path) do
-    case File.rm(path) do
-      :ok -> :ok
-      {:error, :enoent} -> :ok
-      {:error, reason} -> {:error, Outcome.from_reason(reason)}
     end
   end
 
@@ -349,6 +211,14 @@ defmodule Biot.Node.Host.Container do
       "--log-opt",
       "max-size=#{config.runtime_log_max_bytes}"
     ]
+  end
+
+  defp unknown_from(result) do
+    unknown({:podman, result.status}, HostDiagnostic.from_command(result))
+  end
+
+  defp unreachable(reason) do
+    unknown(reason, Diagnostic.text("Podman could not inspect the container"))
   end
 
   defp unknown(reason, detail) do

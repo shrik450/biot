@@ -100,7 +100,7 @@ defmodule Biot.Node.Host.ContainerEvents do
   end
 
   defp opened_stream do
-    case Config.from_application() do
+    case Config.current() do
       {:ok, config} -> Podman.open(config, arguments())
       {:error, reason} -> {:error, {:host_not_configured, reason}}
     end

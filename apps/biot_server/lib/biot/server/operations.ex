@@ -3,6 +3,7 @@ defmodule Biot.Server.Operations do
 
   alias Biot.Protocol.OperationId
   alias Biot.Server.Actor
+  alias Biot.Server.Authorization
   alias Biot.Server.CommandError
   alias Biot.Server.Principals
   alias Biot.Server.Queries.OperationView
@@ -22,15 +23,11 @@ defmodule Biot.Server.Operations do
   defp readable_operation(actor, operation_id) do
     with %Operation{} = operation <- Repo.get(Operation, operation_id),
          %Biot{} = biot <- Repo.get(Biot, operation.biot_id),
-         true <- authorized?(actor, operation, biot) do
+         true <- Authorization.may_read_operation?(actor, operation, biot) do
       {:ok, OperationView.project(operation)}
     else
       nil -> {:error, :not_found}
       false -> {:error, :forbidden}
     end
-  end
-
-  defp authorized?(actor, operation, biot) do
-    actor.principal_id == operation.actor_id or actor.principal_id == biot.owner_id
   end
 end

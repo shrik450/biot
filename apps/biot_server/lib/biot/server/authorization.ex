@@ -3,7 +3,7 @@ defmodule Biot.Server.Authorization do
 
   alias Biot.Protocol.Port
   alias Biot.Server.Actor
-  alias Biot.Server.Schema.Biot
+  alias Biot.Server.Schema.{Biot, Operation}
 
   @type grants :: %{shell: boolean(), view_ports: [Port.t()]}
   @type role :: :owner | {:collaborator, grants()}
@@ -43,6 +43,19 @@ defmodule Biot.Server.Authorization do
   end
 
   def may_shell?(_actor, %Biot{}, _shell_granted), do: false
+
+  @doc """
+  The owner and the actor who started an Operation may read it. The same readers may fetch the
+  diagnostic of any failed attempt at the Operation's revision.
+  """
+  @spec may_read_operation?(Actor.t(), Operation.t(), Biot.t()) :: boolean()
+  def may_read_operation?(%Actor{principal_id: id}, %Operation{actor_id: id}, %Biot{}), do: true
+  def may_read_operation?(actor, %Operation{}, %Biot{} = biot), do: owner?(actor, biot)
+
+  @doc "Runtime logs can show whatever a shell could, so they follow the shell rule."
+  @spec may_read_runtime_logs?(role()) :: boolean()
+  def may_read_runtime_logs?(:owner), do: true
+  def may_read_runtime_logs?({:collaborator, grants}), do: grants.shell
 
   @spec role(Actor.t(), Biot.t(), grants()) :: role()
   def role(%Actor{} = actor, %Biot{} = biot, grants) do

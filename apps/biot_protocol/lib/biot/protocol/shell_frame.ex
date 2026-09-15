@@ -12,6 +12,8 @@ defmodule Biot.Protocol.ShellFrame do
   @data 0
   @resize 1
   @exit 2
+  # `FramePayloadLimit` in `agent/protocol/frame.go` repeats this, so both sides refuse the same
+  # frames.
   @max_payload 65_536
 
   @type direction :: :to_agent | :to_server

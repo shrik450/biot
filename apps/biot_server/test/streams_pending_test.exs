@@ -3,16 +3,15 @@ defmodule Biot.Server.StreamsPendingTest do
   use ExUnit.Case, async: false
 
   alias Biot.Protocol.BiotId
-  alias Biot.Protocol.Certificates
   alias Biot.Protocol.ConnectionId
   alias Biot.Protocol.Message
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.Port
   alias Biot.Protocol.ShellFrame
   alias Biot.Protocol.StreamId
-  alias Biot.Server.Id
   alias Biot.Server.Streams
   alias Biot.Server.Streams.Pending
+  alias Biot.Server.TestFixtures
 
   defmodule FakeConnection do
     @moduledoc false
@@ -49,7 +48,7 @@ defmodule Biot.Server.StreamsPendingTest do
     directory =
       Path.join(System.tmp_dir!(), "biot-streams-pending-#{System.unique_integer([:positive])}")
 
-    {:ok, certificates} = Certificates.generate(directory, 0)
+    {:ok, certificates} = TestFixtures.certificates(directory, 0)
 
     {:ok, listener} =
       :ssl.listen(0, [
@@ -101,8 +100,8 @@ defmodule Biot.Server.StreamsPendingTest do
   end
 
   defp ready_connection do
-    node_id = Id.generate(NodeId)
-    connection_id = Id.generate(ConnectionId)
+    node_id = NodeId.generate()
+    connection_id = ConnectionId.generate()
     {:ok, _pid} = FakeConnection.start_link(node_id, connection_id, self())
     {node_id, connection_id}
   end
@@ -113,8 +112,8 @@ defmodule Biot.Server.StreamsPendingTest do
   end
 
   test "an open with no attach returns at the configured deadline and claims nothing" do
-    {node_id, _connection_id} = ready_connection()
-    biot_id = Id.generate(BiotId)
+    {node_id, connection_id} = ready_connection()
+    biot_id = BiotId.generate()
     target = {:port, elem(Port.parse(3000), 1)}
 
     parent = self()
@@ -127,16 +126,19 @@ defmodule Biot.Server.StreamsPendingTest do
         send(parent, {:result, result, System.monotonic_time(:millisecond) - started})
       end)
 
-    assert_receive {:opened, %Message.OpenStream{}}, 5_000
+    assert_receive {:opened, %Message.OpenStream{} = message}, 5_000
     assert_receive {:result, {:error, :timeout}, elapsed}, 5_000
     assert elapsed < 900
-    assert :sys.get_state(Pending).entries == %{}
+
+    assert Pending.attach(node_id, connection_id, message.stream_id, self(), make_ref()) ==
+             {:error, :unknown_stream}
+
     Task.await(caller, 5_000)
   end
 
   test "an attach that arrives after the deadline finds nothing and no socket is leaked" do
     {node_id, connection_id} = ready_connection()
-    biot_id = Id.generate(BiotId)
+    biot_id = BiotId.generate()
     target = {:port, elem(Port.parse(3000), 1)}
 
     caller =
@@ -157,7 +159,7 @@ defmodule Biot.Server.StreamsPendingTest do
 
     caller =
       Task.async(fn ->
-        Streams.open_until(node_id, Id.generate(BiotId), 1, target, open_deadline())
+        Streams.open_until(node_id, BiotId.generate(), 1, target, open_deadline())
       end)
 
     assert_receive {:opened, %Message.OpenStream{} = message}, 5_000
@@ -179,7 +181,7 @@ defmodule Biot.Server.StreamsPendingTest do
 
     caller =
       Task.async(fn ->
-        result = Streams.open_until(node_id, Id.generate(BiotId), 1, target, open_deadline())
+        result = Streams.open_until(node_id, BiotId.generate(), 1, target, open_deadline())
         send(parent, {:open_result, result})
 
         receive do
@@ -217,14 +219,14 @@ defmodule Biot.Server.StreamsPendingTest do
   end
 
   test "a claimed open returns node_unavailable when its control process dies", context do
-    node_id = Id.generate(NodeId)
-    connection_id = Id.generate(ConnectionId)
+    node_id = NodeId.generate()
+    connection_id = ConnectionId.generate()
     {:ok, connection_pid} = FakeConnection.start_link(node_id, connection_id, self())
     target = {:port, elem(Port.parse(3000), 1)}
 
     caller =
       Task.async(fn ->
-        Streams.open_until(node_id, Id.generate(BiotId), 1, target, open_deadline())
+        Streams.open_until(node_id, BiotId.generate(), 1, target, open_deadline())
       end)
 
     assert_receive {:opened, %Message.OpenStream{} = message}, 5_000
@@ -243,14 +245,14 @@ defmodule Biot.Server.StreamsPendingTest do
   end
 
   test "a killed control process fails its opens and refuses its attach" do
-    node_id = Id.generate(NodeId)
-    connection_id = Id.generate(ConnectionId)
+    node_id = NodeId.generate()
+    connection_id = ConnectionId.generate()
     {:ok, connection_pid} = FakeConnection.start_link(node_id, connection_id, self())
     target = {:port, elem(Port.parse(3000), 1)}
 
     caller =
       Task.async(fn ->
-        Streams.open_until(node_id, Id.generate(BiotId), 1, target, open_deadline())
+        Streams.open_until(node_id, BiotId.generate(), 1, target, open_deadline())
       end)
 
     assert_receive {:opened, %Message.OpenStream{} = message}, 5_000
@@ -266,7 +268,7 @@ defmodule Biot.Server.StreamsPendingTest do
 
   test "stream/2 reports unknown for anything that is not this stream's transport" do
     stream = %Streams.Stream{
-      id: Id.generate(StreamId),
+      id: StreamId.generate(),
       kind: :port,
       socket: make_ref(),
       connection_pid: self()
@@ -282,7 +284,7 @@ defmodule Biot.Server.StreamsPendingTest do
     socket = make_ref()
 
     port = %Streams.Stream{
-      id: Id.generate(StreamId),
+      id: StreamId.generate(),
       kind: :port,
       socket: socket,
       connection_pid: self()
@@ -292,7 +294,7 @@ defmodule Biot.Server.StreamsPendingTest do
     assert {[:closed], _port} = Streams.stream(port, {:ssl_closed, socket})
 
     shell = %Streams.Stream{
-      id: Id.generate(StreamId),
+      id: StreamId.generate(),
       kind: :shell,
       socket: socket,
       connection_pid: self()
@@ -306,9 +308,9 @@ defmodule Biot.Server.StreamsPendingTest do
   end
 
   test "attach rejects a wrong node, an old connection, and an unknown stream, and claims a current one" do
-    node_id = Id.generate(NodeId)
-    connection_id = Id.generate(ConnectionId)
-    id = Id.generate(StreamId)
+    node_id = NodeId.generate()
+    connection_id = ConnectionId.generate()
+    id = StreamId.generate()
     handler = self()
     {:ok, connection_pid} = FakeConnection.start_link(node_id, connection_id, self())
     pending_pid = Process.whereis(Pending)
@@ -318,13 +320,13 @@ defmodule Biot.Server.StreamsPendingTest do
     monitors_after_register = pending_monitors(pending_pid)
     assert MapSet.size(monitors_after_register) == MapSet.size(monitors_before) + 2
 
-    assert Pending.attach(Id.generate(NodeId), connection_id, id, handler, make_ref()) ==
+    assert Pending.attach(NodeId.generate(), connection_id, id, handler, make_ref()) ==
              {:error, :unknown_stream}
 
-    assert Pending.attach(node_id, Id.generate(ConnectionId), id, handler, make_ref()) ==
+    assert Pending.attach(node_id, ConnectionId.generate(), id, handler, make_ref()) ==
              {:error, :unknown_stream}
 
-    assert Pending.attach(node_id, connection_id, Id.generate(StreamId), handler, make_ref()) ==
+    assert Pending.attach(node_id, connection_id, StreamId.generate(), handler, make_ref()) ==
              {:error, :unknown_stream}
 
     socket = make_ref()
@@ -344,12 +346,12 @@ defmodule Biot.Server.StreamsPendingTest do
 
     first =
       Task.async(fn ->
-        Streams.open_until(node_id, Id.generate(BiotId), 1, target, open_deadline())
+        Streams.open_until(node_id, BiotId.generate(), 1, target, open_deadline())
       end)
 
     second =
       Task.async(fn ->
-        Streams.open_until(other_node_id, Id.generate(BiotId), 1, target, open_deadline())
+        Streams.open_until(other_node_id, BiotId.generate(), 1, target, open_deadline())
       end)
 
     assert_receive {:opened, %Message.OpenStream{}}, 5_000

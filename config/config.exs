@@ -40,7 +40,6 @@ config :biot_node,
   sleep_executable: "sleep",
   builder_image:
     "docker.io/nixos/nix@sha256:29fc5fe207f159ceb0143c25c19c774062fee02ce5eda118f3067547b3054894",
-  build_support_dir: Path.expand("..", __DIR__),
   binary_cache_urls: ["https://cache.nixos.org"],
   binary_cache_keys: ["cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="],
   nixpkgs_repository: "https://github.com/NixOS/nixpkgs",
@@ -81,6 +80,8 @@ config :biot_node, Biot.Node.Repo,
   pool_size: 5
 
 config :biot_server, Biot.Server.Repo, foreign_keys: :on
+
+config :biot_web, trusted_edge_peers: []
 
 config :biot_web, BiotWeb.Endpoint,
   url: [host: "localhost"],

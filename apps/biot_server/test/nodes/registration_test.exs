@@ -25,25 +25,18 @@ defmodule Biot.Server.Nodes.RegistrationTest do
     assert registration.peer_identity == @peer_identity
   end
 
-  test "parse accepts atom keys and parsed status atoms" do
-    value = %{
-      node_id: @node_id,
-      registration_id: @registration_id,
-      peer_identity: @peer_identity,
-      max_biots: 1,
-      status: :retired
-    }
-
-    assert {:ok, registration} = Registration.parse(value)
-    assert registration.status == :retired
-  end
-
-  test "parse accepts every node status in JSON and parsed forms" do
-    for status <- [:enabled, :disabled, :retired, :abandoned],
-        value <- [status, Atom.to_string(status)] do
-      assert {:ok, registration} = Registration.parse(%{valid_registration() | "status" => value})
+  test "parse accepts every node status as JSON text and nothing else" do
+    for status <- [:enabled, :disabled, :retired, :abandoned] do
+      value = %{valid_registration() | "status" => Atom.to_string(status)}
+      assert {:ok, registration} = Registration.parse(value)
       assert registration.status == status
+
+      assert Registration.parse(%{valid_registration() | "status" => status}) ==
+               {:error, {:status, :invalid_value}}
     end
+
+    atom_keys = Map.new(valid_registration(), fn {key, value} -> {String.to_atom(key), value} end)
+    assert Registration.parse(atom_keys) == {:error, {:node_id, :missing}}
   end
 
   test "parse rejects invalid fields" do

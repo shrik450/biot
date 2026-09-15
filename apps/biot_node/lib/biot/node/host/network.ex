@@ -21,14 +21,15 @@ defmodule Biot.Node.Host.Network do
 
   @spec state(Config.t(), NetworkId.t()) :: state()
   def state(config, network_id) do
-    case Podman.run(config, ["network", "inspect", Names.network(network_id)]) do
-      {:ok, %Command.Result{status: 0}} ->
+    case Podman.exists(config, :network, Names.network(network_id)) do
+      :present ->
         :present
 
-      {:ok, %Command.Result{} = result} ->
-        if Podman.absent?(:network, result),
-          do: :absent,
-          else: {:unknown, Outcome.from_command(:host_unavailable, result)}
+      :absent ->
+        :absent
+
+      {:error, %Command.Result{} = result} ->
+        {:unknown, Outcome.from_command(:host_unavailable, result)}
 
       {:error, reason} ->
         {:unknown, reason}

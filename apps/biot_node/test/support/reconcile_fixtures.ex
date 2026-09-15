@@ -22,6 +22,7 @@ defmodule Biot.Node.ReconcileFixtures do
   alias Biot.Protocol.IncarnationId
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.PinnedSource
+  alias Biot.Protocol.Platform
   alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.SourceSelector
 
@@ -34,12 +35,11 @@ defmodule Biot.Node.ReconcileFixtures do
   def e2, do: parse!(EnvironmentId, @uuid <> "e2")
   def e3, do: parse!(EnvironmentId, @uuid <> "e3")
 
-  def incarnation, do: parse!(IncarnationId, @uuid <> "c1")
-  def next_incarnation, do: parse!(IncarnationId, @uuid <> "c2")
+  def incarnation, do: parse!(IncarnationId, String.duplicate("c", 63) <> "1")
+  def next_incarnation, do: parse!(IncarnationId, String.duplicate("c", 63) <> "2")
   def network, do: parse!(NetworkId, @uuid <> "f1")
 
   def data_root, do: parse!(NodePrivatePath, "/var/lib/biot/allocations/b1")
-  def snapshot_path, do: parse!(NodePrivatePath, "/var/lib/biot/resolutions/e1")
 
   def artifact(environment_id) do
     parse!(ArtifactId, "/nix/store/biot-env-" <> EnvironmentId.to_string(environment_id))
@@ -50,15 +50,14 @@ defmodule Biot.Node.ReconcileFixtures do
   def selection do
     %EnvironmentSelection{
       base_nixpkgs: SourceSelector.nixpkgs(),
-      layers: [],
-      project_context: nil
+      layers: []
     }
   end
 
   def manifest do
     nar_hash = "sha256-" <> Base.encode64(:binary.copy(<<7>>, 32))
     pinned = parse!(PinnedSource, "nixpkgs#" <> String.duplicate("a", 40) <> "#" <> nar_hash)
-    Manifest.build(pinned, [], nil)
+    Manifest.build(parse!(Platform, "x86_64-linux"), pinned, [])
   end
 
   @doc "An allocation whose initialization completed, which is what `{:present, _}` data means."
@@ -86,8 +85,7 @@ defmodule Biot.Node.ReconcileFixtures do
   def resolution(environment_id) do
     %Resolution{
       environment_id: environment_id,
-      manifest: manifest(),
-      snapshot_path: snapshot_path()
+      manifest: manifest()
     }
   end
 

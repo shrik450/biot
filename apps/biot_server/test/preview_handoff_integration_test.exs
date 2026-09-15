@@ -3,7 +3,7 @@ defmodule Biot.Server.PreviewHandoffIntegrationTest do
 
   import Ecto.Query
 
-  alias Biot.Protocol.{CredentialId, Digest, Hostname, PrincipalId, SameOriginPath, SshKeyId}
+  alias Biot.Protocol.{CredentialId, Hostname, SameOriginPath, SshKeyId}
   alias Biot.Server.Actor
   alias Biot.Server.Authentication
   alias Biot.Server.AuthenticationProof

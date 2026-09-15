@@ -118,7 +118,7 @@ defmodule Biot.Server.ReportsTest do
                context.connection_id,
                context.biot_id,
                revision
-             ) == {:ok, {:ignored, :revision_ahead}}
+             ) == {:ok, {:ignored, :revision_not_newer}}
 
       assert Repo.get!(AccessObservation, context.biot_id).applied_access_revision == 3
     end
@@ -395,6 +395,12 @@ defmodule Biot.Server.ReportsTest do
     assert stored.orphaned_allocations == [orphan]
 
     later_connection = TestFixtures.connection_id(2)
+    :ok = NodeConnections.put(context.node.id, %{connection_id: later_connection, state: :ready})
+
+    assert Reports.node_observation(context.node.id, context.connection_id, []) ==
+             {:ok, {:ignored, :stale_connection}}
+
+    assert Repo.get!(NodeObservation, context.node.id).orphaned_allocations == [orphan]
 
     assert {:ok, %NodeObservation{}} =
              Reports.node_observation(context.node.id, later_connection, [])

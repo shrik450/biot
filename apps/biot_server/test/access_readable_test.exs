@@ -134,7 +134,7 @@ defmodule Biot.Server.AccessReadableTest do
   end
 
   defp biot_number(biot) do
-    "biot-" <> number = biot.name
+    "biot-" <> number = to_string(biot.name)
     String.to_integer(number)
   end
 

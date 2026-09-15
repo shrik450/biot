@@ -41,4 +41,13 @@ defmodule BiotWeb.Plugs.ControlOrigin do
   def allowed?(_method, [], _control_origin), do: true
   def allowed?(_method, [origin], control_origin), do: origin == control_origin
   def allowed?(_method, _origins, _control_origin), do: false
+
+  @doc """
+  Decides a LiveView socket's `Origin` for the socket's `check_origin`.
+
+  Phoenix calls this only when the upgrade request has an `Origin`. Its default rule compares the
+  host alone, which would admit another scheme or port on the control host.
+  """
+  @spec socket_origin?(URI.t()) :: boolean()
+  def socket_origin?(origin), do: URI.to_string(origin) == BiotWeb.Endpoint.url()
 end

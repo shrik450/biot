@@ -26,15 +26,15 @@ defmodule Biot.Server.AccessClosureCommitTest do
   alias Ecto.Adapters.SQL.Sandbox
 
   setup do
-    previous_principals = Application.fetch_env(:biot_server, :disabled_principals)
-    previous_registrations = Application.fetch_env(:biot_server, :node_registrations)
+    previous_principals = Application.fetch_env(:biot_server, :disabled_principals_file)
+    previous_registrations = Application.fetch_env(:biot_server, :node_registrations_file)
     Sandbox.mode(Repo, :auto)
 
     on_exit(fn ->
       clean_database()
       Sandbox.mode(Repo, :manual)
-      restore_env(:disabled_principals, previous_principals)
-      restore_env(:node_registrations, previous_registrations)
+      restore_env(:disabled_principals_file, previous_principals)
+      restore_env(:node_registrations_file, previous_registrations)
     end)
 
     owner = TestFixtures.principal(1)
@@ -72,7 +72,7 @@ defmodule Biot.Server.AccessClosureCommitTest do
   end
 
   test "a principal disable closes owners only after its transaction commits", context do
-    Application.put_env(:biot_server, :disabled_principals, [
+    TestFixtures.put_disabled_principals([
       %Identity{issuer: context.collaborator.issuer, subject: context.collaborator.subject}
     ])
 
@@ -80,7 +80,7 @@ defmodule Biot.Server.AccessClosureCommitTest do
   end
 
   test "a node disable closes owners only after its transaction commits", context do
-    Application.put_env(:biot_server, :node_registrations, [
+    TestFixtures.put_registrations([
       %Registration{
         node_id: context.node.id,
         registration_id: context.node.registration,

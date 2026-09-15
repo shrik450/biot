@@ -94,7 +94,7 @@ defmodule Biot.Node.Streams.Stream do
   end
 
   defp open_agent(%__MODULE__{} = stream) do
-    config = Config.from_application!()
+    config = Config.current!()
 
     case Journal.allocation(stream.biot_id) do
       nil ->

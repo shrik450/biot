@@ -1,6 +1,7 @@
 defmodule Biot.Protocol.Desired do
   @moduledoc "The server-owned execution intent for a biot."
 
+  alias Biot.Protocol.Choice
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.StrictMap
 
@@ -40,7 +41,7 @@ defmodule Biot.Protocol.Desired do
     with {:ok, %{"revision" => revision, "state" => state, "environment_id" => environment_id}} <-
            StrictMap.fetch_exact(value, @fields),
          true <- is_integer(revision) and revision > 0,
-         {:ok, state} <- parse_state(state),
+         {:ok, state} <- Choice.parse(state, @states),
          {:ok, environment_id} <- EnvironmentId.parse(environment_id) do
       {:ok, %__MODULE__{revision: revision, state: state, environment_id: environment_id}}
     else
@@ -70,13 +71,4 @@ defmodule Biot.Protocol.Desired do
   def transition(%__MODULE__{} = desired, :destroy) do
     {:changed, %{desired | revision: desired.revision + 1, state: :destroyed}}
   end
-
-  defp parse_state(value) when is_binary(value) do
-    case Enum.find(@states, &(Atom.to_string(&1) == value)) do
-      nil -> {:error, :invalid_format}
-      state -> {:ok, state}
-    end
-  end
-
-  defp parse_state(_state), do: {:error, :invalid_format}
 end

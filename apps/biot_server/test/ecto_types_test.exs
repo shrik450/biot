@@ -1,7 +1,6 @@
 defmodule Biot.Server.EctoTypesTest do
   use Biot.Server.DataCase, async: false
 
-  alias Biot.Protocol.IncarnationId
   alias Biot.Server.Repo
   alias Biot.Server.Schema.Environment
   alias Biot.Server.Schema.Observation
@@ -16,9 +15,9 @@ defmodule Biot.Server.EctoTypesTest do
     cases = [
       {:unknown_no_allocation, :unknown, :no_allocation, nil},
       {:absent_unknown, :absent, :unknown, {1, failure}},
-      {:running_uninitialized, {:present, TestFixtures.id(IncarnationId, 1), :running},
+      {:running_uninitialized, {:present, TestFixtures.incarnation_id(1), :running},
        :uninitialized, nil},
-      {:exited_present, {:present, TestFixtures.id(IncarnationId, 2), {:exited, 17}}, :present,
+      {:exited_present, {:present, TestFixtures.incarnation_id(2), {:exited, 17}}, :present,
        {2, failure}},
       {:unknown_lost, :unknown, :lost, nil}
     ]

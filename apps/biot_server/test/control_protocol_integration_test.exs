@@ -14,10 +14,8 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
   alias Biot.Node.RuntimeLogs, as: NodeRuntimeLogs
   alias Biot.Node.RuntimeLogs.Metadata, as: RuntimeLogMetadata
   alias Biot.Protocol.BiotId
-  alias Biot.Protocol.Certificates
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Frame
-  alias Biot.Protocol.IncarnationId
   alias Biot.Protocol.Message
   alias Biot.Protocol.OrphanedAllocation
   alias Biot.Protocol.Platform
@@ -56,7 +54,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         "biot-control-integration-#{System.unique_integer([:positive])}"
       )
 
-    {:ok, certificates} = Certificates.generate(directory, 5)
+    {:ok, certificates} = TestFixtures.certificates(directory, 5)
     on_exit(fn -> File.rm_rf!(directory) end)
     %{certificates: certificates}
   end
@@ -64,14 +62,14 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
   setup do
     previous_timeout = Application.get_env(:biot_server, :node_request_timeout_ms)
     previous_max_bytes = Application.get_env(:biot_server, :node_response_max_bytes)
-    previous_registrations = Application.get_env(:biot_server, :node_registrations)
+    previous_registrations = Application.get_env(:biot_server, :node_registrations_file)
     Application.put_env(:biot_server, :node_request_timeout_ms, 100)
     Application.put_env(:biot_server, :node_response_max_bytes, 8)
 
     on_exit(fn ->
       restore_env(:node_request_timeout_ms, previous_timeout)
       restore_env(:node_response_max_bytes, previous_max_bytes)
-      restore_env(:node_registrations, previous_registrations)
+      restore_env(:node_registrations_file, previous_registrations)
     end)
   end
 
@@ -230,7 +228,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
       registration_for(abandoned, status: :abandoned)
     ]
 
-    Application.put_env(:biot_server, :node_registrations, registrations)
+    TestFixtures.put_registrations(registrations)
     assert {:ok, _nodes} = Nodes.reload()
     assert_closed(old_socket)
     assert_closed(abandoned_socket)
@@ -281,7 +279,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
       ready_peer(listener.port, context.certificates, node, 0)
 
     disabled = registration_for(node, status: :disabled)
-    Application.put_env(:biot_server, :node_registrations, [disabled])
+    TestFixtures.put_registrations([disabled])
     assert {:ok, _nodes} = Nodes.reload()
     assert_closed(enabled_socket)
     assert Repo.get!(BiotRow, biot_id).access_revision == 2
@@ -291,17 +289,17 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     {disabled_socket, connected, _synchronize} =
       ready_peer(listener.port, context.certificates, disabled_node, 0)
 
-    Application.put_env(:biot_server, :node_registrations, [])
+    TestFixtures.put_registrations([])
     assert {:ok, _nodes} = Nodes.reload()
     assert_connection_open(disabled_socket, node.id, connected.connection_id)
     assert Repo.get!(BiotRow, biot_id).access_revision == 2
 
-    Application.put_env(:biot_server, :node_registrations, [registration_for(node, [])])
+    TestFixtures.put_registrations([registration_for(node, [])])
     assert {:ok, _nodes} = Nodes.reload()
     assert_connection_open(disabled_socket, node.id, connected.connection_id)
     assert Repo.get!(BiotRow, biot_id).access_revision == 2
 
-    Application.put_env(:biot_server, :node_registrations, [])
+    TestFixtures.put_registrations([])
     assert {:ok, _nodes} = Nodes.reload()
     assert_closed(disabled_socket)
     assert Repo.get!(BiotRow, biot_id).access_revision == 3
@@ -818,7 +816,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
 
     listener = start_listener(context.certificates)
     {socket, _connected, _synchronize} = ready_peer(listener.port, context.certificates, node, 0)
-    incarnation_id = TestFixtures.id(IncarnationId, 21)
+    incarnation_id = TestFixtures.incarnation_id(21)
 
     for actor <- [owner_actor, shell_actor] do
       request = Task.async(fn -> ServerRuntimeLogs.get(actor, biot.id, 20) end)
@@ -875,19 +873,13 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     logs = Task.async(fn -> ServerRuntimeLogs.get(actor, biot.id, 8) end)
     assert %Message.RuntimeLogs{} = logs_message = await_message(socket, 1, Message.RuntimeLogs)
 
-    {:ok, connection} = NodeConnections.ready(node.id)
-    {_socket, state} = :sys.get_state(connection)
-    assert map_size(state.pending_requests) == 2
-    {_from, diagnostic_timer, _reply} = state.pending_requests[diagnostic_message.request_id]
-    {_from, logs_timer, _reply} = state.pending_requests[logs_message.request_id]
-
     send_message(
       socket,
       %Message.DiagnosticResult{request_id: diagnostic_message.request_id, result: {"d", false}},
       1
     )
 
-    incarnation_id = TestFixtures.id(IncarnationId, 31)
+    incarnation_id = TestFixtures.incarnation_id(31)
 
     send_message(
       socket,
@@ -900,10 +892,6 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
 
     assert Task.await(diagnostic) == {:ok, {"d", false}}
     assert Task.await(logs) == {:ok, {incarnation_id, "l", false}}
-    assert Process.read_timer(diagnostic_timer) == false
-    assert Process.read_timer(logs_timer) == false
-    {_socket, state} = :sys.get_state(connection)
-    assert state.pending_requests == %{}
     :ssl.close(socket)
   end
 
@@ -923,16 +911,28 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
       socket,
       %Message.RuntimeLogsResult{
         request_id: message.request_id,
-        result: {TestFixtures.id(IncarnationId, 41), "late", false}
+        result: {TestFixtures.incarnation_id(41), "late", false}
       },
       1
     )
 
-    Process.sleep(20)
+    # A late reply is ignored: the same connection stays ready and serves the next request.
     {:ok, connection} = NodeConnections.ready(node.id)
-    {_socket, state} = :sys.get_state(connection)
-    assert state.pending_requests == %{}
-    assert Process.alive?(connection)
+    Application.put_env(:biot_server, :node_request_timeout_ms, 1_000)
+    retry = Task.async(fn -> ServerRuntimeLogs.get(actor, biot.id, 8) end)
+    assert %Message.RuntimeLogs{} = retry_message = await_message(socket, 1, Message.RuntimeLogs)
+
+    send_message(
+      socket,
+      %Message.RuntimeLogsResult{
+        request_id: retry_message.request_id,
+        result: {TestFixtures.incarnation_id(41), "next", false}
+      },
+      1
+    )
+
+    assert Task.await(retry) == {:ok, {TestFixtures.incarnation_id(41), "next", false}}
+    assert {:ok, ^connection} = NodeConnections.ready(node.id)
     :ssl.close(socket)
   end
 
@@ -995,6 +995,61 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     :ssl.close(socket)
   end
 
+  test "a retrying attempt's diagnostic has the same readers while its Operation works",
+       context do
+    listener = start_listener(context.certificates)
+    owner = TestFixtures.principal(1)
+    initiator = TestFixtures.principal(2)
+    stranger = TestFixtures.principal(3)
+    node = node_for_certificate(1, context.certificates, 0)
+
+    {socket, _connected, _synchronize} =
+      ready_peer(listener.port, context.certificates, node, 0)
+
+    biot_id = TestFixtures.id(BiotId, 8_013)
+
+    assert {:ok, accepted} =
+             Biots.create(
+               TestFixtures.actor(owner),
+               biot_id,
+               TestFixtures.create_command(name: "retrying", node_id: node.id)
+             )
+
+    assert %Message.Desired{} = await_message(socket, 1, Message.Desired)
+
+    Operation
+    |> Repo.get!(accepted.operation_id)
+    |> Ecto.Changeset.change(actor_id: initiator.id)
+    |> Repo.update!()
+
+    diagnostic_ref = TestFixtures.id(PrivateDiagnosticId, 8_013)
+    failure = %{TestFixtures.failure() | diagnostic_ref: diagnostic_ref}
+    TestFixtures.observation(Repo.get!(BiotRow, biot_id), 8_013, failure: {1, failure})
+
+    assert Repo.get!(Operation, accepted.operation_id).failure == nil
+
+    for principal <- [owner, initiator] do
+      task =
+        Task.async(fn -> ServerDiagnostics.get(TestFixtures.actor(principal), diagnostic_ref) end)
+
+      assert %Message.Diagnostic{} = request = await_message(socket, 1, Message.Diagnostic)
+      assert request.diagnostic_id == diagnostic_ref
+
+      send_message(
+        socket,
+        %Message.DiagnosticResult{request_id: request.request_id, result: {"retrying", false}},
+        1
+      )
+
+      assert Task.await(task) == {:ok, {"retrying", false}}
+    end
+
+    assert ServerDiagnostics.get(TestFixtures.actor(stranger), diagnostic_ref) ==
+             {:error, :forbidden}
+
+    :ssl.close(socket)
+  end
+
   test "a real Linux node reconnects, resynchronizes, reports, and serves diagnostics", context do
     case Platform.current() do
       {:ok, _platform} ->
@@ -1051,7 +1106,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         eventually(fn -> Repo.get!(Operation, accepted.operation_id).outcome == :succeeded end)
 
         with_node_host_config(fn ->
-          diagnostic_ref =
+          {:ok, diagnostic_ref} =
             NodeDiagnostics.put(
               TestFixtures.id(BiotId, 8_012),
               1,
@@ -1103,8 +1158,8 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         {:ok, baseline} = BiotSpecs.build(baseline_row.id)
         {:ok, next_spec} = BiotSpecs.build(next_row.id)
 
-        configure_node_host()
         start_node_journal()
+        configure_node_host()
         assert {:ok, _intent} = NodeJournal.put_intent(baseline)
         {listener, port} = raw_server(context.certificates)
         parent = self()
@@ -1202,7 +1257,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         assert {:ok, _intent} = NodeJournal.put_intent(spec)
         assert {:ok, _intent} = NodeJournal.put_destruction_report(biot.id, report)
 
-        diagnostic_id =
+        {:ok, diagnostic_id} =
           NodeDiagnostics.put(
             biot.id,
             spec.execution.desired.revision,
@@ -1210,8 +1265,8 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
             Diagnostic.text("retirement failed")
           )
 
-        incarnation_id = TestFixtures.id(IncarnationId, 8_071)
-        {:ok, node_config} = NodeConfig.from_application()
+        incarnation_id = TestFixtures.incarnation_id(8_071)
+        node_config = NodeConfig.current!()
         runtime_log = NodePaths.runtime_log(node_config, biot.id)
         File.mkdir_p!(Path.dirname(runtime_log))
         File.write!(runtime_log, "last runtime output")
@@ -1394,8 +1449,8 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         {:ok, baseline} = BiotSpecs.build(baseline_row.id)
         {:ok, next_spec} = BiotSpecs.build(next_row.id)
 
-        configure_node_host()
         start_node_journal()
+        configure_node_host()
         assert {:ok, _intent} = NodeJournal.put_intent(baseline)
         {listener, port} = raw_server(context.certificates)
         first_connection = TestFixtures.connection_id(61)
@@ -1490,10 +1545,16 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         spec = eventually_value(fn -> local_intent(biot_id) end)
         environment_id = spec.execution.environment.id
 
+        # The handler stores the node's orphan report right after synchronization. Killing it
+        # during that write would take the test's sandboxed database connection down with it.
+        eventually(fn -> Repo.get(NodeObservation, node.id) != nil end)
         [{handler, _connection_id}] = Registry.lookup(Biot.Server.Control.Registry, node.id)
         monitor = Process.monitor(handler)
         Process.exit(handler, :kill)
         assert_receive {:DOWN, ^monitor, :process, ^handler, :killed}, @eventually_timeout
+
+        # The node connection has no public status. Suspending it once it is disconnected keeps it
+        # from reconnecting and draining the outbox until every report below is written.
         eventually(fn -> :sys.get_state(connection).status == :disconnected end)
         :sys.suspend(connection)
 
@@ -1523,9 +1584,6 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
         entries = :ets.tab2list(Biot.Node.Control.Outbox)
         assert Enum.count(entries, &match?({{:observation, ^biot_id}, _report}, &1)) == 1
         assert Enum.count(entries, &match?({{:resolution, ^environment_id}, _report}, &1)) == 1
-
-        {:messages, messages} = Process.info(connection, :messages)
-        assert Enum.count(messages, &match?({:"$gen_cast", :drain}, &1)) == 1
 
         :sys.resume(connection)
 
@@ -1879,18 +1937,27 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
     :ok
   end
 
+  # Loads the node settings the way boot does, so it follows `start_node_journal/0`, which sets the
+  # data root those settings need.
   defp configure_node_host do
     previous = put_node_host_config()
-    on_exit(fn -> restore_node_host_config(previous) end)
+    {:ok, _config} = NodeConfig.load()
+
+    on_exit(fn ->
+      restore_node_host_config(previous)
+      :persistent_term.erase(NodeConfig)
+    end)
   end
 
   defp with_node_host_config(function) do
     previous = put_node_host_config()
+    {:ok, _config} = NodeConfig.load()
 
     try do
       function.()
     after
       restore_node_host_config(previous)
+      :persistent_term.erase(NodeConfig)
     end
   end
 

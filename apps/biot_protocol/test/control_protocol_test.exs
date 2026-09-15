@@ -10,7 +10,6 @@ defmodule Biot.Protocol.ControlProtocolTest do
   alias Biot.Protocol.Certificates
   alias Biot.Protocol.ConnectionId
   alias Biot.Protocol.Desired
-  alias Biot.Protocol.Digest
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.EnvironmentSelection
   alias Biot.Protocol.ExecutionReport
@@ -25,7 +24,6 @@ defmodule Biot.Protocol.ControlProtocolTest do
   alias Biot.Protocol.PinnedSource
   alias Biot.Protocol.Platform
   alias Biot.Protocol.PrivateDiagnosticId
-  alias Biot.Protocol.ProjectSnapshot
   alias Biot.Protocol.RegistrationId
   alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.SecretName
@@ -184,8 +182,7 @@ defmodule Biot.Protocol.ControlProtocolTest do
       {Message.Observation, ["execution_report"]},
       {Message.Resolution, ["manifest"]},
       {Message.Desired, ["biot_spec", "execution"]},
-      {Message.Observation, ["execution_report", "container"]},
-      {Message.Resolution, ["manifest", "project_snapshot"]}
+      {Message.Observation, ["execution_report", "container"]}
     ]
 
     for {module, path} <- cases do
@@ -198,7 +195,7 @@ defmodule Biot.Protocol.ControlProtocolTest do
   end
 
   test "runtime log results reject malformed found and not-found shapes" do
-    incarnation_id = id(IncarnationId, 6)
+    incarnation_id = incarnation_id(6)
 
     found = %{
       "type" => "runtime_logs_result",
@@ -295,8 +292,9 @@ defmodule Biot.Protocol.ControlProtocolTest do
 
   test "peer identity is the lowercase SHA-256 digest of SubjectPublicKeyInfo DER" do
     directory = temp_directory("peer-identity")
-    assert {:ok, certificates} = Certificates.generate(directory, 1)
-    der = certificates.nodes |> hd() |> Map.fetch!(:cert) |> certificate_der()
+    assert {:ok, _authority} = Certificates.create_authority(directory)
+    assert {:ok, node} = Certificates.issue(directory, {:node, "1"})
+    der = certificate_der(node.cert)
 
     decoded = :public_key.der_decode(:Certificate, der)
     tbs = certificate(decoded, :tbsCertificate)
@@ -310,50 +308,13 @@ defmodule Biot.Protocol.ControlProtocolTest do
     assert PeerIdentity.from_certificate(der) == {:ok, expected}
   end
 
-  test "certificate generation writes usable roles, protected keys, and fingerprints" do
-    directory = temp_directory("certificates")
-    assert {:ok, certificates} = Certificates.generate(directory, 3)
-
-    assert File.exists?(certificates.ca)
-    assert length(certificates.nodes) == 3
-
-    for key <- [certificates.server.key | Enum.map(certificates.nodes, & &1.key)] do
-      assert {:ok, stat} = File.stat(key)
-      assert Bitwise.band(stat.mode, 0o777) == 0o600
-    end
-
-    assert extension_usage(certificates.server.cert) == [:serverAuth, :clientAuth]
-
-    for node <- certificates.nodes do
-      assert extension_usage(node.cert) == [:clientAuth]
-      assert node.fingerprint == recompute_fingerprint(node.cert)
-    end
-
-    assert certificates.server.fingerprint == recompute_fingerprint(certificates.server.cert)
-
-    fingerprints_path = Path.join(directory, "fingerprints.json")
-    assert File.exists?(fingerprints_path)
-    assert Jason.decode!(File.read!(fingerprints_path)) == fingerprint_document(certificates)
-  end
-
-  test "mix biot.gen.certs generates the requested node certificates" do
-    directory = temp_directory("mix-task")
-    Mix.Task.reenable("biot.gen.certs")
-    Mix.Task.run("biot.gen.certs", ["--nodes", "2", directory])
-
-    assert File.exists?(Path.join(directory, "ca.pem"))
-    assert File.exists?(Path.join(directory, "server-cert.pem"))
-    assert File.exists?(Path.join(directory, "node-1-cert.pem"))
-    assert File.exists?(Path.join(directory, "node-2-cert.pem"))
-  end
-
   defp messages do
     registration_id = id(RegistrationId, 1)
     connection_id = id(ConnectionId, 2)
     biot_id = id(BiotId, 3)
     environment_id = id(EnvironmentId, 4)
     diagnostic_id = id(PrivateDiagnosticId, 5)
-    incarnation_id = id(IncarnationId, 6)
+    incarnation_id = incarnation_id(6)
 
     orphaned_allocation =
       %OrphanedAllocation{biot_id: biot_id, uid_range: %{start: 100_000, count: 65_536}}
@@ -366,8 +327,7 @@ defmodule Biot.Protocol.ControlProtocolTest do
 
     selection = %EnvironmentSelection{
       base_nixpkgs: SourceSelector.nixpkgs(),
-      layers: [],
-      project_context: nil
+      layers: []
     }
 
     execution = %ExecutionSpec{
@@ -395,8 +355,7 @@ defmodule Biot.Protocol.ControlProtocolTest do
         "sha256-" <> Base.encode64(:binary.copy(<<1>>, 32))
       )
 
-    snapshot = %ProjectSnapshot{snapshot_id: "snapshot", digest: Digest.compute(:snapshot, "1")}
-    manifest = Manifest.build(pinned, [], snapshot)
+    manifest = Manifest.build(platform, pinned, [])
 
     [
       {:handshake,
@@ -550,6 +509,11 @@ defmodule Biot.Protocol.ControlProtocolTest do
     ])
   end
 
+  defp incarnation_id(number) do
+    {:ok, id} = IncarnationId.parse(String.pad_leading(Integer.to_string(number), 64, "0"))
+    id
+  end
+
   defp id(module, number) do
     value = "00000000-0000-4000-8000-" <> String.pad_leading(Integer.to_string(number), 12, "0")
     {:ok, identifier} = module.parse(value)
@@ -566,34 +530,5 @@ defmodule Biot.Protocol.ControlProtocolTest do
 
   defp certificate_der(path) do
     path |> File.read!() |> X509.Certificate.from_pem!() |> X509.Certificate.to_der()
-  end
-
-  defp extension_usage(path) do
-    path
-    |> File.read!()
-    |> X509.Certificate.from_pem!()
-    |> X509.Certificate.extension(:ext_key_usage)
-    |> elem(3)
-    |> Enum.map(fn
-      {1, 3, 6, 1, 5, 5, 7, 3, 1} -> :serverAuth
-      {1, 3, 6, 1, 5, 5, 7, 3, 2} -> :clientAuth
-    end)
-  end
-
-  defp recompute_fingerprint(path) do
-    path
-    |> certificate_der()
-    |> PeerIdentity.from_certificate()
-    |> elem(1)
-  end
-
-  defp fingerprint_document(certificates) do
-    %{
-      "server" => certificates.server.fingerprint,
-      "nodes" =>
-        certificates.nodes
-        |> Enum.with_index(1)
-        |> Map.new(fn {node, number} -> {"node-#{number}", node.fingerprint} end)
-    }
   end
 end

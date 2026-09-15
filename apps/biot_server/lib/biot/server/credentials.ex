@@ -17,7 +17,6 @@ defmodule Biot.Server.Credentials do
   alias Biot.Server.AuthenticationProof
   alias Biot.Server.CommandError
   alias Biot.Server.Credentials.Created
-  alias Biot.Server.Id
   alias Biot.Server.Label
   alias Biot.Server.Principals
   alias Biot.Server.Queries.CredentialView
@@ -46,7 +45,7 @@ defmodule Biot.Server.Credentials do
     with :ok <- Sessions.require_control(repo, authentication) do
       credential =
         repo.insert!(%Credential{
-          id: Id.generate(CredentialId),
+          id: CredentialId.generate(),
           principal_id: authentication.actor.principal_id,
           label: label,
           secret_digest: digest,

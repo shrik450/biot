@@ -1,4 +1,6 @@
-defmodule Biot.Node.Repo.Migrations.AddRetryWaitingFor do
+defmodule Biot.Node.Journal.Migrations.AddRetryWaitingFor do
+  @moduledoc false
+
   use Ecto.Migration
 
   def change do

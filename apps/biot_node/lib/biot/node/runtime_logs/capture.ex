@@ -6,10 +6,10 @@ defmodule Biot.Node.RuntimeLogs.Capture do
   require Logger
 
   alias Biot.Node.Host.Command
-  alias Biot.Node.Host.Names
   alias Biot.Node.Host.Paths
   alias Biot.Node.Host.Podman
   alias Biot.Node.RuntimeLogs.Metadata
+  alias Biot.Protocol.IncarnationId
 
   defmodule State do
     @moduledoc false
@@ -94,7 +94,7 @@ defmodule Biot.Node.RuntimeLogs.Capture do
   end
 
   defp open_stream(config, incarnation_id, :all) do
-    Podman.open_combined(config, ["logs", "--follow", Names.container(incarnation_id)])
+    Podman.open_combined(config, ["logs", "--follow", IncarnationId.to_string(incarnation_id)])
   end
 
   defp open_stream(config, incarnation_id, :new) do
@@ -103,7 +103,7 @@ defmodule Biot.Node.RuntimeLogs.Capture do
       "--follow",
       "--tail",
       "0",
-      Names.container(incarnation_id)
+      IncarnationId.to_string(incarnation_id)
     ])
   end
 

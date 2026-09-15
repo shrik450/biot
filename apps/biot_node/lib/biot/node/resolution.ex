@@ -4,16 +4,14 @@ defmodule Biot.Node.Resolution do
   reports the manifest to the server, which never sends it back.
   """
 
-  alias Biot.Node.NodePrivatePath
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.Manifest
 
-  @enforce_keys [:environment_id, :manifest, :snapshot_path]
-  defstruct [:environment_id, :manifest, :snapshot_path]
+  @enforce_keys [:environment_id, :manifest]
+  defstruct [:environment_id, :manifest]
 
   @type t :: %__MODULE__{
           environment_id: EnvironmentId.t(),
-          manifest: Manifest.t(),
-          snapshot_path: NodePrivatePath.t() | nil
+          manifest: Manifest.t()
         }
 end

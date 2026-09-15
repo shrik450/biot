@@ -32,7 +32,7 @@ jobs:
 
       - run: mix deps.get
       - run: mix check
-      - run: mix test --exclude podman
+      - run: mix test --exclude podman --warnings-as-errors
 
       - uses: actions/setup-go@v6
         with:
@@ -41,6 +41,10 @@ jobs:
         run: go build ./...
       - working-directory: cli
         run: go vet ./...
+      - working-directory: agent
+        run: go vet ./...
+      - working-directory: agent
+        run: go test ./...
 
   host-tests:
     runs-on: ubuntu-latest

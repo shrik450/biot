@@ -173,14 +173,14 @@ defmodule Biot.Node.Host.Environment do
 
   defp create_resolution(context, allocation, environment_id, selection) do
     with {:ok, staged} <- SourceStaging.fetch(context, allocation, environment_id, selection),
-         {:ok, manifest} <- manifest(staged, selection),
+         {:ok, manifest} <- manifest(staged, selection, context.config.platform),
          {:ok, _resolution} <- record_resolution(context.biot_id, environment_id, manifest) do
       :ok
     end
   end
 
-  defp manifest(staged, selection) do
-    case StagedInputs.manifest(staged, selection) do
+  defp manifest(staged, selection, platform) do
+    case StagedInputs.manifest(staged, selection, platform) do
       {:ok, manifest} ->
         {:ok, manifest}
 

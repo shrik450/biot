@@ -16,7 +16,6 @@ defmodule Biot.Server.SshKeys do
   alias Biot.Server.Authentication.Validity
   alias Biot.Server.AuthenticationProof
   alias Biot.Server.CommandError
-  alias Biot.Server.Id
   alias Biot.Server.Label
   alias Biot.Server.Principals
   alias Biot.Server.Queries.SshKeyView
@@ -69,7 +68,7 @@ defmodule Biot.Server.SshKeys do
 
   @spec authenticate(SshPublicKey.t()) :: {:ok, Authentication.t()} | :error
   def authenticate(%SshPublicKey{} = public_key) do
-    case Validity.ssh_key_by_fingerprint(Repo, SshPublicKey.fingerprint(public_key)) do
+    case Validity.ssh_key_by_fingerprint(Repo, public_key.fingerprint) do
       %SshKey{} = key ->
         {:ok,
          %Authentication{
@@ -85,10 +84,10 @@ defmodule Biot.Server.SshKeys do
   defp insert_key(repo, actor, public_key, label) do
     with :ok <- Principals.require_enabled(repo, actor) do
       key = %SshKey{
-        id: Id.generate(SshKeyId),
+        id: SshKeyId.generate(),
         principal_id: actor.principal_id,
         public_key: public_key,
-        fingerprint: SshPublicKey.fingerprint(public_key),
+        fingerprint: public_key.fingerprint,
         label: label
       }
 

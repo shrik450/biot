@@ -90,15 +90,42 @@ defmodule Biot.Node.Host.Config do
           platform: Platform.t()
         }
 
-  @spec from_application() :: {:ok, t()} | {:error, term()}
-  def from_application do
+  @doc """
+  Parses the host settings and keeps them for every later reader, so no reader parses them again
+  or scans `PATH` again. `Biot.Node.Host.Setup` calls this at boot, before any process that reads
+  the settings starts.
+  """
+  @spec load() :: {:ok, t()} | {:error, term()}
+  def load do
+    with {:ok, config} <- parse_application() do
+      :persistent_term.put(__MODULE__, config)
+      {:ok, config}
+    end
+  end
+
+  @doc "The settings `load/0` kept. A node whose host is not configured has none."
+  @spec current() :: {:ok, t()} | {:error, :not_loaded}
+  def current do
+    case :persistent_term.get(__MODULE__, nil) do
+      nil -> {:error, :not_loaded}
+      config -> {:ok, config}
+    end
+  end
+
+  # Every process that calls this starts after `Biot.Node.Host.Setup` loaded the settings.
+  @spec current!() :: t()
+  def current! do
+    {:ok, config} = current()
+    config
+  end
+
+  defp parse_application do
     with {:ok, platform} <- Platform.current(),
          {:ok, data_root} <- absolute_path(:data_root),
          {:ok, uid_range_base} <- non_negative_integer(:uid_range_base),
          {:ok, uid_range_count} <- positive_integer(:uid_range_count),
          {:ok, uid_range_limit} <- positive_integer(:uid_range_limit),
          :ok <- uid_range(uid_range_base, uid_range_count, uid_range_limit),
-         {:ok, build_support_dir} <- absolute_path(:build_support_dir),
          {:ok, fetch_ca_bundle} <- fetch_ca_bundle(),
          {:ok, builder_image} <- builder_image(),
          {:ok, binary_cache_urls} <- cache_setting(:binary_cache_urls),
@@ -130,7 +157,7 @@ defmodule Biot.Node.Host.Config do
          sleep_executable: sleep_executable,
          podman_network_command: podman_network_command,
          builder_image: builder_image,
-         build_support_dir: build_support_dir,
+         build_support_dir: Application.app_dir(:biot_node, "priv/build_support"),
          fetch_ca_bundle: fetch_ca_bundle,
          binary_cache_urls: binary_cache_urls,
          binary_cache_keys: binary_cache_keys,
@@ -143,15 +170,6 @@ defmodule Biot.Node.Host.Config do
          runtime_log_max_bytes: runtime_log_max_bytes,
          platform: platform
        }}
-    end
-  end
-
-  # A complete host config is a precondition for every node process because boot validates it.
-  @spec from_application!() :: t()
-  def from_application! do
-    case from_application() do
-      {:ok, config} -> config
-      {:error, reason} -> raise "invalid host config: #{inspect(reason)}"
     end
   end
 

@@ -10,6 +10,7 @@ defmodule Biot.Protocol.SecretOutcome do
   A code names a cause an operator can act on. It never carries a value, a name, or a path.
   """
 
+  alias Biot.Protocol.Choice
   alias Biot.Protocol.ParsedList
   alias Biot.Protocol.SecretName
   alias Biot.Protocol.StrictMap
@@ -42,7 +43,7 @@ defmodule Biot.Protocol.SecretOutcome do
 
   def parse(%{"status" => "failure", "code" => code} = value) do
     with {:ok, _value} <- StrictMap.fetch_exact(value, ["status", "code"]),
-         {:ok, code} <- parse_code(code) do
+         {:ok, code} <- Choice.parse(code, @codes) do
       {:ok, {:failure, code}}
     end
   end
@@ -69,13 +70,4 @@ defmodule Biot.Protocol.SecretOutcome do
   end
 
   def parse_listing(value), do: parse(value)
-
-  defp parse_code(value) when is_binary(value) do
-    case Enum.find(@codes, &(Atom.to_string(&1) == value)) do
-      nil -> {:error, :invalid_format}
-      code -> {:ok, code}
-    end
-  end
-
-  defp parse_code(_value), do: {:error, :invalid_format}
 end

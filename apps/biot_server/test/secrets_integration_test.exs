@@ -8,7 +8,6 @@ defmodule Biot.Server.SecretsIntegrationTest do
 
   alias Biot.Protocol.AuthorizationValue
   alias Biot.Protocol.BiotId
-  alias Biot.Protocol.Certificates
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Frame
   alias Biot.Protocol.Message
@@ -42,7 +41,7 @@ defmodule Biot.Server.SecretsIntegrationTest do
         "biot-secrets-integration-#{System.unique_integer([:positive])}"
       )
 
-    {:ok, certificates} = Certificates.generate(directory, 2)
+    {:ok, certificates} = TestFixtures.certificates(directory, 2)
     on_exit(fn -> File.rm_rf!(directory) end)
     %{certificates: certificates}
   end
@@ -287,9 +286,8 @@ defmodule Biot.Server.SecretsIntegrationTest do
       assert FetchCredentials.remove(context.actor, biot_id, source()) ==
                {:error, :temporarily_unavailable}
 
-      # A delivery attempted against an unreachable node still records that a value may have gone
-      # out, because the server cannot prove it did not.
-      assert exposure_marked?(biot_id)
+      # Nothing was sent to an unreachable node, so nothing may have been exposed.
+      refute exposure_marked?(biot_id)
 
       parent = self()
       connection = %{connection_id: TestFixtures.connection_id(7), state: :synchronizing}

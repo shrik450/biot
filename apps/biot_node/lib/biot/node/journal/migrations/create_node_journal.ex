@@ -1,4 +1,6 @@
-defmodule Biot.Node.Repo.Migrations.CreateNodeJournal do
+defmodule Biot.Node.Journal.Migrations.CreateNodeJournal do
+  @moduledoc false
+
   use Ecto.Migration
 
   def change do

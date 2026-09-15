@@ -1,52 +1,50 @@
 # Environment bundles
 
-## Pin a source
+Environment resolution has two phases, both run by the node in a private build worker. They are
+not operator commands.
 
-`pin.nix` asks Nix to resolve one Git reference and compute its NAR hash. Pass the URL and
-reference as arguments so author input never becomes Nix source:
+## Fetch and pin inputs
 
-```sh
-nix-instantiate \
-  --eval \
-  --strict \
-  --json \
-  nix/pin.nix \
-  --argstr url <repository URL> \
-  --argstr ref <Git reference>
-```
-
-The result contains `revision` and `nar_hash`.
-
-## Build a bundle
-
-`build.nix` reads one encoded `Biot.Protocol.Manifest` and builds a launch
-bundle for one platform. Pass only the manifest JSON path and the system:
+`fetch.nix` is the trusted, networked phase. It receives an encoded
+`Biot.Protocol.EnvironmentSelection`, resolves moving Git refs, fetches the base package set and
+layers, and stages the release's own build support. The node invokes it with an expression so
+selection values remain data rather than Nix source:
 
 ```sh
 nix build \
-  --extra-experimental-features 'nix-command' \
-  --file nix/build.nix \
-  --argstr manifest <node private path>/manifest.json \
+  --impure \
+  --expr 'import /biot/build-support/nix/fetch.nix' \
+  --argstr selection '<encoded selection>' \
+  --arg buildSupport /biot/build-support \
   --argstr system x86_64-linux \
-  --out-link <node private path>/<environment id>
+  --out-link /biot/environments/<environment id>/staged \
+  --store /biot/store
 ```
 
-The output link is the garbage collection root for that environment artifact.
-Its node-private name keeps each artifact until the node removes that artifact.
+The fetch output contains `pins.json` plus symlinks to every input. `pins.json` records each store
+path and NAR hash, and records a revision for each source. The symlinks make the one `staged`
+out-link the garbage-collection root for the complete input set. `Biot.Node.Host.StagedInputs`
+strictly parses this file and combines its pins with the original selection to produce the
+`Biot.Protocol.Manifest` reported to the server.
 
-The manifest JSON must have the exact shape from
-`Biot.Protocol.Manifest.encode/1`. Nix maps its fields as follows:
+## Build a bundle
 
-| Manifest field | Build use |
-| --- | --- |
-| `base_nixpkgs` | Nix fetches the pinned revision and NAR hash. The `nixpkgs` source name maps to `https://github.com/NixOS/nixpkgs`. |
-| `layers` | Nix fetches each pinned Git source and evaluates its root `default.nix` in list order. |
-| `project_snapshot` | Nix does not use it. The checkout is a private writable mount at runtime. |
-| `digest` | The node uses it to identify the manifest. It does not change the Nix evaluation. |
+`build.nix` is the pure, offline user-evaluation phase. The node mounts only the store objects
+named by the parsed staging record and passes their mounted paths and NAR hashes as `staged`:
 
-Each pinned source uses the canonical `<source>#<revision>#<NAR hash>` string
-from `PinnedSource.to_string/1`. The build checks each staged tree's NAR hash
-through `builtins.fetchTree`. It needs `nix-command` and `fetch-tree`.
+```sh
+nix build \
+  --option pure-eval true \
+  --expr 'import /biot/staged/build-support/<store object>/nix/build.nix' \
+  --argstr staged '<encoded staged inputs>' \
+  --argstr system x86_64-linux \
+  --out-link /biot/environments/<environment id>/root \
+  --store /biot/store
+```
+
+`builtins.fetchTree` checks each mounted object's NAR hash. No source URL or credential reaches
+this phase, and no source can enter through another path. The output link retains the launch
+bundle and its complete closure until the node releases that environment.
 
 Each layer is a Nix module with these options:
 

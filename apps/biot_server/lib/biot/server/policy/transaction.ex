@@ -25,7 +25,7 @@ defmodule Biot.Server.Policy.Transaction do
     |> Ecto.Multi.run(:policy, fn repo, _changes -> plan(repo, actor, biot_id, change) end)
     |> Ecto.Multi.merge(&writes/1)
     |> Repo.transaction(mode: :immediate)
-    |> transaction_result()
+    |> after_commit()
   end
 
   defp plan(repo, actor, biot_id, change) do
@@ -62,25 +62,25 @@ defmodule Biot.Server.Policy.Transaction do
     )
   end
 
-  defp transaction_result({:ok, %{policy: {kind, _biot}, biot: %Biot{} = biot}}) do
-    build_result(kind, biot)
+  defp after_commit({:ok, %{policy: {kind, _biot}, biot: %Biot{} = biot}}) do
+    enforce_access(kind, biot)
   end
 
-  defp transaction_result({:ok, %{policy: {kind, _biot, _multi}, biot: %Biot{} = biot}}) do
-    build_result(kind, biot)
+  defp after_commit({:ok, %{policy: {kind, _biot, _multi}, biot: %Biot{} = biot}}) do
+    enforce_access(kind, biot)
   end
 
-  defp transaction_result({:error, :policy, error, _changes}), do: {:error, error}
+  defp after_commit({:error, :policy, error, _changes}), do: {:error, error}
 
-  defp transaction_result({:error, _operation, %Ecto.Changeset{} = changeset, _changes}) do
+  defp after_commit({:error, _operation, %Ecto.Changeset{} = changeset, _changes}) do
     raise Ecto.InvalidChangesetError,
       action: changeset.action || :insert,
       changeset: changeset
   end
 
-  defp transaction_result({:error, _operation, error, _changes}), do: {:error, error}
+  defp after_commit({:error, _operation, error, _changes}), do: {:error, error}
 
-  defp build_result(kind, %Biot{} = biot) do
+  defp enforce_access(kind, %Biot{} = biot) do
     if kind == :withdrawn do
       Withdrawal.enforce([{:biot, biot.id}], [{biot.node_id, biot.id}])
     end

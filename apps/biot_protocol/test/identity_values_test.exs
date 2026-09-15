@@ -51,13 +51,13 @@ defmodule Biot.Protocol.IdentityValuesTest do
     test "parses an ed25519 line and computes the OpenSSH fingerprint" do
       assert {:ok, key} = SshPublicKey.parse(@ed25519)
       assert SshPublicKey.to_string(key) == @ed25519
-      assert SshPublicKey.fingerprint(key) == @ed25519_fingerprint
+      assert key.fingerprint == @ed25519_fingerprint
       assert to_string(key) == @ed25519
     end
 
     test "parses an rsa line and computes the OpenSSH fingerprint" do
       assert {:ok, key} = SshPublicKey.parse(@rsa)
-      assert SshPublicKey.fingerprint(key) == @rsa_fingerprint
+      assert key.fingerprint == @rsa_fingerprint
     end
 
     test "one word of comment is accepted and dropped from the stored line" do
@@ -91,7 +91,7 @@ defmodule Biot.Protocol.IdentityValuesTest do
     test "accepts a comment containing spaces and keeps the ssh-keygen fingerprint" do
       assert {:ok, key} = SshPublicKey.parse(@ed25519 <> " work laptop")
       assert SshPublicKey.to_string(key) == @ed25519
-      assert SshPublicKey.fingerprint(key) == @ed25519_fingerprint
+      assert key.fingerprint == @ed25519_fingerprint
     end
   end
 

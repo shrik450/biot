@@ -247,13 +247,11 @@ Environment
 EnvironmentSelection
   base_nixpkgs: SourceSelector
   layers: list(SourceSelector)
-  project_context: none | RelativeDirectory
 
 Manifest
   platform: Platform
   base_nixpkgs: PinnedSource
   layers: list(PinnedSource)
-  project_snapshot: none | {snapshot_id, digest}
   digest: Digest
 
 Publication
@@ -307,12 +305,14 @@ aid; grants attach only to a resolved principal. The creator owns the biot and
 implicitly has shell and view access. Only the owner controls lifecycle and
 sharing. A principal with any grant on a biot may read it.
 
-`BiotId` is a UUIDv4 accepted only in its canonical form.
-`RepositorySource`, `SourceSelector`, `PinnedSource`, `Hostname`, `Port`, and
-`RelativeDirectory` are parsed boundary values. Repository and source URLs accept
+`BiotId` is a UUIDv4 accepted only in its canonical form. `BiotName` is a
+lowercase DNS label of at most 63 characters that is not a canonical UUID, so a
+client can tell a name from an ID without asking the server. Names are unique
+among one owner's live Biots.
+`RepositorySource`, `SourceSelector`, `PinnedSource`, `Hostname`, and `Port` are
+parsed boundary values. Repository and source URLs accept
 only HTTPS, with no embedded credentials. Local paths, `file://`, SSH, and Git
-helpers such as `ext::` are rejected. Relative directories cannot escape their
-checkout context. `Platform` is a supported Nix host system supplied by the
+helpers such as `ext::` are rejected. `Platform` is a supported Nix host system supplied by the
 assigned node; callers cannot select a different platform.
 
 `SshPublicKey` is one OpenSSH public key line decoded with OTP `ssh_file`; its
@@ -355,7 +355,9 @@ disabled alternate freely. Retired and abandoned are terminal.
 | retired | Operator ended it after every allocation was known absent | Rejected | Rejected |
 | abandoned | Operator wrote off a lost node; data may remain | Rejected | Rejected |
 
-Retirement is rejected while any assigned Biot's allocation is not known absent.
+Retirement is rejected while any assigned Biot's allocation is not known absent,
+or while the node's latest NodeObservation lists an orphaned allocation. A node
+that never reported has listed none.
 Abandonment has no precondition. It records that the node's data and identity
 ranges may still exist, and it never reports unobserved cleanup as destruction.
 The abandonment transaction marks every pending or working Operation of an
@@ -603,8 +605,10 @@ A lifecycle change other than destroy against a destroyed Biot returns
 
 The node retains a bounded diagnostic log for the latest failed attempt of each
 Biot revision and returns its `PrivateDiagnosticId` with the Failure. The actor
-who initiated the Operation or the Biot owner may fetch it through
-`Diagnostics.get`; the server retrieves it from the assigned node on demand.
+who initiated the Operation for that revision or the Biot owner may fetch it through
+`Diagnostics.get`, both while the node retries and the Failure is only in the
+Observation, and after the Operation fails. The server retrieves it from the
+assigned node on demand.
 `Diagnostics.get` returns `ok({content, truncated}) | error(CommandError)`.
 An unavailable node or an expired fetch deadline returns
 `temporarily_unavailable`; a missing or expired diagnostic returns `not_found`.
@@ -747,7 +751,8 @@ Repeating delivery replaces the same file; removing an absent file succeeds.
 Files survive controller restart and disappear with allocation destruction.
 The node never journals values. The server never persists them or queues them
 for later delivery.
-The configured value-size limit is initially 64 KiB.
+A value is at most 64 KiB. The limit is a protocol constant, not a setting,
+because both releases size the control link's frame limit around it.
 
 Clients read values through hidden prompts or stdin and never put them in
 arguments or persist them for retry. Secret values belong to neither the
@@ -756,7 +761,7 @@ creation body nor its fingerprint. UI fields are masked and cleared after use.
 Biot logs filter `value` and authentication fields, including
 `X-Biot-Authorization`. Codecs and OTP crash reports expose fixed error codes
 and metadata, never payloads or pending values. Source credentials also stay
-out of checkout configuration, manifests, snapshots, and diagnostics.
+out of checkout configuration, manifests, and diagnostics.
 These handling rules apply at every transport and process boundary.
 
 User workloads can write supplied secrets to their own output. That output
@@ -948,7 +953,7 @@ terminal. It never calls `/api`.
 | Page | Shows and offers |
 | --- | --- |
 | `/biots` | The actor's owned and shared Biots with role, node, and status; create |
-| `/biots/new` | Repository, name, node, layers, project context, optional runtime and source-fetch credentials |
+| `/biots/new` | Repository, name, node, layers, optional runtime and source-fetch credentials |
 | `/biots/:id` | BiotView, current Operation and its diagnostic, runtime logs, publications with URLs, grants by email, secrets by name, source credential requests, start, stop, rebuild, publish, share, destroy |
 | `/biots/:id/terminal` | Ghostty Web terminal for owners and shell-grant holders |
 | `/account` | Credentials and SSH keys, with the one-time token display |
@@ -1029,7 +1034,7 @@ ExecutionSpec
 ```
 
 The execution spec contains server-owned intent. The node's own `Resolution`
-record supplies its manifest and snapshot; sending that value back to its producer
+record supplies its manifest; sending that value back to its producer
 would introduce another copy that could disagree. The access boundary consumes
 `BiotSpec.access_revision`, while reconciliation consumes only `execution`.
 
@@ -1052,7 +1057,6 @@ Installation
 Resolution
   environment_id: EnvironmentId
   manifest: Manifest
-  snapshot_path: NodePrivatePath | none
 
 LocalIntent
   biot_id: BiotId
@@ -1148,15 +1152,15 @@ there is no second journal copy of their semantic state. Installation is an
 atomic selection owned by the allocation. Removing an installation releases its
 root only after no current container or in-flight action needs it.
 
-`environment_release` owns eventual reclamation. A resolution snapshot and
+`environment_release` owns eventual reclamation. A resolution's staged inputs and
 prepared artifact remain retained while their Environment is desired, installed,
 or used by a live container; resources outside those sets are releasable.
 Reclamation never runs while an action is in flight. Its inputs remain retained
 until completion or inspected cancellation, including during controller recovery.
 Once desired is `destroyed`, only the live container's
 environment is retained; the installed environment is released. A missing
-installed artifact makes the Installation lost. A missing resolution
-snapshot prevents preparing that Environment but does not invalidate an intact
+installed artifact makes the Installation lost. Missing staged inputs
+prevent preparing that Environment but does not invalidate an intact
 installed artifact. The concrete rooting and collection schedule belongs to the
 environment implementation.
 
@@ -1364,7 +1368,7 @@ allocation cleanup. Unknown inspection blocks that work; foreign ownership fails
 No worker adoption, saved work description, or completion protocol is needed.
 
 The build pool counts whole workers. Cancellation discards in-flight computation,
-but the private store, completed artifacts, and resolution snapshots survive.
+but the private store, completed artifacts, and staged inputs survive.
 Reconciliation reuses those results and trusted cache substitutes when available.
 It retries only work still needed by current intent. Matching runtime containers
 remain running while build management recovers.
@@ -2012,7 +2016,8 @@ source diagnostics rather than another merge language in Elixir.
 Reuse existing Nix modules within this build boundary when they fit. Biot owns
 container lifecycle, and the bundle owns service configuration. A second tool
 must not start another environment manager or service lifecycle beside them.
-Project-owned Nix configuration participates through the frozen project snapshot.
+A repository's own Nix configuration enters only as a layer, selected and pinned
+like any other. The build never reads the Biot's working checkout.
 
 Initial author-facing schema:
 
@@ -2095,8 +2100,7 @@ runtime's writable checkout, home, service data, or agent socket.
 The worker uses the allocation's UID range and a separate isolated network,
 with the same cross-biot isolation required for runtimes.
 
-The node stages immutable copies of the selected project context and its current
-release's build support. Resolution pins source inputs and the assigned platform.
+The node stages an immutable copy of its current release's build support. Resolution pins source inputs and the assigned platform.
 Trusted pinning code resolves source selectors in the fetch phase. A separate
 user build worker evaluates layers against the pinned manifest. Resolution is
 atomic and retained under the Environment ID. User evaluation uses `--pure-eval`
@@ -2136,13 +2140,6 @@ has run the system for a while. When they arrive, the host must confirm they
 work on the supported rootless setup, and an unenforceable limit rejects node
 startup. Until then, one biot's build can consume the node's build resources;
 the trusted group is the bound.
-
-Project snapshots stay within the biot's storage boundary, but can retain files
-after the working copy changes. UI and CLI project-context selection state:
-"Files in this directory become build inputs and may remain in this biot's
-store. Exclude credentials and other files you do not want retained."
-The snapshot exporter must not follow links outside the selected directory.
-There is no filename-based secret detector or automatic shared-cache upload.
 
 Adding a service option should change the Nix schema and generated runner
 configuration without changing Desired, node messages, or reconciliation. Prove
@@ -2203,7 +2200,7 @@ Builders load those files directly from the release.
 | `BIOT_DISABLED_PRINCIPALS` | Operator file listing disabled issuer/subject identities |
 | `BIOT_TRUSTED_EDGE_PEERS` | Edge addresses allowed to supply forwarded metadata |
 | `BIOT_AUTH_CHECK_INTERVAL_MS` | Maximum interval between live proof validity checks |
-| `BIOT_STREAM_OPEN_TIMEOUT_MS`, `BIOT_SECRET_MAX_BYTES` | Stream and secret bounds |
+| `BIOT_STREAM_OPEN_TIMEOUT_MS` | How long a stream may take to open |
 
 Node settings keep their existing `BIOT_NODE_*` names and add
 `BIOT_NODE_MAX_STREAMS` and `BIOT_NODE_MAX_STREAMS_PER_BIOT`. The node also configures
@@ -2214,8 +2211,9 @@ The getting-started guide names the supported Linux mechanisms and verifies
 their enforcement. Certificate
 tooling preserves the operator's CA certificate and protected private key so
 it can issue and renew leaf certificates. The operator can also supply an
-existing CA; the CA private key is never deployed to a node. `mix biot.gen.certs`
-supports that issuance flow. Reloading registrations permits peer-key replacement
+existing CA; the CA private key is never deployed to a node. `mix biot.certs`
+creates the authority once and issues or renews each leaf; renewal reuses the
+leaf key, so a peer's identity survives it. Reloading registrations permits peer-key replacement
 under the same Node ID. The SSH host key is any OpenSSH
 host key file the operator generates.
 
@@ -2379,7 +2377,6 @@ container.
 | Controller or node restart during a build | Recovery cancels the whole worker before retrying; completed outputs remain reusable; matching runtime containers stay running |
 | Worker resource limits (v2) | CPU and memory limits and storage quotas work on the supported Linux host; one worker cannot exhaust unbounded node resources |
 | Managed source fetching | Local paths, `file://`, `ext::`, SSH, protocol-changing redirects, inherited helpers, and submodule recursion cannot bypass HTTPS-only fetching |
-| Project context snapshot | Export cannot escape the selected directory through links; snapshot and outputs remain private to the biot |
 | Service exits while its supervisor runs | Lifecycle success remains accurate; an owner or shell collaborator can retrieve useful bounded runtime logs |
 | Desired-running container repeatedly exits | Retries back off and eventually require owner action |
 | Controller restarts during backoff or after exhaustion | Retry counts and terminal failure survive; observations continue while effects stay blocked |

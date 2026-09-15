@@ -17,10 +17,9 @@ defmodule Biot.Protocol.TestGenerators do
   alias Biot.Protocol.IncarnationId
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.PinnedSource
+  alias Biot.Protocol.Platform
   alias Biot.Protocol.Port
   alias Biot.Protocol.PrivateDiagnosticId
-  alias Biot.Protocol.ProjectSnapshot
-  alias Biot.Protocol.RelativeDirectory
   alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.SourceSelector
 
@@ -59,13 +58,6 @@ defmodule Biot.Protocol.TestGenerators do
     map(integer(1..65_535), fn number ->
       {:ok, port} = Port.parse(number)
       port
-    end)
-  end
-
-  def relative_directory do
-    map(list_of(alphanumeric_text(1, 12), min_length: 1, max_length: 5), fn segments ->
-      {:ok, directory} = RelativeDirectory.parse(Enum.join(segments, "/"))
-      directory
     end)
   end
 
@@ -110,7 +102,14 @@ defmodule Biot.Protocol.TestGenerators do
   def biot_id, do: identifier(BiotId)
   def connection_id, do: identifier(ConnectionId)
   def environment_id, do: identifier(EnvironmentId)
-  def incarnation_id, do: identifier(IncarnationId)
+
+  def incarnation_id do
+    map(binary(length: 32), fn bytes ->
+      {:ok, id} = IncarnationId.parse(Base.encode16(bytes, case: :lower))
+      id
+    end)
+  end
+
   def private_diagnostic_id, do: identifier(PrivateDiagnosticId)
 
   def identifier(module) do
@@ -148,39 +147,29 @@ defmodule Biot.Protocol.TestGenerators do
     end
   end
 
-  def project_snapshot do
-    one_of([
-      constant(nil),
-      gen all(
-            snapshot_id <- string(:alphanumeric, min_length: 1, max_length: 32),
-            digest <- digest()
-          ) do
-        %ProjectSnapshot{snapshot_id: snapshot_id, digest: digest}
-      end
-    ])
+  def platform do
+    map(member_of(["x86_64-linux", "aarch64-linux"]), fn text ->
+      {:ok, platform} = Platform.parse(text)
+      platform
+    end)
   end
 
   def manifest do
     gen all(
+          platform <- platform(),
           base_nixpkgs <- pinned_source(),
-          layers <- list_of(pinned_source(), max_length: 4),
-          project_snapshot <- project_snapshot()
+          layers <- list_of(pinned_source(), max_length: 4)
         ) do
-      Manifest.build(base_nixpkgs, layers, project_snapshot)
+      Manifest.build(platform, base_nixpkgs, layers)
     end
   end
 
   def environment_selection do
     gen all(
           base_nixpkgs <- source_selector(),
-          layers <- list_of(source_selector(), max_length: 4),
-          project_context <- one_of([constant(nil), relative_directory()])
+          layers <- list_of(source_selector(), max_length: 4)
         ) do
-      %EnvironmentSelection{
-        base_nixpkgs: base_nixpkgs,
-        layers: layers,
-        project_context: project_context
-      }
+      %EnvironmentSelection{base_nixpkgs: base_nixpkgs, layers: layers}
     end
   end
 

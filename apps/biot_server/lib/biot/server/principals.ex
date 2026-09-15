@@ -12,7 +12,6 @@ defmodule Biot.Server.Principals do
   alias Biot.Server.Access.Withdrawal
   alias Biot.Server.Actor
   alias Biot.Server.CommandError
-  alias Biot.Server.Id
   alias Biot.Server.Principals.DisabledIdentities
   alias Biot.Server.Queries.PrincipalView
   alias Biot.Server.Repo
@@ -146,7 +145,7 @@ defmodule Biot.Server.Principals do
 
   defp insert_disabled(repo, issuer, subject) do
     repo.insert!(%Principal{
-      id: Id.generate(PrincipalId),
+      id: PrincipalId.generate(),
       issuer: issuer,
       subject: subject,
       status: :disabled
@@ -199,7 +198,7 @@ defmodule Biot.Server.Principals do
 
   defp insert(repo, issuer, subject, email, name) do
     %Principal{
-      id: Id.generate(PrincipalId),
+      id: PrincipalId.generate(),
       issuer: issuer,
       subject: subject,
       last_seen_email: email,

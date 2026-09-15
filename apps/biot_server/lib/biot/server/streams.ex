@@ -21,7 +21,6 @@ defmodule Biot.Server.Streams do
   alias Biot.Protocol.StreamId
   alias Biot.Protocol.StreamTarget
   alias Biot.Server.Control.Connection, as: ControlConnection
-  alias Biot.Server.Id
   alias Biot.Server.NodeConnections
   alias Biot.Server.Streams.Pending
 
@@ -59,7 +58,7 @@ defmodule Biot.Server.Streams do
       when is_integer(deadline) do
     with {:ok, connection_pid, connection_id} <- ready_connection(node_id),
          :ok <- before(deadline) do
-      id = Id.generate(StreamId)
+      id = StreamId.generate()
       kind = StreamTarget.kind(target)
       :ok = Pending.register(id, node_id, connection_id, connection_pid, kind, self())
 

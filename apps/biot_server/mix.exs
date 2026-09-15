@@ -42,13 +42,8 @@ defmodule Biot.Server.MixProject do
 
   defp aliases do
     [
-      test: [
-        &Biot.Mix.TestEnv.require_test_env!/1,
-        "ecto.drop --quiet",
-        "ecto.create --quiet",
-        "ecto.migrate --quiet",
-        "test"
-      ]
+      # The server migrates its database at boot, so a dropped database is a fresh one.
+      test: [&Biot.Mix.TestEnv.require_test_env!/1, "ecto.drop --quiet", "test"]
     ]
   end
 

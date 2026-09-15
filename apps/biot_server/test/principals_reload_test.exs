@@ -58,11 +58,9 @@ defmodule Biot.Server.PrincipalsReloadTest do
   @ed25519 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINzyzz1M9L5KLhn5k5Lh3Peq0ipDgKB4DPAJ0A7UqS06"
 
   setup do
-    Application.delete_env(:biot_server, :disabled_principals)
     Application.delete_env(:biot_server, :disabled_principals_file)
 
     on_exit(fn ->
-      Application.delete_env(:biot_server, :disabled_principals)
       Application.delete_env(:biot_server, :disabled_principals_file)
     end)
 
@@ -72,7 +70,7 @@ defmodule Biot.Server.PrincipalsReloadTest do
   defp identity(principal), do: %{"issuer" => principal.issuer, "subject" => principal.subject}
 
   defp configure(identities),
-    do: Application.put_env(:biot_server, :disabled_principals, identities)
+    do: TestFixtures.put_disabled_principals(identities)
 
   defp drain_wakes(acc \\ []) do
     receive do
@@ -224,7 +222,7 @@ defmodule Biot.Server.PrincipalsReloadTest do
     end
 
     test "a configured identity unknown before first login is stored disabled" do
-      context = seed()
+      seed()
 
       configure([%{"issuer" => @issuer, "subject" => "not-seen-yet"}])
       assert Principals.reload() == :ok
@@ -271,7 +269,7 @@ defmodule Biot.Server.PrincipalsReloadTest do
       assert revision(context.biot1) == 1
 
       configure(%{"issuer" => @issuer})
-      assert {:error, :identities_must_be_a_list} = Principals.reload()
+      assert {:error, :not_a_list} = Principals.reload()
 
       assert Repo.get!(Schema.Principal, context.owner.id).status == :enabled
       assert revision(context.biot1) == 1

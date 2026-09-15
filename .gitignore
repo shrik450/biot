@@ -27,3 +27,6 @@ cli/biot
 # Nix build outputs
 /result
 /result-*
+
+# ExUnit tmp_dir output
+/apps/*/tmp/

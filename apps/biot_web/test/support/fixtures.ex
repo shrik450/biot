@@ -1,7 +1,7 @@
 defmodule BiotWeb.TestFixtures do
   @moduledoc false
 
-  alias Biot.Protocol.{BiotId, Digest, EnvironmentId, EnvironmentSelection, NodeId}
+  alias Biot.Protocol.{BiotId, BiotName, Digest, EnvironmentId, EnvironmentSelection, NodeId}
   alias Biot.Protocol.{Port, PrincipalId, RegistrationId, RepositorySource, SourceSelector}
   alias Biot.Server.Actor
   alias Biot.Server.Repo
@@ -56,7 +56,7 @@ defmodule BiotWeb.TestFixtures do
 
     biot = %Biot{
       id: biot_id,
-      name: Keyword.get(options, :name, "biot-#{number}"),
+      name: biot_name(Keyword.get(options, :name, "biot-#{number}")),
       owner_id: owner.id,
       node_id: node.id,
       repository: repository(),
@@ -82,6 +82,12 @@ defmodule BiotWeb.TestFixtures do
     {biot, environment}
   end
 
+  @spec biot_name(String.t()) :: BiotName.t()
+  def biot_name(value) do
+    {:ok, name} = BiotName.parse(value)
+    name
+  end
+
   @spec repository() :: RepositorySource.t()
   def repository do
     {:ok, repository} = RepositorySource.parse("https://github.com/example/project.git")
@@ -92,8 +98,7 @@ defmodule BiotWeb.TestFixtures do
   def selection do
     %EnvironmentSelection{
       base_nixpkgs: SourceSelector.nixpkgs(),
-      layers: [],
-      project_context: nil
+      layers: []
     }
   end
 end

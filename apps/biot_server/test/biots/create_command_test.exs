@@ -23,7 +23,10 @@ defmodule Biot.Server.Biots.CreateCommandTest do
   end
 
   property "the two accepted states always give different fingerprints" do
-    check all(name <- StreamData.string(:alphanumeric, min_length: 1)) do
+    check all(
+            name <- StreamData.string(Enum.concat(?a..?z, ?0..?9), min_length: 1, max_length: 63)
+          ) do
+      name = TestFixtures.biot_name(name)
       running = struct!(Create, %{fields() | name: name, initial_state: :running})
       stopped = struct!(Create, %{fields() | name: name, initial_state: :stopped})
 
@@ -38,7 +41,7 @@ defmodule Biot.Server.Biots.CreateCommandTest do
 
   defp fields do
     %{
-      name: "worker",
+      name: TestFixtures.biot_name("worker"),
       initial_state: :running,
       repository: TestFixtures.repository(),
       environment: TestFixtures.selection(),

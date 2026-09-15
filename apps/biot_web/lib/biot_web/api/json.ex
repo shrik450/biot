@@ -51,7 +51,7 @@ defmodule BiotWeb.Api.Json do
   def encode(%BiotView{} = biot) do
     %{
       "id" => to_string(biot.id),
-      "name" => biot.name,
+      "name" => to_string(biot.name),
       "owner_id" => to_string(biot.owner_id),
       "node_id" => to_string(biot.node_id),
       "role" => role(biot.role),
