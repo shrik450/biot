@@ -93,3 +93,10 @@ after ruling out the alternatives, not the starting point.
 The full picture rule can be relevant in reviewing as well. When you're
 questioning decisions and choices, think of the full picture to judge if they're
 good choices in that context.
+
+## Good UI
+
+All web UI work must pass the project-local `web-design-guidelines` skill at
+`.agents/skills/web-design-guidelines/SKILL.md` before it is considered
+complete. Run the skill against every web UI file changed by the work and
+resolve every finding.
