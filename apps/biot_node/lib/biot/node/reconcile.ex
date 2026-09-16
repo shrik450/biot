@@ -8,7 +8,8 @@ defmodule Biot.Node.Reconcile do
   reverse order. Each step answers `:ready` when it has nothing to do, so the first step with work
   wins and the biot is settled only when every step is ready.
 
-      running or stopped:  data -> environment -> execution -> release
+      running:              data -> environment -> execution -> release
+      stopped:              execution -> data -> environment -> release
       destroyed:           execution -> release -> data
   """
 
@@ -91,11 +92,19 @@ defmodule Biot.Node.Reconcile do
     end
   end
 
-  defp converge(%ExecutionSpec{desired: %Desired{state: desired}} = spec, state)
-       when desired in [:running, :stopped] do
+  defp converge(%ExecutionSpec{desired: %Desired{state: :running}} = spec, state) do
     with :ready <- Data.next(spec, state),
          :ready <- Environment.next(spec, state),
          :ready <- Execution.next(spec, state),
+         :ready <- Environment.release(spec, state) do
+      :settled
+    end
+  end
+
+  defp converge(%ExecutionSpec{desired: %Desired{state: :stopped}} = spec, state) do
+    with :ready <- Execution.next(spec, state),
+         :ready <- Data.next(spec, state),
+         :ready <- Environment.next(spec, state),
          :ready <- Environment.release(spec, state) do
       :settled
     end

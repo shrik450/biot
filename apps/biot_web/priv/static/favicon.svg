@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="180 200 900 850">
+  <defs>
+    <linearGradient id="shell" x1="430" y1="360" x2="650" y2="990" gradientUnits="userSpaceOnUse"><stop stop-color="#C4E3CC" /><stop offset="1" stop-color="#A5CEB4" /></linearGradient>
+    <linearGradient id="body" x1="260" y1="430" x2="900" y2="850" gradientUnits="userSpaceOnUse"><stop stop-color="#0C3139" /><stop offset="1" stop-color="#103840" /></linearGradient>
+    <linearGradient id="rim" x1="610" y1="300" x2="1000" y2="780" gradientUnits="userSpaceOnUse"><stop stop-color="#A5CEB4" /><stop offset="1" stop-color="#ABD2B9" /></linearGradient>
+    <linearGradient id="core" x1="670" y1="430" x2="855" y2="700" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#FE771C" /><stop offset="1" stop-color="#D55314" /></linearGradient>
+    <clipPath id="opening"><path d="M 679,309 C 758,263 855,357 924,473 C 991,586 1010,687 940,722 C 870,762 766,675 700,563 C 638,459 607,355 679,309 Z" /></clipPath>
+  <clipPath id="exterior"><path d="M 659,266 C 745,223 851,306 933,440 C 1014,570 1050,712 1002,765 L 665,984 C 576,1027 476,991 391,916 C 298,834 239,717 237,619 C 232,535 263,479 324,447 Z" /></clipPath><filter id="core-bloom" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="24" /></filter><filter id="rim-light" x="-100%" y="-30%" width="300%" height="160%" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="7" /></filter><clipPath id="rim-only"><path d="M 659,266 C 745,223 851,306 933,440 C 1014,570 1050,712 1002,765 C 941,832 817,765 722,637 C 628,512 574,370 605,309 C 616,289 636,275 659,266 Z M 679,309 C 758,263 855,357 924,473 C 991,586 1010,687 940,722 C 870,762 766,675 700,563 C 638,459 607,355 679,309 Z" clip-rule="evenodd" /></clipPath></defs>
+  <g id="chamber" clip-path="url(#exterior)">
+    <path id="body-silhouette" fill="url(#body)" d="M 659,266 C 745,223 851,306 933,440 C 1014,570 1050,712 1002,765 L 665,984 C 576,1027 476,991 391,916 C 298,834 239,717 237,619 C 232,535 263,479 324,447 Z" />
+    <path id="lower-shell" fill="url(#shell)" d="M 220,872 L 468,755 Q 478,751 475,740 L 455,701 Q 450,689 462,681 L 494,665 Q 507,659 512,670 C 549,747 608,819 676,865 C 727,900 759,923 797,910 L 1030,758 L 1100,1100 L 200,1100 Z" />
+    <path id="upper-shell" fill="url(#shell)" d="M 462,368 L 659,266 L 830,430 L 800,546 L 551,663 L 534,624 Q 531,613 520,619 L 458,649 Q 444,656 438,642 C 408,572 394,511 406,453 C 413,415 435,386 462,368 Z" />
+    <path id="rim-outline" fill="url(#rim)" d="M 659,266 C 745,223 851,306 933,440 C 1014,570 1050,712 1002,765 C 941,832 817,765 722,637 C 628,512 574,370 605,309 C 616,289 636,275 659,266 Z" />
+    <path id="inner-chamber" fill="#082A2F" d="M 679,309 C 758,263 855,357 924,473 C 991,586 1010,687 940,722 C 870,762 766,675 700,563 C 638,459 607,355 679,309 Z" />
+    <g clip-path="url(#opening)">
+      <path id="emitted-light" d="M 626,440 C 673,410 739,420 801,475 C 861,529 891,633 863,697 L 842,744 L 670,621 Z" fill="#FFAD32" filter="url(#core-bloom)" opacity="0.85" /><path id="core-recess" fill="#FF9626" d="M 626,440 C 673,410 739,420 801,475 C 861,529 891,633 863,697 L 842,744 L 670,621 Z" />
+      </g>
+    <path id="status-light" d="M 334,775 L 425,730" fill="none" stroke="#FE771C" stroke-width="24" stroke-linecap="round" />
+  <g clip-path="url(#rim-only)"><path d="M 652,442 C 661,510 713,615 777,674" fill="none" stroke="#FFBE57" stroke-width="18" opacity="0.75" filter="url(#rim-light)" /></g></g>
+</svg>

@@ -135,6 +135,7 @@ defmodule Biot.Server.Queries.BiotView do
 
     %{
       received_at: observation.received_at,
+      accepted_revision: observation.accepted_revision,
       freshness: freshness,
       installed_environment: observation.installed_environment_id,
       container: observation.container,

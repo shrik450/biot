@@ -15,6 +15,7 @@ defmodule Biot.Server.Secrets do
   alias Biot.Protocol.SecretValue
   alias Biot.Server.Actor
   alias Biot.Server.CommandError
+  alias Biot.Server.CommitEffects
   alias Biot.Server.Control.Connection
   alias Biot.Server.Delivery
   alias Biot.Server.Queries.SecretView
@@ -27,6 +28,7 @@ defmodule Biot.Server.Secrets do
 
   def deliver(%Actor{} = actor, %BiotId{} = biot_id, %SecretName{} = name, value) do
     with {:ok, {pid, timeout_ms}} <- mark_exposure(actor, biot_id) do
+      CommitEffects.enforce(%CommitEffects{owners: [], wakes: [], readers: [biot_id]})
       Connection.deliver_secret(pid, biot_id, name, value, timeout_ms)
     end
   end

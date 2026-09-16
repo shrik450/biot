@@ -30,3 +30,4 @@ cli/biot
 
 # ExUnit tmp_dir output
 /apps/*/tmp/
+/.work/

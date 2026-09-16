@@ -4,7 +4,6 @@ defmodule BiotWeb.Router do
   pipeline :browser do
     plug :accepts, ["html"]
     plug :fetch_session
-    plug :fetch_live_flash
     plug :put_root_layout, html: {BiotWeb.Layouts, :root}
     plug BiotWeb.Plugs.ControlOrigin
     plug :protect_from_forgery
@@ -15,10 +14,26 @@ defmodule BiotWeb.Router do
   scope "/", BiotWeb do
     pipe_through :browser
 
+    live "/", LandingLive
+
     get "/login", LoginController, :start
     get "/login/callback", LoginController, :callback
     get "/preview/authorize", PreviewAuthorizeController, :authorize
     post "/logout", SessionController, :logout
+    get "/biots/:id/terminal/socket", TerminalController, :upgrade
+
+    live_session :authenticated, on_mount: {BiotWeb.LiveAuth, :authenticated} do
+      live "/biots", Live.BiotsLive
+      live "/biots/new", Live.NewBiotLive
+      live "/biots/:id", Live.BiotLive
+      live "/biots/:id/publications", Live.BiotLive, :publications
+      live "/biots/:id/access", Live.BiotLive, :access
+      live "/biots/:id/secrets", Live.BiotLive, :secrets
+      live "/biots/:id/logs", Live.BiotLive, :logs
+      live "/biots/:id/terminal", Live.TerminalLive
+      live "/nodes", Live.NodesLive
+      live "/account", Live.AccountLive
+    end
   end
 
   pipeline :api do

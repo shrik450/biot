@@ -9,7 +9,6 @@ defmodule Biot.Server.Biots do
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.OperationId
   alias Biot.Server.Access
-  alias Biot.Server.Access.Withdrawal
   alias Biot.Server.Actor
   alias Biot.Server.Authorization
   alias Biot.Server.Biots.Accepted
@@ -19,6 +18,7 @@ defmodule Biot.Server.Biots do
   alias Biot.Server.Biots.SelectEnvironment
   alias Biot.Server.Biots.Unchanged
   alias Biot.Server.CommandError
+  alias Biot.Server.CommitEffects
   alias Biot.Server.Nodes
   alias Biot.Server.Nodes.Status
   alias Biot.Server.Principals
@@ -157,8 +157,9 @@ defmodule Biot.Server.Biots do
   defp creation_writes(%{plan: {:unchanged, result}}) do
     Ecto.Multi.new()
     |> Ecto.Multi.put(:result, result)
-    |> Ecto.Multi.put(:close, [])
-    |> Ecto.Multi.put(:wake, [])
+    |> Ecto.Multi.put(:owners, [])
+    |> Ecto.Multi.put(:wakes, [])
+    |> Ecto.Multi.put(:readers, [])
   end
 
   defp creation_writes(%{plan: {:create, biot, environment, operation}}) do
@@ -167,8 +168,9 @@ defmodule Biot.Server.Biots do
     |> Ecto.Multi.insert(:environment, environment)
     |> Ecto.Multi.insert(:operation, operation)
     |> Ecto.Multi.put(:result, accepted(operation))
-    |> Ecto.Multi.put(:close, [])
-    |> Ecto.Multi.put(:wake, [{biot.node_id, biot.id}])
+    |> Ecto.Multi.put(:owners, [])
+    |> Ecto.Multi.put(:wakes, [{biot.node_id, biot.id}])
+    |> Ecto.Multi.put(:readers, [biot.id])
   end
 
   defp lifecycle_change(nil, %BiotId{}, _expected_revision, _change, _selection),
@@ -241,8 +243,9 @@ defmodule Biot.Server.Biots do
   defp lifecycle_writes(%{plan: {:unchanged, result}}) do
     Ecto.Multi.new()
     |> Ecto.Multi.put(:result, result)
-    |> Ecto.Multi.put(:close, [])
-    |> Ecto.Multi.put(:wake, [])
+    |> Ecto.Multi.put(:owners, [])
+    |> Ecto.Multi.put(:wakes, [])
+    |> Ecto.Multi.put(:readers, [])
   end
 
   defp lifecycle_writes(%{plan: {:change, biot, node, desired, selection, operation}}) do
@@ -261,7 +264,8 @@ defmodule Biot.Server.Biots do
       set: [outcome: :superseded]
     )
     |> Ecto.Multi.put(:result, accepted(operation))
-    |> Ecto.Multi.put(:wake, lifecycle_wake(biot, node))
+    |> Ecto.Multi.put(:wakes, lifecycle_wake(biot, node))
+    |> Ecto.Multi.put(:readers, [biot.id])
   end
 
   defp maybe_insert_environment(multi, _biot_id, _environment_id, nil), do: multi
@@ -281,12 +285,12 @@ defmodule Biot.Server.Biots do
     multi
     |> Publications.withdraw_all(biot_id)
     |> Access.revoke_shell_grants(biot_id)
-    |> Ecto.Multi.put(:close, [{:biot, biot_id}])
+    |> Ecto.Multi.put(:owners, [{:biot, biot_id}])
   end
 
   defp withdraw_access(multi, _biot_id, kind)
        when kind in [:start, :stop, :update_environment],
-       do: Ecto.Multi.put(multi, :close, [])
+       do: Ecto.Multi.put(multi, :owners, [])
 
   defp desired_changeset(biot, desired, :destroy) do
     Ecto.Changeset.change(biot,
@@ -407,8 +411,8 @@ defmodule Biot.Server.Biots do
     }
   end
 
-  defp after_commit({:ok, %{result: result, close: owner_keys, wake: wakes}}) do
-    Withdrawal.enforce(owner_keys, wakes)
+  defp after_commit({:ok, %{result: result, owners: owners, wakes: wakes, readers: readers}}) do
+    CommitEffects.enforce(%CommitEffects{owners: owners, wakes: wakes, readers: readers})
     {:ok, result}
   end
 

@@ -11,7 +11,7 @@ defmodule Biot.Server.Nodes do
 
   alias Biot.Protocol.Failure
   alias Biot.Protocol.NodeId
-  alias Biot.Server.Access.Withdrawal
+  alias Biot.Server.CommitEffects
   alias Biot.Server.NodeConnections
   alias Biot.Server.Nodes.Plan
   alias Biot.Server.Nodes.RegistrationLoader
@@ -61,7 +61,7 @@ defmodule Biot.Server.Nodes do
     # Immediate mode takes SQLite write ownership before enrollment state is read.
     case Repo.transaction(multi, mode: :immediate) do
       {:ok, %{nodes: nodes, plan: plan} = changes} ->
-        withdraw_access(changes)
+        commit_effects(changes)
         close_connections(plan.close_connections)
         {:ok, nodes}
 
@@ -190,14 +190,33 @@ defmodule Biot.Server.Nodes do
 
   # Every plan that increments a node's access revisions also closes its connection. The close ends
   # the node's streams, and a reconnection snapshot carries the new revisions, so no wake is sent.
-  defp withdraw_access(changes) do
+  defp commit_effects(changes) do
     owner_keys =
       for {{:increment_access_revisions, _node_id}, {_count, biot_ids}} <- changes,
           biot_id <- biot_ids,
           do: {:biot, biot_id}
 
-    Withdrawal.enforce(owner_keys, [])
+    changed_node_ids =
+      changes.plan.writes
+      |> Enum.map(&reader_visible_node/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    reader_biot_ids =
+      from(biot in Biot, where: biot.node_id in ^changed_node_ids, select: biot.id)
+      |> Repo.all()
+
+    CommitEffects.enforce(%CommitEffects{
+      owners: owner_keys,
+      wakes: [],
+      readers: reader_biot_ids
+    })
   end
+
+  defp reader_visible_node({:update_status, node_id, _status}), do: node_id
+  defp reader_visible_node({:increment_access_revisions, node_id}), do: node_id
+  defp reader_visible_node({:fail_operations, node_id}), do: node_id
+  defp reader_visible_node(_action), do: nil
 
   defp close_connections(node_ids), do: Enum.each(node_ids, &close_connection/1)
 

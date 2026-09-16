@@ -130,16 +130,67 @@ defmodule Biot.Node.ReconcileImportantCasesTest do
                {:run, {:retire, incarnation()}}
     end
 
-    test "desired stopped -> preparation may finish without starting" do
-      prepared_but_stopped =
+    test "desired stopped -> retires execution before resolving or preparing" do
+      unresolved = %{settled(e1()) | resolutions: %{}, prepared: %{}}
+
+      assert Reconcile.next(spec(state: :stopped, revision: 2), unresolved, nil) ==
+               {:run, {:retire, incarnation()}}
+    end
+
+    test "desired stopped -> retires execution even when data inspection failed" do
+      state = %{settled(e1()) | data: {:unknown, allocation(), inspection(:data)}}
+
+      assert Reconcile.next(spec(state: :stopped, revision: 2), state, nil) ==
+               {:run, {:retire, incarnation()}}
+    end
+
+    test "desired stopped -> an unknown container blocks before any environment work" do
+      state = %{settled(e1()) | container: {:unknown, inspection(:container)}}
+
+      assert Reconcile.next(spec(state: :stopped, revision: 2), state, nil) ==
+               {:blocked, {:inspection, inspection(:container)}}
+    end
+
+    test "desired stopped -> preparation finishes by installing, without starting" do
+      resolved =
         state(
           data: {:present, allocation()},
-          resolutions: %{e1() => {:present, resolution(e1())}},
-          prepared: %{e1() => {:present, artifact(e1())}}
+          resolutions: %{e1() => {:present, resolution(e1())}}
         )
 
-      assert Reconcile.next(spec(state: :stopped, revision: 2), prepared_but_stopped, nil) ==
-               :settled
+      assert Reconcile.next(spec(state: :stopped, revision: 2), resolved, nil) ==
+               {:run, {:prepare, e1(), manifest(), allocation()}}
+
+      prepared = %{resolved | prepared: %{e1() => {:present, artifact(e1())}}}
+
+      assert Reconcile.next(spec(state: :stopped, revision: 2), prepared, nil) ==
+               {:run, {:install, allocation(), artifact(e1()), e1()}}
+
+      installed = %{prepared | installation: {:present, installation(e1())}}
+      assert Reconcile.next(spec(state: :stopped, revision: 2), installed, nil) == :settled
+    end
+
+    test "desired stopped -> an installed environment is never started" do
+      installed = %{settled(e1()) | container: :absent}
+
+      assert Reconcile.next(spec(state: :stopped, revision: 2), installed, nil) == :settled
+
+      # The same facts under running intent are exactly when a start is correct.
+      assert Reconcile.next(spec(), installed, nil) ==
+               {:run, {:start, allocation(), installation(e1())}}
+    end
+
+    test "desired stopped -> an unknown installation blocks instead of starting" do
+      failure = inspection(:installation)
+
+      state = %{
+        settled(e1())
+        | container: :absent,
+          installation: {:unknown, installation(e1()), failure}
+      }
+
+      assert Reconcile.next(spec(state: :stopped, revision: 2), state, nil) ==
+               {:blocked, {:inspection, failure}}
     end
 
     test "desired destroyed -> cancel current task" do
@@ -274,10 +325,11 @@ defmodule Biot.Node.ReconcileImportantCasesTest do
                {:run, {:resolve, e1(), selection(), allocation()}}
     end
 
-    test "a stopped biot resolves and prepares nothing new" do
+    test "a stopped biot with no resolution resolves the desired environment" do
       state = state(data: {:present, allocation()})
 
-      assert Reconcile.next(spec(state: :stopped, revision: 2), state, nil) == :settled
+      assert Reconcile.next(spec(state: :stopped, revision: 2), state, nil) ==
+               {:run, {:resolve, e1(), selection(), allocation()}}
     end
 
     test "a destroyed biot resolves and prepares nothing new" do

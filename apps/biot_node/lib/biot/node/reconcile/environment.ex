@@ -15,17 +15,15 @@ defmodule Biot.Node.Reconcile.Environment do
   alias Biot.Protocol.ExecutionSpec
 
   @spec next(ExecutionSpec.t(), NodeState.t()) :: Reconcile.step()
-  def next(
-        %ExecutionSpec{desired: %Desired{state: :running}} = spec,
-        %NodeState{} = state
-      ) do
-    desired_installation(spec, state)
+  # Stopped intent still prepares and installs its selected environment, but Reconcile reaches this
+  # step only after execution is retired, so preparation cannot start a container by itself.
+  def next(%ExecutionSpec{desired: %Desired{state: state}} = spec, %NodeState{} = node_state)
+      when state in [:running, :stopped] do
+    desired_installation(spec, node_state)
   end
 
-  # A stopped biot installs nothing new, and a destroyed one wants nothing at all. Preparation
-  # already in flight may finish; `release/2` decides what to give back.
-  def next(%ExecutionSpec{desired: %Desired{state: :stopped}}, %NodeState{}), do: :ready
-
+  # A destroyed biot wants no desired environment. Preparation already in flight may finish until
+  # the controller cancels it; `release/2` decides what to give back.
   def next(%ExecutionSpec{desired: %Desired{state: :destroyed}}, %NodeState{}),
     do: :ready
 

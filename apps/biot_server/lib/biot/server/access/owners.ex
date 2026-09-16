@@ -9,6 +9,7 @@ defmodule Biot.Server.Access.Owners do
   """
 
   alias Biot.Protocol.{BiotId, PrincipalId, StreamId}
+  alias Biot.Server.Authentication
   alias Biot.Server.Authentication.Validity
 
   @registry __MODULE__.Registry
@@ -37,11 +38,21 @@ defmodule Biot.Server.Access.Owners do
   @doc "Registers the calling process for closure by its Biot, its principal, and each proof key."
   @spec register(BiotId.t(), PrincipalId.t(), [Validity.proof_key(), ...]) :: :ok
   def register(%BiotId{} = biot_id, %PrincipalId{} = principal_id, [_ | _] = proof_keys) do
+    register_keys([{:biot, biot_id}, {:principal, principal_id} | proof_keys])
+  end
+
+  @doc "Registers an ordinary authenticated connection by its principal and proof."
+  @spec register_connection(Authentication.t()) :: :ok
+  def register_connection(%Authentication{actor: %{principal_id: principal_id}} = authentication) do
+    register_keys([{:principal, principal_id} | Validity.proof_keys(authentication)])
+  end
+
+  defp register_keys(keys) do
     # `unregister/0` removes every key this process holds, so a second admission in the same
     # process would lose its registrations when the first one closed.
     [] = Registry.keys(@registry, self())
 
-    Enum.each([{:biot, biot_id}, {:principal, principal_id} | proof_keys], fn key ->
+    Enum.each(keys, fn key ->
       {:ok, _owner} = Registry.register(@registry, key, nil)
     end)
   end

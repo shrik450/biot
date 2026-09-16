@@ -9,9 +9,9 @@ defmodule Biot.Server.Principals do
   require Logger
 
   alias Biot.Protocol.PrincipalId
-  alias Biot.Server.Access.Withdrawal
   alias Biot.Server.Actor
   alias Biot.Server.CommandError
+  alias Biot.Server.CommitEffects
   alias Biot.Server.Principals.DisabledIdentities
   alias Biot.Server.Queries.PrincipalView
   alias Biot.Server.Repo
@@ -110,7 +110,11 @@ defmodule Biot.Server.Principals do
     {:ok, {disabled_ids, wakes}} =
       Repo.transact(fn repo -> change_principals(repo, identities) end, mode: :immediate)
 
-    Withdrawal.enforce(Enum.map(disabled_ids, &{:principal, &1}), wakes)
+    CommitEffects.enforce(%CommitEffects{
+      owners: Enum.map(disabled_ids, &{:principal, &1}),
+      wakes: wakes,
+      readers: Enum.map(wakes, &elem(&1, 1))
+    })
   end
 
   defp change_principals(repo, identities) do

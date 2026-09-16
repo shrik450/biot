@@ -4,11 +4,21 @@ defmodule BiotWeb.Endpoint do
   socket "/live", Phoenix.LiveView.Socket,
     websocket: [
       check_origin: {BiotWeb.Plugs.ControlOrigin, :socket_origin?, []},
-      connect_info: [session: {BiotWeb.Cookies, :session_options, []}]
+      connect_info: [
+        :peer_data,
+        :x_headers,
+        :uri,
+        session: {BiotWeb.Cookies, :session_options, []}
+      ]
     ],
     longpoll: [
       check_origin: {BiotWeb.Plugs.ControlOrigin, :socket_origin?, []},
-      connect_info: [session: {BiotWeb.Cookies, :session_options, []}]
+      connect_info: [
+        :peer_data,
+        :x_headers,
+        :uri,
+        session: {BiotWeb.Cookies, :session_options, []}
+      ]
     ]
 
   plug Plug.Static,

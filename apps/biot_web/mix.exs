@@ -35,8 +35,10 @@ defmodule BiotWeb.MixProject do
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:phoenix_live_view, "~> 1.2.0"},
+      {:lazy_html, ">= 0.1.0", only: :test},
+      {:websock, "~> 0.5.3"},
+      {:websock_adapter, "~> 0.6.0"},
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
-      {:tailwind, "~> 0.5", runtime: Mix.env() == :dev},
       {:jason, "~> 1.2"},
       {:bandit, "~> 1.5"},
       {:biot_server, in_umbrella: true}
@@ -46,11 +48,11 @@ defmodule BiotWeb.MixProject do
   defp aliases do
     [
       setup: ["deps.get", "assets.setup", "assets.build"],
-      "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
-      "assets.build": ["compile", "tailwind biot_web", "esbuild biot_web"],
+      "assets.setup": ["esbuild.install --if-missing"],
+      "assets.build": ["compile", "esbuild biot_web", "biot_web.assets"],
       "assets.deploy": [
-        "tailwind biot_web --minify",
         "esbuild biot_web --minify",
+        "biot_web.assets",
         "phx.digest"
       ]
     ]

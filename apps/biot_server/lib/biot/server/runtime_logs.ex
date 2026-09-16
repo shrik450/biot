@@ -9,6 +9,15 @@ defmodule Biot.Server.RuntimeLogs do
   alias Biot.Server.Control.Connection
   alias Biot.Server.NodeConnections
 
+  @spec get(Actor.t() | nil, BiotId.t()) ::
+          {:ok, {IncarnationId.t(), binary(), boolean()}}
+          | {:error, :unauthenticated | :not_found | :forbidden | :temporarily_unavailable}
+  def get(nil, %BiotId{}), do: {:error, :unauthenticated}
+
+  def get(%Actor{} = actor, %BiotId{} = biot_id) do
+    get(actor, biot_id, Application.fetch_env!(:biot_server, :node_response_max_bytes))
+  end
+
   @spec get(Actor.t() | nil, BiotId.t(), pos_integer()) ::
           {:ok, {IncarnationId.t(), binary(), boolean()}}
           | {:error, :unauthenticated | :not_found | :forbidden | :temporarily_unavailable}

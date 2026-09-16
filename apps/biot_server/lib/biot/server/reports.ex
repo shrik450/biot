@@ -11,6 +11,7 @@ defmodule Biot.Server.Reports do
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.NodeId
+  alias Biot.Server.CommitEffects
   alias Biot.Server.NodeConnections
   alias Biot.Server.Operations.Completion
   alias Biot.Server.Repo
@@ -50,8 +51,15 @@ defmodule Biot.Server.Reports do
       |> Ecto.Multi.merge(&observation_writes/1)
 
     case Repo.transaction(multi, mode: :immediate) do
-      {:ok, %{result: result}} -> {:ok, result}
-      {:error, :plan, error, _changes} -> {:error, error}
+      {:ok, %{result: :stored}} ->
+        CommitEffects.enforce(%CommitEffects{owners: [], wakes: [], readers: [biot_id]})
+        {:ok, :stored}
+
+      {:ok, %{result: result}} ->
+        {:ok, result}
+
+      {:error, :plan, error, _changes} ->
+        {:error, error}
     end
   end
 
@@ -67,8 +75,15 @@ defmodule Biot.Server.Reports do
            fn -> access_progress(Repo, node_id, connection_id, biot_id, revision) end,
            mode: :immediate
          ) do
-      {:ok, result} -> {:ok, result}
-      {:error, error} -> {:error, error}
+      {:ok, :stored} ->
+        CommitEffects.enforce(%CommitEffects{owners: [], wakes: [], readers: [biot_id]})
+        {:ok, :stored}
+
+      {:ok, result} ->
+        {:ok, result}
+
+      {:error, error} ->
+        {:error, error}
     end
   end
 

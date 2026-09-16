@@ -4,8 +4,7 @@
 
 - `apps/biot_protocol` owns shared parsed values and wire codecs.
 - `apps/biot_server` owns server modules, queries, policy, and the server database.
-- `apps/biot_web` owns the Phoenix HTTP API and browser access boundaries. Its LiveView socket and
-  layouts remain the scaffold for the UI step.
+- `apps/biot_web` owns the Phoenix HTTP API, the LiveView UI, and the browser terminal.
 - `apps/biot_node` owns reconciliation, host effects, environment handling, and container sessions.
 - `nix/` owns the module schema, the `build.nix` entry point, and example layers. `nix/README.md` holds the build contract for the node host layer.
 - `cli` contains the Go command-line client.
@@ -137,7 +136,7 @@ last-seen email lookup.
 `Nodes.Startup` calls it at boot and fails boot with a readable message on rejection.
 Operators call it with `bin/server rpc "Biot.Server.Nodes.reload()"`.
 It loads the enrollment file and runs the enrollment transaction.
-After commit, it closes the session owners of every Biot whose access revision it bumped, then closes planned control connections.
+After commit, it closes the session owners of every Biot whose access revision it bumped and notifies the browser readers of every Biot on a changed node, then closes planned control connections.
 It sends no wake, because a reconnected node receives the new revisions in its snapshot.
 An invalid reload changes nothing and logs a plain failure message.
 `Nodes.abandonment_failure/0` builds the only abandonment failure value.
@@ -162,22 +161,27 @@ release boot.
 
 ### Application modules
 
-- `Biots` handles `create`, `start`, `stop`, `update_environment`, and `destroy`. After a destroy commits, it closes the Biot's session owners through `Access.Withdrawal`, then wakes the node.
+- `Biots` handles `create`, `start`, `stop`, `update_environment`, and `destroy`. Its `after_commit/1` runs the `CommitEffects` fence after a committed change with the Biot as reader; a destroy also closes its owners, and a written-off node gets no wake.
 - `BiotSpecs.build/1` builds the node-facing `BiotSpec` from the Biot and Environment rows. It reads no policy or lifecycle command code, so the control connection depends on it instead of on `Biots`.
 - `Biots.Create`, `Biots.SelectEnvironment`, `Biots.Accepted`, `Biots.Unchanged`, and `Biots.CreationFingerprint` define lifecycle inputs, results, and fingerprints. `Create.initial_state` defaults to `:running`, and the fingerprint uses `:biot_creation_v2`.
 - `Biots.Capacity.room?/2` admits creation, and `counts/2` projects capacity held on assigned nodes. Together they define which Biots still hold capacity.
 - `Operations` owns operation queries.
 - `Operations.Completion` provides pure completion evidence. `:create` and `:update_environment` use one clause set for each desired state.
-- `Reports` handles node-facing ingestion through `observation`, `access_applied`, `resolution`, and `node_observation`.
+- `Reports` handles node-facing ingestion through `observation`, `access_applied`, `resolution`, and `node_observation`. A stored `observation` or `access_applied` notifies the Biot's readers; `resolution` sends nothing because it is in no reader projection.
 - `Queries.Biots.get/2` and `list/2` build owner and collaborator `BiotView` values. `Access.readable/2` supplies their single read rule. `PublicationView.visible/2` limits collaborator publications to their view grants.
+- `Queries.BiotDetailView.get/2` adds the Biot's repository and selected `EnvironmentSelection` to that view for the overview.
+- `Queries.AccessDisplayView.get/2` resolves the owner and every grant principal ID into `PrincipalView` values for the access panel.
+- `Queries.Navigation.counts/1` returns the readable Biot count and the node count used by the application frame.
 - `Queries.Nodes.list/1` and `Queries.NodeView` build the node inventory with capacity counts, live connections, and latest orphan reports.
 - `Queries.Deployment.get/1` returns the publication and SSH settings in `DeploymentView`.
 - `Queries.PrincipalView`, `Queries.BiotView`, `Queries.PublicationView`, and `Queries.OperationView` provide pure projections. `PrincipalView` projects the authenticated principal's ID and latest OIDC email and name. `BiotView` includes the actor's `role`, the row's `direct_secret_exposure_possible` column, and `waiting_for`. Creation sets the exposure column to `false`; observations supply the current wait.
 - `Authorization` owns the `grants` and `role` types and the pure role and policy predicates.
 - `NodeConnections` is a thin layer over `Control.Registry`, the one node membership table. The key is the node ID, the process is the control connection, and the value is the connection ID and state. Only the owning control process writes its entry, through `put/2` and `delete/1`. The entry leaves the Registry when that process exits. `current/1`, `connection_pid/1`, `ready/1`, and `ready_connection/1` skip an entry whose process is already dead.
 - `NodeWake` provides one PubSub topic per node, plus `spec_changed/2` and `subscribe/1`.
+- `BiotChange` provides one PubSub topic per Biot, plus `changed/1`, `subscribe/1`, and `unsubscribe/1`. A browser reader subscribes to the Biot its page shows and reloads its authorized projection on `{:biot_changed, biot_id}`.
+- `CommitEffects` is the one post-commit fence: `enforce/1` takes a `%CommitEffects{owners:, wakes:, readers:}` struct, closes owners, wakes nodes, then notifies readers, in that order. It is the only caller of `BiotChange.changed/1`, so no reader notification can fire before a commit.
 - `Delivery` owns the one delivery rule: the caller must own a non-destroyed Biot whose assigned node is ready, and it returns that node's live connection.
-- `Secrets` delivers, removes, and lists runtime secrets. Delivery commits `direct_secret_exposure_possible` before sending and that historical marker is never cleared. `FetchCredentials` uses the same delivery rule but does not set the marker or queue work. `Queries.SecretView` projects the names returned by `list/2`.
+- `Secrets` delivers, removes, and lists runtime secrets. Delivery commits `direct_secret_exposure_possible` before sending, notifies the Biot's readers after that commit, and that historical marker is never cleared. `FetchCredentials` uses the same delivery rule but does not set the marker, queue work, or make a durable server write; its effect reaches readers with the next observation. `Queries.SecretView` projects the names returned by `list/2`.
 - `ExpirySweep` is the one owner of the expiry sweep. It runs every `expiry_sweep_interval_ms`, reads the clock once, and calls `sweep_expired/1` on `Sessions`, `PreviewHandoff`, and `Credentials`. A nil interval disables the process, and `config/test.exs` sets nil so it does not start under the manual sandbox.
 
 #### `Biot.Server.Publications`
@@ -273,23 +277,31 @@ with `Validity.key_valid?/3` and closes the owners of every invalid key.
 
 `Access.Owners` is a duplicate-key `Registry`. Its closure keys are
 `{:biot, id}`, `{:principal, id}`, and the `Validity` proof keys, and they hold no
-value. An admitted owner also holds `{:admitted, stream_id}`. Its value is the
+value. `register_connection/1` registers an authenticated LiveView under its principal and proof
+keys only, without a Biot key, so a disable or logout closes every LiveView of that login. An
+admitted owner also holds `{:admitted, stream_id}`. Its value is the
 `Owners.Admitted` monitor and timer. `close/1` sends `{:biot_access, :close}` to
 every process under a key. `proof_keys/0` returns each distinct proof key once.
 `unregister/0` removes every key the calling process holds and returns its
 `Admitted` values.
 
-`Access.Withdrawal.enforce/2` runs after a transaction commits. It closes owners
-by key, then wakes nodes. Owners close first because a node applies the new
-access revision later, and a local stream must not stay open for that time. Its
+`CommitEffects.enforce/1` is the one post-commit fence. It takes a
+`%CommitEffects{owners: ..., wakes: ..., readers: ...}` struct and closes owners,
+wakes nodes, then notifies readers, in that order; `@enforce_keys` makes a
+missing list a construction error. Owners close first because a node applies the
+new access revision later, and a local stream must not stay open for that time.
+Readers are notified last, after the change is visible to a new query. Its seven
 callers are:
 
-| Caller | Closure keys | Wakes |
-| --- | --- | --- |
-| `Policy.Transaction` on a withdrawal | `{:biot, id}` | the Biot's node |
-| `Biots` destroy | `{:biot, id}` | the Biot's node |
-| `Principals.reload/0` | `{:principal, id}` for each disabled principal | each affected Biot's node |
-| `Nodes.reload/0` | `{:biot, id}` for each Biot whose access revision it bumped | none |
+| Caller | Owners | Wakes | Readers |
+| --- | --- | --- | --- |
+| `Biots.after_commit/1` | the Biot on destroy | the Biot's node unless it is written off | the Biot on a change |
+| `Policy.Transaction.after_commit/1` | the Biot on withdrawal | the Biot's node on withdrawal | the Biot unless unchanged |
+| `Reports.observation/4` | none | none | the Biot when stored |
+| `Reports.access_applied/4` | none | none | the Biot when stored |
+| `Secrets.deliver/4` | none | none | the Biot after the exposure marker commits |
+| `Nodes.commit_effects/1` | `{:biot, id}` for each bumped Biot | none | every Biot on a changed node |
+| `Principals.apply_disabled_identities/1` | `{:principal, id}` for each disabled principal | each affected Biot's node | each affected Biot |
 
 Proof deletions call `Owners.close_proof/1` directly after commit.
 `Sessions.logout/1` closes `{:control_session, digest}`. A preview owner also
@@ -312,7 +324,8 @@ immediate transaction, so a disable cannot slip between the check and the insert
 `control/1` looks up a presented token. `preview/2` requires a matching hostname,
 an unexpired preview row, a live parent session, and the same principal.
 `require_control/2` rechecks a control proof on the caller's connection. All
-three use the `Authentication.Validity` queries. `logout/1` rechecks the live
+three use the `Authentication.Validity` queries. `valid?/1` rechecks any authentication proof, and
+`expires_at/1` returns its absolute expiry, or nil for an SSH key. `logout/1` rechecks the live
 proof and deletes the control row, so previews and handoffs cascade. After
 commit, it closes the session owners of that login and its previews.
 `sweep_expired/1` deletes every session at
@@ -394,7 +407,8 @@ a later first login cannot become enabled. It disables configured enabled
 principals and deletes their sessions, preview handoffs, credentials, and SSH
 keys. It re-enables principals no longer configured without restoring proofs. It
 bumps each affected Biot's access revision once. After commit, it closes the
-session owners of each disabled principal, then wakes each affected Biot's node.
+session owners of each disabled principal, wakes each affected Biot's node, and
+notifies each affected Biot's readers.
 Ownership, grants, and history stay. A repeated reload changes
 nothing, and an invalid file leaves the database unchanged.
 `Principals.DisabledIdentities` loads and parses the file. Errors are typed, so an
@@ -409,14 +423,16 @@ on invalid configuration.
 `Policy.Transaction` owns the immediate transaction around each mutation. It
 loads the Biot, authorizes the actor, checks that the Biot is not destroyed,
 executes the callback's writes, and bumps the access revision on withdrawal.
-After a withdrawal commits, it closes the Biot's session owners and wakes the
-node. It then reads enforcement from `AccessObservation` and
+`after_commit/1` runs the `CommitEffects` fence: a withdrawal closes the Biot's
+session owners, wakes the node, and notifies the Biot's readers. It then reads
+enforcement from `AccessObservation` and
 live connection state, and builds the result.
 
 Policy callbacks receive the transaction's repository and Biot. They return
 `:unchanged`, `{:added, multi}`, or `{:withdrawn, multi}`. Additions keep the
-current revision and do not wake the node. Withdrawals add one revision, close the
-Biot's session owners, and wake the assigned node.
+current revision, do not wake the node, and still notify the Biot's readers.
+Withdrawals add one revision, close the Biot's session owners, and wake the
+assigned node.
 
 `Schema.AccessObservation` stores the latest access revision accepted by a node
 connection. `Policy.Enforcement.access/3` reads that row and the live connection.
@@ -517,8 +533,9 @@ reports `:node_unavailable` to every caller on that connection.
   reports at debug level.
 - `AccessApplied` is accepted during synchronization because the node sends it
   before `synchronized`.
-- `Biot.Server.RuntimeLogs.get/3` reads a Biot's bounded runtime log after `Access.fetch_readable/2`.
-  Owners and shell collaborators may read it. View-only collaborators may not.
+- `Biot.Server.RuntimeLogs.get/2` reads a Biot's bounded runtime log after `Access.fetch_readable/2`,
+  using the configured `node_response_max_bytes` bound; `get/3` takes an explicit bound. Owners and
+  shell collaborators may read it. View-only collaborators may not.
 - `Biot.Server.Diagnostics.get/2` authorizes a diagnostic through its failed operation and
   retrieves the bounded node-held content.
 - The server connection keeps diagnostics and runtime-log requests in one `pending_requests` map.
@@ -565,9 +582,8 @@ under test, run the real Go agent. No tests mock internal module calls.
 
 ## `apps/biot_web`
 
-The web app owns the HTTP API, browser login, and browser access boundaries. `BiotWeb.Layouts` and
-the `/live` socket remain the scaffold for the UI. The preview proxy and preview callback consumer
-are not built yet.
+The web app owns the HTTP API, browser login, the LiveView UI, and the browser terminal. The
+preview proxy and preview callback consumer are not built yet.
 
 ### Application and request boundaries
 
@@ -576,8 +592,10 @@ are not built yet.
   Phoenix session, and installs `BiotWeb.Router`. It resolves the client address before telemetry.
   Both LiveView transports accept only the endpoint's exact origin.
 - `BiotWeb.Router` has a browser pipeline with sessions, CSRF, control-origin checks, and
-  `ControlSession`. Its API pipeline accepts JSON and requires a bearer credential. The API fallback
-  handles unknown paths with the same error body.
+  `ControlSession`. The browser scope serves the landing page, login, logout, the terminal socket
+  upgrade, and an authenticated `live_session` whose `on_mount` hook is `LiveAuth`. Its API pipeline
+  accepts JSON and requires a bearer credential. The API fallback handles unknown paths with the
+  same error body.
 - `BiotWeb.ClientAddress` parses `BIOT_TRUSTED_EDGE_PEERS` as individual IPv4 or IPv6 addresses.
   `resolve/3` trusts `X-Forwarded-For` only when the immediate peer is listed, and uses the last
   parsed entry. It canonicalizes IPv4-mapped IPv6 addresses and keeps the peer address on failure.
@@ -590,6 +608,7 @@ are not built yet.
   dead token. `BiotWeb.Plugs.ControlOrigin` permits safe methods, no `Origin`, or the configured
   control origin; another origin raises a 403 error before CSRF checks.
 - `BiotWeb.PreviewPaths` owns the reserved `/__biot/callback` path used in preview handoff URLs.
+- `Phoenix.Param.Biot.Protocol.BiotId` in `route_param.ex` is the one place a `BiotId` becomes a URL segment, so every `~p` route interpolates the struct directly.
 - `BiotWeb` provides the Phoenix controller, router, HTML, and LiveView macros. `Layouts` embeds
   the root template, while `ErrorHTML` renders status messages and `ErrorJSON` returns
   `{"error":"internal"}` for crashes and a status tag for other endpoint errors.
@@ -637,7 +656,7 @@ operation location, unchanged lifecycle results to 200, policy results to 200,
 new SSH keys to 201, and bare effects to 204. `Reply` applies those status,
 headers, and bodies. `ErrorResponse` maps `CommandError` values to the model's
 status and error fields. `FallbackController` handles action errors and API
-fallbacks. Credential creation has no API route; it is reserved for the control UI step.
+fallbacks. Credential creation has no API route; the account LiveView creates credentials.
 
 ### Browser login and preview handoff
 
@@ -652,6 +671,82 @@ fallbacks. Credential creation has no API route; it is reserved for the control 
   request. Invalid input, missing publication, and missing view authority return 400, 404, and 403.
 - `BiotWeb.SessionController` logs out the current control session and redirects to `/`; the server
   closes its previews and handoffs while other logins and credentials remain valid.
+
+### Browser UI
+
+The LiveView UI serves every browser page and calls server application functions directly. It never
+calls the HTTP API.
+
+- `BiotWeb.LiveAuth` is the `on_mount` hook for the `:authenticated` live session. It reads the
+  control token, loads it with `Sessions.control/1`, assigns `authentication` and `actor`, and
+  registers the LiveView with `Owners.register_connection/1`. It keeps the same-origin return path
+  for re-login, schedules the proof's expiry, and, when `auth_check_interval_ms` is set, rechecks
+  the proof on that interval. A close message, an expired proof, or a failed check redirects to
+  `/login?return=...` after it unregisters the process.
+- `BiotWeb.UserMessage` is the one browser vocabulary for command errors, failures, invalid fields,
+  and enforcement status.
+- `BiotWeb.BiotState.current_failure/1` picks the failure from the current operation or the latest
+  observation, so the list, detail, and creation views agree.
+- `BiotWeb.Live.Navigation.counts/1` supplies the readable Biot count and node count, or nil when a
+  read fails.
+- `BiotWeb.Components.AppShell` renders the shared frame: sidebar navigation with those counts, the
+  mobile header, logout, and the content slot.
+
+The pages are `Live.LandingLive` (`/`), `Live.BiotsLive` (`/biots`), `Live.NewBiotLive`
+(`/biots/new`), `Live.BiotLive` (`/biots/:id` and its tabs), `Live.TerminalLive`
+(`/biots/:id/terminal`), `Live.NodesLive` (`/nodes`), and `Live.AccountLive` (`/account`).
+
+- `Live.BiotTabs` owns the tab vocabulary (`:overview`, `:publications`, `:access`, `:secrets`,
+  `:logs`), the tabs a role may see, and the load message for one tab.
+- `Live.BiotDetailData` owns the detail, deployment, secret, and log reads for one Biot.
+  `waiting_fetch_source/1` reports the fetch-credential wait only for the current running
+  operation.
+- `Live.ShellAvailability.allowed?/1` is the one rule for the terminal action: owner or shell
+  collaborator, ready node, running container, and not destroyed.
+- `Live.BiotLive` loads the overview and owns the lifecycle actions. Start, stop, and rebuild send
+  the revision the page last loaded; a `revision_conflict` reloads and explains. Destroy arms
+  inline. On `handle_params`, a connected page subscribes to `BiotChange` for the shown Biot,
+  re-subscribing only when the route Biot changes, and unsubscribes on an invalid ID. It reloads
+  the same authorized projection on `{:biot_changed, biot_id}` and ignores a message for another
+  Biot, so another session's change or a node observation updates the page in place.
+- `Live.BiotTabLive` owns one tab's reads and mutations: publish, unpublish, share, revoke, deliver
+  and remove runtime secrets, deliver a fetch credential, and read runtime logs. Secret and log
+  reads run as async work, and a failed read never becomes an empty list.
+- `Live.NewBiotForm` parses the creation form into one `Biots.Create` command plus runtime-secret
+  and source-credential lists. It forces `initial_state: :stopped` when any credential is present.
+- `Live.NewBiotWorkflow` is the pure creation state machine. It advances through allocation,
+  source-credential delivery, preparation, runtime-secret delivery, and starting, deciding to wait,
+  deliver, start, finish, or fail. `Live.NewBiotLive` polls the created view and runs it.
+- `Live.AccountLive` creates bearer credentials and SSH keys, shows the clear token once, and
+  revokes either.
+- `Live.NodesLive` renders the node inventory and expands its orphan report.
+
+The `/biots` list page does not subscribe to `BiotChange`; an open list tab keeps its snapshot and
+needs a manual reload. Only the detail page updates in place.
+
+The components `Access`, `BiotLogs`, `BiotOverview`, `BiotSecrets`, `Publication`, `Operation`,
+`OrphanReport`, `Role`, `Status`, and `BiotSummary` each render one panel or one projected value.
+`BiotSummary.value/1` is the one list-summary priority order, and `Status` and `Role` format the
+finite status and role vocabularies.
+
+### Browser terminal
+
+- `BiotWeb.TerminalController.upgrade/2` validates the exact origin, resolves the client address,
+  rechecks the control session from the cookie, parses the Biot ID and the requested terminal size,
+  and upgrades the request to `TerminalSocket` with a 65,536-byte frame bound.
+- `BiotWeb.TerminalSocket` is the WebSock handler and the stream owner. It opens with
+  `Access.open_shell/3`, passes every process message through `Access.handle_owner_message/2`, and
+  closes with `Access.close/1` on every termination path. Binary frames are shell bytes, a text
+  frame is `{"resize": {cols, rows}}`, and the exit frame sends `{"exit": status}` before it closes.
+- `assets/js/app.js` loads the vendored Ghostty Web terminal and defines the browser hooks
+  `GhosttyTerminal`, `FormBehavior`, `LocalizedTime`, `AppearanceControls`, `CredentialNotice`, and
+  `CopyCredential`.
+
+### Browser assets
+
+`mix biot_web.assets` copies the hand-written `assets/css/app.css` and the vendored Ghostty Web
+JavaScript, WebAssembly, and license files into `priv/static`. `mix esbuild` bundles
+`assets/js/app.js`. The Space Mono fonts and `favicon.svg` live directly under `priv/static`.
 
 ### Tests
 
@@ -681,7 +776,9 @@ The node owns host reconciliation and reports inspected state to the server.
   It returns `:settled`, `{:run, action}`, `:cancel_current`, `{:blocked, reason}`, or
   `{:failed, failure}`.
 - `Reconcile.Data`, `Reconcile.Environment`, and `Reconcile.Execution` compose the decisions.
-  Ordinary convergence runs data, environment, execution, then release.
+  Running convergence runs data, environment, execution, then release.
+  Stopped convergence retires execution first, then runs data, environment, and release, so a
+  stopped Biot still resolves, prepares, and installs its selected environment without starting it.
   Destruction runs execution, release, then data.
 - `BlockReason` includes `{:inspection, failure}`, `{:current_action, action}`, `{:recorded_failure, failure}`, and `{:fetch_credential, source}`. `Retry.classify/4` maps host outcomes to bounded failures and retry policies; a credential wait is the one operator-owned block. `Reconcile.next/3` blocks running and stopped intent on that wait, but lets destruction proceed.
   `Retry.failure/2` builds failures found without an action.
@@ -1159,7 +1256,9 @@ Linux host image.
 ## Releases
 
 The root Mix project defines two releases.
-The `server` release includes `biot_protocol`, `biot_server`, and `biot_web`.
+The `server` release includes `biot_protocol`, `biot_server`, and `biot_web`. Before assembly it
+builds the web assets, and after assembly it verifies the hashed stylesheet, JavaScript, vendored
+terminal, favicon, and font files under the release's static directory.
 The `node` release includes `biot_protocol` and `biot_node`; the node app's private files contain
 the Nix and agent source trees used by its build workers. Each release has its own parsed runtime
 configuration under `config/releases/`.

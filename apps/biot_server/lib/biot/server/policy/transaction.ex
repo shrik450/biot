@@ -2,10 +2,10 @@ defmodule Biot.Server.Policy.Transaction do
   @moduledoc "Runs one immediate transaction for a synchronous policy change."
 
   alias Biot.Protocol.BiotId
-  alias Biot.Server.Access.Withdrawal
   alias Biot.Server.Actor
   alias Biot.Server.Authorization
   alias Biot.Server.CommandError
+  alias Biot.Server.CommitEffects
   alias Biot.Server.NodeConnections
   alias Biot.Server.Policy
   alias Biot.Server.Policy.{Applied, Enforcement, Unchanged}
@@ -81,9 +81,16 @@ defmodule Biot.Server.Policy.Transaction do
   defp after_commit({:error, _operation, error, _changes}), do: {:error, error}
 
   defp enforce_access(kind, %Biot{} = biot) do
-    if kind == :withdrawn do
-      Withdrawal.enforce([{:biot, biot.id}], [{biot.node_id, biot.id}])
-    end
+    {owners, wakes} =
+      if kind == :withdrawn do
+        {[{:biot, biot.id}], [{biot.node_id, biot.id}]}
+      else
+        {[], []}
+      end
+
+    readers = if kind == :unchanged, do: [], else: [biot.id]
+
+    CommitEffects.enforce(%CommitEffects{owners: owners, wakes: wakes, readers: readers})
 
     # Enforcement uses committed state because an earlier withdrawal can still be pending.
     access_observation = Repo.get(AccessObservation, biot.id)

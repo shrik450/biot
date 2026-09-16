@@ -58,6 +58,25 @@ defmodule Biot.Server.Sessions do
     end
   end
 
+  @doc "Rechecks a browser proof against its current server-owned session."
+  @spec valid?(Authentication.t()) :: {:ok, DateTime.t()} | :error
+  def valid?(%Authentication{} = authentication) do
+    case Validity.check(Repo, authentication, DateTime.utc_now()) do
+      {:ok, expires_at} -> {:ok, expires_at}
+      {:error, :unauthenticated} -> :error
+    end
+  end
+
+  @doc "Returns the absolute expiry carried by an authentication proof."
+  @spec expires_at(Authentication.t()) :: DateTime.t() | nil
+  def expires_at(%Authentication{proof: {:control, _digest, expires_at}}), do: expires_at
+
+  def expires_at(%Authentication{proof: {:preview, _digest, _parent, _hostname, expires_at}}),
+    do: expires_at
+
+  def expires_at(%Authentication{proof: {:credential, _id, expires_at}}), do: expires_at
+  def expires_at(%Authentication{proof: {:ssh_key, _id}}), do: nil
+
   @spec preview(Hostname.t(), String.t()) :: {:ok, Authentication.t()} | :error
   def preview(%Hostname{} = hostname, token) when is_binary(token) do
     # Preview validity includes the parent control session and enabled principal.
