@@ -20,6 +20,8 @@ import (
 	"github.com/shrik450/biot/cli/internal/resolve"
 )
 
+const secretExposureWarning = "may contain supplied secrets. This is a historical marker; it does not show whether a secret is present now."
+
 func init() {
 	rootCommand.Children = append(rootCommand.Children, []*command.Command{
 		{
@@ -129,8 +131,18 @@ func runLogin(commandContext command.Context, arguments []string) error {
 	if err := config.Save(config.Config{ServerURL: client.ServerURL(), Token: string(token)}); err != nil {
 		return err
 	}
-	fmt.Fprintf(commandContext.Stdout, "Logged in as %s.\n", principal.ID)
+	fmt.Fprintf(commandContext.Stdout, "Logged in as %s.\n", principalLabel(principal))
 	return nil
+}
+
+func principalLabel(principal api.Principal) string {
+	if principal.Email != "" {
+		return principal.Email
+	}
+	if principal.Name != "" {
+		return principal.Name
+	}
+	return principal.ID
 }
 
 func runLogout(commandContext command.Context, arguments []string) error {
@@ -174,7 +186,7 @@ func runList(commandContext command.Context, arguments []string) error {
 	for _, biot := range biots {
 		secretMarker := ""
 		if biot.DirectSecretExposurePossible {
-			secretMarker = "may contain supplied secrets"
+			secretMarker = secretExposureWarning
 		}
 		fmt.Fprintf(commandContext.Stdout, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", biot.Name, biot.ID, biot.Desired.State, actualContainerLabel(biot), biot.Node, waitingForLabel(biot.Actual.WaitingFor), secretMarker)
 	}
@@ -231,7 +243,7 @@ func printBiot(output io.Writer, biot api.Biot) {
 		fmt.Fprintf(output, "waiting for: %s\n", waiting)
 	}
 	if biot.DirectSecretExposurePossible {
-		fmt.Fprintln(output, "warning: may contain supplied secrets")
+		fmt.Fprintf(output, "warning: %s\n", secretExposureWarning)
 	}
 	if len(biot.Publications) > 0 {
 		fmt.Fprintln(output, "publications:")
