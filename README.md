@@ -10,6 +10,8 @@ and published ports each person can access.
 shells, and the clients are being built. [docs/model.md](docs/model.md) is the
 implementation contract and describes intended behavior in detail.*
 
+Deployment requirements are in [docs/deployment.md](docs/deployment.md).
+
 > [!NOTE]
 > This tool is almost entirely vibe coded. Outside of this README, there is no
 > guarantee that anything was written by humans.
@@ -107,6 +109,11 @@ self-hostable solution.
 ## How it works
 
 ```sh
+$ biot login https://biot.company.test
+Open this URL to create or copy a bearer token:
+https://biot.company.test/account
+Bearer token:
+Logged in as 8f3c1e90-5a7d-4b21-9e64-2c8a0f1d3b57.
 $ biot create --repo https://github.com/me/app.git --name checkout-flow
 biot ready: checkout-flow
 $ biot publish checkout-flow 3000

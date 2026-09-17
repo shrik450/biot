@@ -11,6 +11,7 @@
 - `config` contains shared Mix and runtime configuration.
 - `docker/linux-host` contains the Linux host image for node host tests.
 - `agent/` contains the Go agent and its vendored dependencies.
+- `docs/` holds `model.md` (the implementation contract), `design.md`, this map, and `deployment.md` (the operator runbook).
 
 The server owns authorization, durable intent, observations, and operation meaning.
 The node owns host resources and reports inspected state.
@@ -75,7 +76,8 @@ This app owns shared parsed values and wire codecs.
 - **Identifiers:** `CanonicalUuid` parses canonical UUID strings. Eleven opaque UUID identity
   modules use `UuidValue`, which supplies their common struct, parser, generator, and string form.
 - **Names:** `BiotName` is a lowercase DNS label and rejects UUID-shaped names, so clients can
-  distinguish a name from a `BiotId` without a lookup.
+  distinguish a name from a `BiotId` without a lookup. `max_length/0` is 63 bytes; a longer name
+  is `:name_too_long`, kept distinct from `:invalid_format` so the form can say "shorten it".
 - **Sources:** `RepositorySource` represents a credential-free Git repository URL and derives its normalized `origin/1` for credential attribution.
 - **Sources:** `SourceSelector` represents an unpinned source and its ref.
 - **Sources:** `PinnedSource` represents a source with a commit revision and Nix NAR hash.
@@ -116,6 +118,37 @@ Tests for this app are pure unit tests with StreamData property tests.
 `test/shell_frame_test.exs` covers `ShellFrame` encode, decode, `reframe/2`, direction rules, payload bounds, partial frames, and the exit-last rule.
 `test/identity_values_test.exs` covers `CredentialId`, `SshKeyId`, `SshPublicKey`, `SameOriginPath`, and `Digest.sha256/1`.
 
+### Shared error vocabulary
+
+One vocabulary, owned jointly by the server, the browser, and the CLI, says what a rejected field
+or a refused command means. The server sends machine atoms; each client renders the sentence.
+
+- `Biot.Protocol.FieldReason` is the closed list of 19 field reasons. `all/0` returns them and
+  `member?/1` tests one. The sentence that shows a reason belongs to the client that renders it.
+- `Biot.Server.CommandError` is the closed list of 13 command error tags, including the ones that
+  carry detail. `all/0` and `member?/1` expose it, and `invalid_input/1` is the one constructor for
+  an invalid-input map: it raises on a field reason outside `FieldReason`, so a reason invented at
+  an emitting site cannot reach a client as a sentence nobody wrote.
+- `BiotWeb.UserMessage` owns the sentences and the remedy coverage. It refuses to compile unless it
+  has exactly one sentence for every `FieldReason` member and every `CommandError` tag, with the
+  placeholders the vocabulary declares. Its `field_reason_sentences/0`, `command_error_sentences/0`,
+  and `client_remedies/0` are the values the artifact is built from.
+- `cli/internal/api/error_vocabulary.txt` is the generated artifact that carries the vocabulary to
+  the Go client: one line per reason, `reason|kind|limit|sentence|remedy`, where a numeric limit is
+  the bound the reason names and `remedy` says whether the client must tell the user what to do
+  about it.
+- `Mix.Tasks.Biot.CheckCliErrorVocabulary` (`mix biot.check_cli_error_vocabulary`) regenerates that
+  artifact with `--write` and otherwise fails if it differs from the server vocabulary and its
+  wording. The `check` alias runs the plain form, so a reason or a rewording cannot land without the
+  artifact being regenerated.
+
+The Go client embeds the artifact and validates it at `init`: every command tag and field reason has
+a sentence, every remedy marker matches a client remedy, and every placeholder is declared. It
+refuses to start rather than render a reason it does not understand. `internal/input` reads the
+secret-value bound from the same artifact, so a value a local guard rejects gets the server's
+wording. `apps/biot_web/test/field_reason_reachability_test.exs` refuses a reason no real emitter
+produces, so the list cannot grow beyond what the server actually sends.
+
 ## apps/biot_server
 
 ### Layout
@@ -153,8 +186,10 @@ Its six functions are `terminal?/1`, `serves_access?/1`, `written_off?/1`, `acce
 Every status appears in every function.
 A new status cannot compile until all six functions answer it.
 `Actor` is the authenticated caller.
-`CommandError` is the model's error union.
-`CommandError` includes `destroyed` for lifecycle changes against a destroyed Biot.
+`CommandError` is the model's error union, and its `all/0` and `member?/1` expose the closed tag
+list. `invalid_input/1` is the one constructor for a field-error map, and it refuses a field reason
+outside `Biot.Protocol.FieldReason`. `CommandError` includes `destroyed` for lifecycle changes
+against a destroyed Biot.
 `DomainName` parses the control host and publication domain, enforces that no preview hostname can
 overlap the control host, and `classify/3` is the one host-dispatch read: it returns `:control`,
 `{:preview, hostname}`, or `:unknown` for one request `Host`. `within?/2` is the boot-time
@@ -174,7 +209,8 @@ overlap check. `Login.Settings` parses the required HTTPS OIDC configuration onc
 - `Queries.AccessDisplayView.get/2` resolves the owner and every grant principal ID into `PrincipalView` values for the access panel.
 - `Queries.Navigation.counts/1` returns the readable Biot count and the node count used by the application frame.
 - `Queries.Nodes.list/1` and `Queries.NodeView` build the node inventory with capacity counts, live connections, and latest orphan reports.
-- `Queries.Deployment.get/1` returns the publication and SSH settings in `DeploymentView`.
+- `Queries.Deployment.get/1` returns the publication and SSH settings in `DeploymentView`, with
+  the running daemon's advertised host keys or nil when SSH is disabled.
 - `Queries.PrincipalView`, `Queries.BiotView`, `Queries.PublicationView`, and `Queries.OperationView` provide pure projections. `PrincipalView` projects the authenticated principal's ID and latest OIDC email and name. `BiotView` includes the actor's `role`, the row's `direct_secret_exposure_possible` column, and `waiting_for`. Creation sets the exposure column to `false`; observations supply the current wait.
 - `Authorization` owns the `grants` and `role` types and the pure role and policy predicates.
 - `NodeConnections` is a thin layer over `Control.Registry`, the one node membership table. The key is the node ID, the process is the control connection, and the value is the connection ID and state. Only the owning control process writes its entry, through `put/2` and `delete/1`. The entry leaves the Registry when that process exits. `current/1`, `connection_pid/1`, `ready/1`, and `ready_connection/1` skip an entry whose process is already dead.
@@ -516,13 +552,24 @@ beyond `Ssh.Channel`:
 
 - The host key is pinned at boot. `Ssh.KeyCallback.validate/1` reads and decodes the operator's
   OpenSSH file once with `:ssh_file.decode/2`, fails boot on an unusable file, and returns the
-  decoded keys with the algorithms they support. `Daemon` passes that value into
-  `key_cb: {KeyCallback, [pinned: pinned]}` when it starts `:ssh.daemon/2`, so OTP holds it in the
-  key callback's private options and `host_key/2` only selects from `key_cb_private`. The served
-  key never lives in a globally readable term, and replacing the file cannot change the key served
-  to a new client. The algorithm table is Biot's own, not an OTP-internal helper: RSA, Ed25519, and
-  ECDSA P-256, P-384, and P-521, and `preferred_algorithms: [public_key: pinned.algorithms]`
-  offers only those.
+  decoded keys, the algorithms they support, and the host keys to advertise. `Daemon` passes that
+  value into `key_cb: {KeyCallback, [pinned: pinned]}` when it starts `:ssh.daemon/2`, so OTP holds
+  it in the key callback's private options and `host_key/2` only selects from `key_cb_private`. The
+  served key never lives in a globally readable term, and replacing the file cannot change the key
+  served to a new client. The algorithm table is Biot's own, not an OTP-internal helper: RSA,
+  Ed25519, and ECDSA P-256, P-384, and P-521, and
+  `preferred_algorithms: [public_key: pinned.algorithms]` offers only those.
+- `validate/1` names each way the file can be unusable, because the operator's next step differs:
+  `:missing_host_key_file`, `{:unreadable_host_key_file, posix}`, `:invalid_host_key_file`,
+  `:unsupported_host_key_type`, and `{:duplicate_host_key_type, type}`. `message/2` turns each into
+  the sentence `Daemon.start` stops with, so the boot log names the file and the fix rather than a
+  bare atom. The same key listed twice is dropped in silence; two different keys of one type are
+  refused, because `host_key/2` selects one key per offered algorithm while the deployment API
+  advertises by type, so serving either would be a choice the operator did not make.
+- `Daemon.host_keys/0` returns the pinned keys as `%{type, public_key, fingerprint}` maps, or `[]`
+  when SSH is disabled. `Queries.Deployment.get/1` puts them in `DeploymentView.ssh_host_keys`, and
+  `Json.encode/1` adds them to the deployment response as the `host_keys` array under `ssh`. The
+  account page lists them and `biot ssh` pins them.
 - `Ssh.KeyCallback.is_auth_key/3` turns the offered OTP public key back into an OpenSSH line,
   parses it with `SshPublicKey`, and authenticates it through `SshKeys.authenticate/1`, which reads
   the stored key by fingerprint, so a removed key fails on the next channel. It records the
@@ -537,7 +584,8 @@ beyond `Ssh.Channel`:
   with `xterm-256color` and 80x24 defaults, `window-change` becomes `Streams.resize`, `data`
   becomes `Streams.write`, and `eof` writes the terminal EOF byte `0x04`. Agent output goes out
   through `:ssh_connection.send/3`, and the agent's exit frame becomes the channel's exit status
-  followed by `send_eof`; a lost or closed stream never reports success and uses status 255.
+  followed by `send_eof`; a stream lost without an exit frame never reports success and uses status
+  255.
 - The browser terminal's path is the same path here. `shell` and `exec` both call
   `Access.open_shell/3`, so `Admission`, `Owners`, and `Streams` are shared. Each channel admits
   itself again, so a revoked shell grant denies the next channel even while the SSH connection
@@ -632,8 +680,9 @@ behavior is under test, run the real Go agent. `ssh_daemon_integration_test.exs`
 keys with `ssh-keygen`, starts the daemon on a real port, and drives it with the real `ssh` client:
 a registered key opens a shell, an unregistered key is refused, `exec` returns the agent's exit
 status, closed stdin sends the terminal EOF so `cat` does not hang, port forwarding and sftp are
-refused, removing a key closes the live connection, and stopping the daemon leaves the supervisor
-alive. No tests mock internal module calls.
+refused, removing a key closes the live connection, host-key selection fails closed for an
+unsupported algorithm, the daemon keeps serving its pinned host key after the file is rotated, and
+stopping the daemon leaves the supervisor alive. No tests mock internal module calls.
 
 ## `apps/biot_web`
 
@@ -786,7 +835,8 @@ Controllers parse input, call one server function, and pass views through
 | `DELETE /api/ssh-keys/:id` | `SshKeyController` | `SshKeys.remove` |
 
 `Json` encodes server views, protocol unions, IDs, ports, times, diagnostics,
-and runtime logs. `Response` maps accepted lifecycle results to 202 with one
+and runtime logs. For a `DeploymentView` it also encodes the pinned host keys as the `host_keys`
+array under `ssh`. `Response` maps accepted lifecycle results to 202 with one
 operation location, unchanged lifecycle results to 200, policy results to 200,
 new SSH keys to 201, and bare effects to 204. `Reply` applies those status,
 headers, and bodies. `ErrorResponse` maps `CommandError` values to the model's
@@ -821,7 +871,9 @@ calls the HTTP API.
   the proof on that interval. A close message, an expired proof, or a failed check redirects to
   `/login?return=...` after it unregisters the process.
 - `BiotWeb.UserMessage` is the one browser vocabulary for command errors, failures, invalid fields,
-  and enforcement status.
+  and enforcement status. It is also the source of the sentences and remedy coverage the CLI
+  error-vocabulary artifact is generated from, and it refuses to compile without a sentence for
+  every declared reason.
 - `BiotWeb.BiotState.current_failure/1` picks the failure from the current operation or the latest
   observation, so the list, detail, and creation views agree.
 - `BiotWeb.Live.Navigation.counts/1` supplies the readable Biot count and node count, or nil when a
@@ -855,7 +907,8 @@ The pages are `Live.LandingLive` (`/`), `Live.BiotsLive` (`/biots`), `Live.NewBi
   source-credential delivery, preparation, runtime-secret delivery, and starting, deciding to wait,
   deliver, start, finish, or fail. `Live.NewBiotLive` polls the created view and runs it.
 - `Live.AccountLive` creates bearer credentials and SSH keys, shows the clear token once, and
-  revokes either.
+  revokes either. It also lists the server's SSH host keys with their `SHA256:` fingerprints and the
+  `host:port` plain `ssh` connects to.
 - `Live.NodesLive` renders the node inventory and expands its orphan report.
 
 The `/biots` list page does not subscribe to `BiotChange`; an open list tab keeps its snapshot and
@@ -898,15 +951,19 @@ RS256 ID tokens, and consumes authorization codes once.
 The web suite exercises every API route against real SQLite, browser and bearer separation, CSRF
 and exact-origin rules, cookie scope, logout closure, OIDC discovery and PKCE against a real local
 provider, and preview handoffs. `preview_proxy_integration_test.exs` drives the whole proxy against
-a real upstream Plug: a streamed request and a streamed response, an unpublished host, a missing
-view grant and its page, credential-versus-cookie precedence, Biot-cookie stripping, a sibling
-preview origin before an upgrade, a revoked grant closing an open WebSocket, and the status of
-every proxy failure. `preview_web_socket_test.exs` is the pure codec suite: a property over
+a real upstream Plug: a streamed request, a chunked response with trailers, a body exactly at the
+limit and one byte over it, a missing view grant and its page, credential-versus-cookie precedence,
+Biot-cookie stripping, a sibling preview origin before an upgrade, a revoked grant closing an open
+WebSocket, an incomplete upstream handshake at the exact head limit, and the status of every proxy
+failure. `preview_web_socket_test.exs` is the pure codec suite: a property over
 arbitrary bytes, every truncation of a valid frame, declared-length rejection before allocation,
 fragment reassembly and interruption, close payload forms, and the control-frame limit.
 `browser_flows_integration_test.exs` runs the real UI in Wallaby: sign-in and list, a detail page
 that updates on a server change, the browser terminal, and a credentialed create. Property tests
-fuzz bearer, callback, parameter, and client-address boundaries.
+fuzz bearer, callback, parameter, and client-address boundaries. `closed_vocabulary_test.exs` and
+`field_reason_reachability_test.exs` keep the shared vocabulary honest: every tab, status, and role
+is answered, every field reason has a distinct non-generic sentence, and every declared reason is
+produced by a real emitter.
 
 ## `apps/biot_node`
 
@@ -1074,9 +1131,12 @@ The effect modules own host resources:
   `/root`, `/var`, and `/nix/var`. The UID/GID map
   confines files to the allocation's range; the isolated network confines traffic to the Biot;
   `--read-only` confines writes to explicit mounts and tmpfs; `unmask=/proc/*` lets Nix create its
-  nested sandbox; `SYS_ADMIN` lets that sandbox mount its namespace; `--rm` and log driver `none`
-  keep the disposable worker from retaining a root or logs. The probe uses the same boundary with
-  no allocation, no network, and a throwaway store.
+  nested sandbox; `SYS_ADMIN` lets that sandbox mount its namespace; `--security-opt
+  label=type:container_engine_t` tells SELinux the worker is a container engine running inside a
+  container, which is what lets its nested build mount a fresh `/proc` where plain `container_t` may
+  only remount one; `--rm` and log driver `none` keep the disposable worker from retaining a root or
+  logs. The label is unconditional, and Podman ignores it where SELinux is off. The probe uses the
+  same boundary with no allocation, no network, and a throwaway store.
 - `Host.SourceStaging` owns trusted fetch, copying the release's `nix/` and `agent/` support,
   running `nix/fetch.nix`, and reading the staged out-link. `pins.json` is the one output contract.
   `Host.StagedInputs` is its pure, strict value: build support, Nixpkgs, layers, store paths,
@@ -1131,7 +1191,12 @@ Support modules provide the smaller boundaries:
   `biot-worker-<id>` name with `io.biot.biot-id`, `io.biot.role=worker`, and a phase label; the
   startup probe is `biot-worker-probe` with `io.biot.role=probe`. `Host.Network` creates isolated
   networks with Podman's `--opt isolate=true` option. `Host.FileSystem` provides tri-state
-  inspection, atomic writes, and tree removal.
+  inspection, atomic writes, tree removal, and `real_path/1`, which follows every symlink in a path
+  the way the kernel does. It exists because `File.cp_r/3` resolves a relative symlink lexically
+  against the path it walked in by while the kernel resolves it against the directory that
+  physically holds it, so a tree reached through a symlink copies its inner links from the wrong
+  base. `Host.Config.load/0` stores the release's `priv/build_support` through `real_path/1`, so the
+  staged copy sees the physical directory the links were written against.
 - `Host.Podman.grant/3` gives a tree to the mapped allocation user. `reclaim/2` uses `podman unshare`
   to restore node ownership and write permission before removal. `Host.Config.load/0` parses and
   validates operator settings once at boot and keeps the result in `:persistent_term`; later effects
@@ -1389,8 +1454,12 @@ the journal, and the controller tree are ready. Linux is required for the node c
 
 ### Tests
 
-`test/test_helper.exs` excludes `:linux` tests outside Linux and `:nix` tests when
-`nix` is unavailable. Pure tests cover the reconciliation decision tables, retry rules, staged-input
+`test/test_helper.exs` excludes `:linux` tests outside Linux, `:nix` tests when `nix` is
+unavailable, and the `:podman` host tests when the machine cannot sandbox a Nix build. It decides
+that by asking `Biot.Node.TestSandboxGate` to run the node's own startup check
+(`Host.Setup.start_link/1`) rather than a cheaper proxy that would pass where the build then fails,
+and the skip prints the node's diagnostic and points at `docker/linux-host/run-tests.sh`. Pure tests
+cover the reconciliation decision tables, retry rules, staged-input
 parsing, layouts, Git hardening, and stream-group state. Integration tests use real SQLite journals,
 OTP supervision, Unix sockets, the Go agent, Podman, and Nix as appropriate. The Linux host suite
 covers worker isolation, cancellation, mounts, ownership, private stores, environment release,
@@ -1407,7 +1476,8 @@ The Go command-line client. It uses no CLI framework. `internal/command` is a sm
 walks it; `cmd/biot/main.go` owns `rootCommand`, sorts its children by a fixed order, and turns an
 `exitStatusError` into the process exit status. The per-area files `commands.go`, `lifecycle.go`,
 `publication.go`, `access.go`, `secrets.go`, `account_commands.go`, and `operations_commands.go`
-register the 25 top-level commands from `init`. Four of them group subcommands: `secret` (`set`,
+register the 26 top-level commands from `init`, `help` included. Four of them group subcommands:
+`secret` (`set`,
 `rm`, `list`), `fetch-credential` (`set`, `rm`), `ssh-key` (`add`, `list`, `rm`), and `token`
 (`create`, `list`, `revoke`).
 
@@ -1415,37 +1485,51 @@ To add a command, append one `&command.Command{...}` to the `rootCommand.Childre
 matching area file, or add a file with its own `init` that does the same. Give it a `Run` of type
 `func(command.Context, []string) error` and parse the arguments by hand; there is no global flag
 parser, so each command owns its own checking and its own `--help` text. `command.Context` carries
-`Stdout` and `Stderr`, and `internal/command` also has `RequireArguments` and `RejectUnknown` for
-the common cases.
+`Stdout` and `Stderr`, and `internal/command` also has `RequireArguments`, `RequireAtMostArguments`,
+and `RejectUnknown` for the common cases. A leading `-` that is not `-h` or `--help` goes to the
+command's own `Run` when it has one, and is an unknown-flag error otherwise.
 
 - `internal/api` is the HTTP client. `New/3` validates and normalizes the server URL and default
-  transport, `Request/5` sends and decodes JSON and bounds a response at 8 MiB, and the error
-  vocabulary is explicit: one table of `CommandError` tags and one of field reasons, both checked
-  at init so a new server reason cannot pass silently. One method wraps one API route, and a shared
-  helper builds the `*api.Error`.
+  transport, and `Request/5` sends and decodes JSON and bounds a response at 8 MiB. The error
+  vocabulary is the embedded `error_vocabulary.txt` artifact described above, parsed and checked at
+  `init` so the client refuses to start rather than render a reason it does not understand;
+  `FieldReasonMessage/2` and `FieldReasonLimit/1` let local guards use the server's wording and
+  bounds. `do/1` prints a waiting notice once a request has taken longer than
+  `transportNoticeDelay`, and `serverCommunicationError/2` turns a transport failure into the likely
+  cause: a timeout, an untrusted certificate, an unknown host, a response closed early, or a refused
+  connection. One method wraps one API route, and a shared helper builds the `*api.Error`.
 - `internal/config` reads and writes `$XDG_CONFIG_HOME/biot/config.json`, which holds the server URL
   and bearer token. The directory is mode 0700, the file is mode 0600, and a save writes a
-  same-directory temporary file and renames it into place.
+  same-directory temporary file and renames it into place. `Exists/0` tells whether a saved
+  configuration is present without reading it.
 - `internal/input` reads a line, a hidden terminal secret through `golang.org/x/term`, or bounded
-  stdin bytes. Every secret path clears its buffer.
+  stdin bytes. Every secret path clears its buffer, and the bound comes from the vocabulary
+  (`secret_value_too_large`), so a value rejected before the request carries the server's wording.
 - `internal/resolve` resolves a name or canonical ID to one Biot, and reports an ambiguous name with
   the matching IDs. `internal/id` mints the client-side canonical UUID a create needs.
 - `golang.org/x/term` and `golang.org/x/sys` are vendored under `cli/vendor`; `cli/go.mod` has no
   other requirement.
 
-`biot ssh` resolves a Biot, reads the SSH host and port from `GET /api/deployment`, and execs the
-system `ssh` client with the Biot ID as the user. It passes the remote command through after `--`,
-turns the SSH exit status into the CLI's exit status, and, when `ssh` reports a public key
-authentication failure, prints a hint to register a key with `biot ssh-key add`.
+`biot ssh` resolves a Biot, reads the SSH host, port, and host keys from `GET /api/deployment`,
+writes those keys into a private temporary `known_hosts` for `[host]:port`, and execs the system
+`ssh` client with the Biot ID as the user, `StrictHostKeyChecking=yes`, `UserKnownHostsFile` pointing
+at that temporary file, and `GlobalKnownHostsFile=/dev/null`, so it verifies the server's own
+advertised keys and nothing else. It refuses with a message when the server advertises no host key.
+`--identity FILE` selects a private key, a remote command follows `--`, and the SSH exit status
+becomes the CLI's exit status. When `ssh` reports a public key authentication failure it prints a
+hint to register a key with `biot ssh-key add`.
 
 `cli/e2e` is behind the `e2e` build tag. `TestMain` builds the real `biot` binary, and
 `harness_test.go` gives each test an isolated `XDG_CONFIG_HOME`, `HOME`, and `TMPDIR`, a transparent
 recording reverse proxy in front of the real server, `/proc` inspection helpers, and a PTY runner.
-It needs a running server plus `BIOT_E2E_TOKEN` and `BIOT_E2E_BIOT`; see `.work/cli-e2e-howto.md`.
+`cli/e2e/e2e_server.exs` stands up the dev server and a real control-protocol peer, and
+`cli/e2e/README.md` says how to run it and which `BIOT_E2E_*` variables it prints.
 `secret_handling_test.go` proves that secret bytes reach the server unchanged, that a NUL byte
 reaches the real parser, that invalid UTF-8 is refused rather than rewritten, and that a hidden
-prompt leaks neither to the process table nor to shell history. The `cmd/biot` and `internal`
-packages have their own unit tests.
+prompt leaks neither to the process table nor to shell history. `create_flow_test.go` drives a
+credentialed create through `biot ready`, and `command_table_test.go` covers the lifecycle, policy,
+secret, token, key, and SSH commands. The `cmd/biot` and `internal` packages have their own unit
+tests.
 
 ## Releases
 
@@ -1458,6 +1542,10 @@ the Nix and agent source trees used by its build workers. Each release has its o
 configuration under `config/releases/`.
 
 Build them with `MIX_ENV=prod mix release server` and `MIX_ENV=prod mix release node`.
+
+`docs/deployment.md` is the operator runbook for those releases: it builds them, installs the server
+and the node as service units, marks the steps that need root, and ends with a checklist.
+`README.md` links it.
 
 ## Tooling
 
@@ -1475,7 +1563,8 @@ mise exec -- mix check
 mise exec -- mix test
 ```
 
-`mix check` runs format checks, Credo in strict mode, and compilation with warnings as errors.
+`mix check` runs format checks, Credo in strict mode, compilation with warnings as errors, and the
+CLI error-vocabulary drift check (`mix biot.check_cli_error_vocabulary`).
 
 The root and `apps/biot_server` `test` aliases load `mix/test_env.exs`. Its `Biot.Mix.TestEnv.require_test_env!/1` refuses to run unless `Mix.env()` is `:test`, and it runs before `ecto.drop`, so `MIX_ENV=dev mix test` cannot drop the dev database.
 

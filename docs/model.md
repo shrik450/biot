@@ -837,6 +837,7 @@ BiotView
   id, name, owner_id, node_id
   role: owner | collaborator({shell: boolean, view_ports: list(Port)})
   desired: Desired
+  environment: EnvironmentSelection | none
   actual:
     never_reported
     | {received_at, freshness: current | stale,
@@ -859,6 +860,11 @@ AccessView
   shell_grants: list(PrincipalId)
   view_grants: list({port, principal_id})
 
+AccessDisplayView
+  owner: PrincipalView
+  grants: list({kind: shell, principal: PrincipalView}
+               | {kind: view, port: Port, principal: PrincipalView})
+
 NodeView
   id, status, platform, max_biots
   assigned_biots: non_negative_integer
@@ -870,7 +876,8 @@ SecretView
 
 DeploymentView
   publication_domain: string
-  ssh: {host: string, port: Port}
+  ssh: {host: string, port: Port,
+        host_keys: list({type, public_key, fingerprint}) | absent}
 ```
 
 The server owns these projections. Observations are last reported facts, not a
@@ -913,7 +920,7 @@ application modules directly; they never call `/api`.
 | `GET /api/biots/:id/publications` | `Publications.discover` |
 | `PUT /api/biots/:id/publications/:port` | `Publications.publish` |
 | `DELETE /api/biots/:id/publications/:port` | `Publications.unpublish` |
-| `GET /api/biots/:id/grants` | `Access.get_grants` |
+| `GET /api/biots/:id/grants` | `AccessDisplayView.get` |
 | `PUT` and `DELETE /api/biots/:id/grants/shell/:principal_id` | `Access.grant_shell`, `Access.revoke_shell` |
 | `PUT` and `DELETE /api/biots/:id/grants/view/:port/:principal_id` | `Access.grant_view`, `Access.revoke_view` |
 | `GET /api/biots/:id/secrets` | `Secrets.list` |
@@ -945,6 +952,27 @@ retry semantics.
 Error bodies are `{"error": "<tag>", ...}` with the tag's fields flattened
 beside it, such as `current_revision`.
 
+`invalid_input(field_errors)` carries a map from field names to lists of
+`FieldReason` values. `FieldReason` is a closed vocabulary of 19 reasons, and
+`CommandError` has 13 closed tags. An emitter that supplies a reason outside
+that vocabulary raises a programming error instead of sending an unknown
+sentence to a person. `BiotWeb.UserMessage` checks that every declared reason
+has exactly one sentence at compile time. The same table supplies the web
+wording and the generated `cli/internal/api/error_vocabulary.txt` embedded by
+the Go client; `mix biot.check_cli_error_vocabulary` fails when that artifact
+drifts. The Go client does not start if it cannot render every vocabulary
+message it might receive: missing sentences, missing declared remedies, and
+undeclared remedies all fail its startup checks.
+
+Each sentence states the fact. Three reasons also carry a client-specific
+remedy:
+
+| Reason | Web UI | CLI |
+| --- | --- | --- |
+| `unauthenticated` | Sign in again. | Run `biot login`. |
+| `revision_conflict` | Reload and try again. | Run the command again. |
+| `publication_not_active` | Reload and choose an active one. | Choose an active publication. |
+
 ### Browser UI
 
 The LiveView UI covers the same application functions as the API and adds the
@@ -956,7 +984,7 @@ terminal. It never calls `/api`.
 | `/biots/new` | Repository, name, node, layers, optional runtime and source-fetch credentials |
 | `/biots/:id` | BiotView, current Operation and its diagnostic, runtime logs, publications with URLs, grants by email, secrets by name, source credential requests, start, stop, rebuild, publish, share, destroy |
 | `/biots/:id/terminal` | Ghostty Web terminal for owners and shell-grant holders |
-| `/account` | Credentials and SSH keys, with the one-time token display |
+| `/account` | Credentials and SSH keys; the server's advertised SSH host keys, types, fingerprints, and comparison endpoint; the one-time token display |
 | `/nodes` | NodeView list with orphans |
 | `/login`, `/logout`, `/preview/authorize` | OIDC round trip, session end, and the handoff step |
 
@@ -971,7 +999,7 @@ the actor can read; an ambiguous name is an error that asks for the ID.
 
 | Command | Calls |
 | --- | --- |
-| `biot login`, `biot logout` | Opens the account page, reads the pasted token, verifies with `/api/me` |
+| `biot login [SERVER_URL]`, `biot logout` | `login` uses the supplied server URL (or prompts for one), opens its account page, reads the pasted token, verifies with `/api/me`, and stores the URL and token; `logout` removes them |
 | `biot create --repo URL --name N [--node ID] [--layer SRC]... [--secret NAME]... [--fetch-credential URL]...` | With credentials: create stopped, deliver fetch credentials after allocation, await preparation, deliver runtime secrets, then start |
 | `biot list`, `biot show N`, `biot wait N` | Views and operation polling |
 | `biot start`, `stop`, `restart`, `rebuild`, `destroy` | Lifecycle; `restart` is stop, wait, start |
@@ -981,7 +1009,7 @@ the actor can read; an ambiguous name is an error that asks for the ID.
 | `biot fetch-credential set N URL [--stdin]`, `rm` | Source credentials; values come from a hidden prompt or stdin |
 | `biot diagnose N` | The current failure's diagnostic |
 | `biot logs N` | A bounded tail of runtime output |
-| `biot ssh N [-- COMMAND]` | Runs `ssh -p <port> <biot-id>@<host>` from `DeploymentView` |
+| `biot ssh N [--identity FILE] [-- COMMAND]` | Writes the advertised host keys from `DeploymentView` to a temporary `known_hosts`, then runs SSH with strict host-key checking and no global known-hosts file; refuses when no host key is advertised |
 | `biot ssh-key add FILE`, `list`, `rm` | SSH keys |
 | `biot token create`, `list`, `revoke` | Create opens the control account page; list and revoke use the API |
 | `biot nodes` | `NodeView` list |
@@ -1838,9 +1866,11 @@ so an application cannot replace Biot's authentication state. Bodies stream in
 both directions. The proxy validates the WebSocket request and upstream upgrade,
 then tunnels bytes through an HTTP adapter that exposes the upgraded connection.
 Upgrade headers receive protocol-specific handling before the switch; ordinary
-hop-by-hop removal must not destroy the handshake. Biot does not parse application
-WebSocket frames after the upgrade. Socket ownership and bounded flow control
-still govern the tunnel's lifetime.
+hop-by-hop removal must not destroy the handshake. After the upgrade Biot parses
+and bounds application WebSocket frames, reassembles fragmented messages up to
+`max_frame_bytes`, and forwards their opcodes and bytes without interpreting the
+application payload. Socket ownership and bounded flow control still govern the
+tunnel's lifetime.
 
 One stream serves one HTTP request or one WebSocket. Upstream is HTTP/1.1. The
 proxy renders small Biot pages for its own failures:
@@ -1849,9 +1879,12 @@ proxy renders small Biot pages for its own failures:
 | --- | --- |
 | Unknown hostname | 404, not published |
 | `forbidden` | 403, no view access, with a link to the control host |
+| `unauthenticated` or `unsupported_credential` | 401, sign in required |
 | `node_unavailable` or `agent_unreachable` | 503, the biot is not running |
 | `port_not_listening` | 502, nothing is listening on that port |
-| `too_many_streams` or `timeout` | 503, try again |
+| `too_large` | 413, the request is larger than this Biot accepts |
+| `too_many_streams` | 503, the Biot is busy; try again |
+| `timeout` | 503, the Biot did not answer in time; try again |
 
 ### Browser terminal
 
@@ -1866,13 +1899,14 @@ static asset of the control host, never from a preview host.
 
 ### SSH
 
-The server runs OTP's `ssh` daemon on a configured port with an operator-provided
-host key. Users connect with the Biot ID as the user name; `biot ssh` builds the
-command from `DeploymentView`.
+The server runs OTP's `ssh` daemon on a configured port with operator-provided host
+keys, at most one of each key type. Users connect with the Biot ID as the user name;
+`biot ssh` builds the command from `DeploymentView` and refuses to open a session
+unless the server advertises a host key to pin.
 
 | Daemon rule | Setting |
 | --- | --- |
-| Public key only | `auth_methods` is `publickey`; `SshKeys.authenticate` is the key callback |
+| Public key only | `auth_methods` is `publickey`; `KeyCallback` is the key callback and delegates offered keys to `SshKeys.authenticate` |
 | No forwarding | `tcpip_tunnel_in` and `tcpip_tunnel_out` stay false |
 | No file subsystems | `subsystems` is empty, so sftp is not offered |
 | One shell per channel | A custom `ssh_server_channel` bridges each session channel to one stream |
@@ -2164,9 +2198,9 @@ created atoms. Expected build and configuration failures are values, not
 supervisor restart signals.
 
 Operator configuration bounds containers, streams per node and per biot,
-session and credential lifetimes, secret size, buffers, assigned biots, and
-logs. Build concurrency and scratch growth bounds are v2. Disk exhaustion is
-reported. There is no
+session and credential lifetimes, buffers, assigned biots, and logs. The secret
+size limit is a protocol constant shared by both releases. Build concurrency
+and scratch growth bounds are v2. Disk exhaustion is reported. There is no
 fair-share scheduler, billing, capacity reservation, or tamper-evident audit
 system. The [diagnostic contract](#diagnostics-and-runtime-output) defines capture bounds.
 Unguessable tokens do not replace request, buffer, or resource bounds.
@@ -2214,8 +2248,8 @@ it can issue and renew leaf certificates. The operator can also supply an
 existing CA; the CA private key is never deployed to a node. `mix biot.certs`
 creates the authority once and issues or renews each leaf; renewal reuses the
 leaf key, so a peer's identity survives it. Reloading registrations permits peer-key replacement
-under the same Node ID. The SSH host key is any OpenSSH
-host key file the operator generates.
+under the same Node ID. The SSH host-key file may contain several OpenSSH host
+keys, at most one of each type; the operator generates the file.
 
 The edge reverse proxy has one job that never changes: terminate TLS for the
 control host and for `*.<publication domain>` with a wildcard certificate, and
@@ -2334,10 +2368,15 @@ Owner revokes Alice:
 ```text
 Alice:
   biot ssh-key add ~/.ssh/id_ed25519.pub
-  biot ssh checkout-flow   ->  ssh -p 2222 <b_1>@biot.example
+  biot ssh checkout-flow [--identity ~/.ssh/id_ed25519]
+    -> ssh -o StrictHostKeyChecking=yes
+          -o UserKnownHostsFile=<temporary advertised known_hosts>
+          -o GlobalKnownHostsFile=/dev/null
+          -p 2222 <b_1>@biot.example
+  (refuses if DeploymentView advertises no host key)
 
 Server ssh daemon:
-  key callback: SshKeys.authenticate(key) -> Authentication(alice, key k)
+  key callback: KeyCallback delegates SshKeys.authenticate(key) -> Authentication(alice, key k)
   session channel with pty-req and shell:
     register owner under biot, principal, and SSH key
     recheck key and principal; may_shell?(alice, b_1, shell_grants) at revision r
