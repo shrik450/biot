@@ -3,6 +3,14 @@ import Config
 # The server release reads this file at boot. Every setting is parsed here, so a release with a
 # bad setting stops before it serves anything.
 
+logger_level = System.get_env("BIOT_LOG_LEVEL", "info")
+
+logger_level =
+  Enum.find(Logger.levels(), &(Atom.to_string(&1) == logger_level)) ||
+    raise "BIOT_LOG_LEVEL must be one of #{inspect(Logger.levels())}; got #{inspect(logger_level)}"
+
+config :logger, level: logger_level
+
 alias Biot.Protocol.NodeId
 alias Biot.Protocol.Port
 alias Biot.Server.DomainName
@@ -127,15 +135,11 @@ config :biot_server,
   node_response_max_bytes: positive_integer.("BIOT_NODE_RESPONSE_MAX_BYTES", 256_000),
   stream_open_timeout_ms: positive_integer.("BIOT_STREAM_OPEN_TIMEOUT_MS", 30_000),
   max_frame_bytes: positive_integer.("BIOT_MAX_FRAME_BYTES", 1_000_000),
-  preview_request_max_bytes:
-    positive_integer.("BIOT_PREVIEW_REQUEST_MAX_BYTES", 8_000_000),
-  preview_request_chunk_bytes:
-    positive_integer.("BIOT_PREVIEW_REQUEST_CHUNK_BYTES", 65_536),
+  preview_request_max_bytes: positive_integer.("BIOT_PREVIEW_REQUEST_MAX_BYTES", 8_000_000),
+  preview_request_chunk_bytes: positive_integer.("BIOT_PREVIEW_REQUEST_CHUNK_BYTES", 65_536),
   preview_head_max_bytes: positive_integer.("BIOT_PREVIEW_HEAD_MAX_BYTES", 65_536),
-  preview_exchange_timeout_ms:
-    positive_integer.("BIOT_PREVIEW_EXCHANGE_TIMEOUT_MS", 30_000),
-  preview_handshake_timeout_ms:
-    positive_integer.("BIOT_PREVIEW_HANDSHAKE_TIMEOUT_MS", 10_000)
+  preview_exchange_timeout_ms: positive_integer.("BIOT_PREVIEW_EXCHANGE_TIMEOUT_MS", 30_000),
+  preview_handshake_timeout_ms: positive_integer.("BIOT_PREVIEW_HANDSHAKE_TIMEOUT_MS", 10_000)
 
 config :biot_web, trusted_edge_peers: trusted_edge_peers
 

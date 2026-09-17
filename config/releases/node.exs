@@ -3,6 +3,14 @@ import Config
 # The node release reads this file at boot. Build support is not a setting: the release carries
 # the Nix and agent sources it was built with, under the node app's `priv/build_support`.
 
+logger_level = System.get_env("BIOT_LOG_LEVEL", "info")
+
+logger_level =
+  Enum.find(Logger.levels(), &(Atom.to_string(&1) == logger_level)) ||
+    raise "BIOT_LOG_LEVEL must be one of #{inspect(Logger.levels())}; got #{inspect(logger_level)}"
+
+config :logger, level: logger_level
+
 alias Biot.Protocol.RegistrationId
 
 required = fn name ->
