@@ -92,9 +92,16 @@ defmodule BiotWeb.Api.Json do
   def encode(%SecretView{} = secret), do: %{"name" => to_string(secret.name)}
 
   def encode(%DeploymentView{} = deployment) do
+    ssh = %{"host" => deployment.ssh.host, "port" => deployment.ssh.port}
+
+    ssh =
+      if is_nil(deployment.ssh_host_keys),
+        do: ssh,
+        else: Map.put(ssh, "host_keys", Enum.map(deployment.ssh_host_keys, &ssh_host_key/1))
+
     %{
       "publication_domain" => deployment.publication_domain,
-      "ssh" => %{"host" => deployment.ssh.host, "port" => deployment.ssh.port}
+      "ssh" => ssh
     }
   end
 
@@ -125,6 +132,14 @@ defmodule BiotWeb.Api.Json do
       "public_key" => to_string(key.public_key),
       "fingerprint" => key.fingerprint,
       "label" => key.label
+    }
+  end
+
+  defp ssh_host_key(host_key) do
+    %{
+      "type" => host_key.type,
+      "public_key" => host_key.public_key,
+      "fingerprint" => host_key.fingerprint
     }
   end
 

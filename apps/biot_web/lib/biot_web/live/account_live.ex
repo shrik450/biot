@@ -10,6 +10,7 @@ defmodule BiotWeb.Live.AccountLive do
   alias Biot.Server.CommandError
   alias Biot.Server.Credentials
   alias Biot.Server.Principals
+  alias Biot.Server.Queries.Deployment
   alias Biot.Server.Queries.PrincipalView
   alias Biot.Server.Sessions
   alias Biot.Server.SshKeys
@@ -34,6 +35,7 @@ defmodule BiotWeb.Live.AccountLive do
       |> assign(:label, "")
       |> assign(:expires_at, "")
       |> assign(:principal_state, :loading)
+      |> assign(:deployment_state, :loading)
       |> assign(:credentials_state, :loading)
       |> assign(:ssh_keys_state, :loading)
       |> assign(:ssh_key_label, "")
@@ -197,6 +199,9 @@ defmodule BiotWeb.Live.AccountLive do
         :ssh_key_summary,
         UserMessage.summary(assigns.ssh_key_error, [:label, :public_key])
       )
+      |> assign(:deployment_loaded?, match?({:loaded, _deployment}, assigns.deployment_state))
+      |> assign(:host_keys, deployment_host_keys(assigns.deployment_state))
+      |> assign(:ssh_endpoint, ssh_endpoint(assigns.deployment_state))
 
     ~H"""
     <.app_shell
@@ -555,6 +560,55 @@ defmodule BiotWeb.Live.AccountLive do
           </table>
         </div>
       </section>
+
+      <section class="surface" aria-labelledby="host-keys-heading">
+        <div class="section-heading">
+          <div>
+            <h2 id="host-keys-heading">ssh host keys</h2>
+            <p class="section-description">
+              <code translate="no">biot ssh</code> checks these keys for you.
+            </p>
+          </div>
+        </div>
+        <div :if={match?({:error, _reason}, @deployment_state)} class="error-state" role="alert">
+          <p>ssh host keys could not be loaded.</p>
+          <p class="muted">{UserMessage.error(@deployment_state)}</p>
+          <p class="muted">Reload this page to try again.</p>
+        </div>
+        <div :if={@deployment_loaded? and @host_keys == []} class="empty-state">
+          <p>This server has no SSH host key configured.</p>
+          <p class="muted">
+            Plain <code translate="no">ssh</code> cannot be used until the server's SSH host keys
+            are configured. <code translate="no">biot ssh</code> reports the same.
+          </p>
+        </div>
+        <div :if={@host_keys != []}>
+          <p class="section-description">
+            To use plain <code translate="no">ssh</code>, connect to
+            <code translate="no">{@ssh_endpoint}</code>
+            as the Biot's ID and compare the <code translate="no">SHA256:</code>
+            fingerprint your client prints on the first
+            connection with one of these keys.
+          </p>
+          <div class="table-wrap">
+            <table class="data-table">
+              <caption class="sr-only">SSH host keys</caption>
+              <thead>
+                <tr>
+                  <th scope="col">type</th>
+                  <th scope="col">fingerprint</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={host_key <- @host_keys}>
+                  <td class="breakable" translate="no">{host_key.type}</td>
+                  <td class="breakable" translate="no">{host_key.fingerprint}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </.app_shell>
     """
   end
@@ -562,6 +616,7 @@ defmodule BiotWeb.Live.AccountLive do
   defp load_account(socket, actor) do
     socket
     |> assign(:principal_state, load_principal(actor))
+    |> assign(:deployment_state, load_deployment(actor))
     |> assign(:credentials_state, load_credentials(actor))
     |> assign(:ssh_keys_state, load_ssh_keys(actor))
     |> assign(:session_expires_at, Sessions.expires_at(socket.assigns.authentication))
@@ -570,6 +625,13 @@ defmodule BiotWeb.Live.AccountLive do
   defp load_principal(actor) do
     case Principals.get(actor) do
       {:ok, %PrincipalView{} = principal} -> {:loaded, principal}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp load_deployment(actor) do
+    case Deployment.get(actor) do
+      {:ok, deployment} -> {:loaded, deployment}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -593,6 +655,11 @@ defmodule BiotWeb.Live.AccountLive do
   defp credential_rows(_state), do: []
   defp ssh_key_rows({:loaded, ssh_keys}), do: ssh_keys
   defp ssh_key_rows(_state), do: []
+  defp deployment_host_keys({:loaded, deployment}), do: deployment.ssh_host_keys || []
+  defp deployment_host_keys(_state), do: []
+
+  defp ssh_endpoint({:loaded, deployment}), do: "#{deployment.ssh.host}:#{deployment.ssh.port}"
+  defp ssh_endpoint(_state), do: nil
 
   defp ssh_key_present?(state, id) do
     Enum.any?(ssh_key_rows(state), &(to_string(&1.id) == id))

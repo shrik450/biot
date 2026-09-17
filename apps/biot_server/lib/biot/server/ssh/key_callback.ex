@@ -3,11 +3,17 @@ defmodule Biot.Server.Ssh.KeyCallback do
   The SSH daemon's public key callback.
 
   `validate/1` reads and decodes the operator's OpenSSH host key file once, at boot, and returns the
-  decoded keys and the host key algorithms they support. `host_key/2` selects from that pinned value
-  in `:key_cb_private`. Pinning matters because a file re-read on each handshake would let a replaced
-  file change the host key a running daemon serves, and every client that already pinned the old key
-  would then fail. `is_auth_key/3` authenticates the offered public key against `SshKeys` and records
-  the connection's authentication under its key, so removing the key can close the live connection.
+  decoded keys, the host key algorithms they support, and the host keys the deployment API
+  advertises. `host_key/2` selects from that pinned value in `:key_cb_private`. Pinning matters
+  because a file re-read on each handshake would let a replaced file change the host key a running
+  daemon serves, and every client that already pinned the old key would then fail. `is_auth_key/3`
+  authenticates the offered public key against `SshKeys` and records the connection's authentication
+  under its key, so removing the key can close the live connection.
+
+  The same key listed twice is dropped in silence; two different keys of one type are refused. The
+  repeat still names one key, so it is not an error, while the clash is: the daemon selects one key
+  per offered algorithm and the deployment API advertises by type, so serving either of two would
+  be a choice the operator did not make.
   """
 
   @behaviour :ssh_server_key_api
@@ -15,6 +21,22 @@ defmodule Biot.Server.Ssh.KeyCallback do
   alias Biot.Protocol.SshPublicKey
   alias Biot.Server.Ssh.Authentications
   alias Biot.Server.SshKeys
+
+  @type host_key :: %{
+          type: String.t(),
+          public_key: String.t(),
+          fingerprint: String.t()
+        }
+
+  @type pinned :: %{keys: [term()], algorithms: [atom()], host_keys: [host_key()]}
+
+  @typedoc "Why `validate/1` refused the operator's host key file."
+  @type reason ::
+          :missing_host_key_file
+          | {:unreadable_host_key_file, File.posix()}
+          | :invalid_host_key_file
+          | :unsupported_host_key_type
+          | {:duplicate_host_key_type, String.t()}
 
   @impl true
   def host_key(algorithm, options) do
@@ -34,29 +56,104 @@ defmodule Biot.Server.Ssh.KeyCallback do
 
   @doc """
   Reads and decodes the operator's host key once, so boot fails on an unusable file, and returns
-  the pinned keys and the host key algorithms the daemon should offer.
+  the pinned keys, the host key algorithms the daemon should offer, and the host keys to advertise.
+
+  Each way the file can be unusable is its own reason; none of them is flattened into a general one,
+  because the operator's next step differs for each.
   """
-  @spec validate(String.t()) :: {:ok, %{keys: [term()], algorithms: [atom()]}} | {:error, term()}
+  @spec validate(String.t()) :: {:ok, pinned()} | {:error, reason()}
   def validate(path) do
-    with {:ok, keys} <- decode(path),
-         algorithms =
-           keys
-           |> Enum.flat_map(fn {key, _attrs} -> algorithms(key) end)
-           |> Enum.uniq(),
-         true <- algorithms != [] do
-      {:ok, %{keys: keys, algorithms: algorithms}}
-    else
-      _unusable -> {:error, :invalid_host_key}
+    with {:ok, keys} <- read(path),
+         {:ok, host_keys} <- build_public_keys(keys),
+         {:ok, algorithms} <- supported_algorithms(keys),
+         :ok <- unique_key_types(host_keys) do
+      {:ok, %{keys: keys, algorithms: algorithms, host_keys: host_keys}}
     end
   end
 
-  defp decode(path) do
-    with {:ok, bytes} <- File.read(path),
-         keys when is_list(keys) <- :ssh_file.decode(bytes, :public_key) do
-      {:ok, keys}
-    else
-      {:error, reason} -> {:error, reason}
-      _unusable -> {:error, :invalid_host_key}
+  @doc "The sentence an operator reads at boot for a host key file `validate/1` refused."
+  @spec message(String.t(), reason()) :: String.t()
+  def message(path, :missing_host_key_file),
+    do:
+      "the SSH host key file #{path} does not exist; point BIOT_SSH_HOST_KEY_FILE at an existing OpenSSH private key"
+
+  def message(path, {:unreadable_host_key_file, reason}),
+    do:
+      "the SSH host key file #{path} could not be read: #{to_string(:file.format_error(reason))}; give the service user read access"
+
+  def message(path, :invalid_host_key_file),
+    do: "the SSH host key file #{path} is not a valid OpenSSH private key"
+
+  def message(path, :unsupported_host_key_type),
+    do:
+      "the SSH host key file #{path} has no host key of a type Biot serves; use RSA, Ed25519, or ECDSA"
+
+  def message(path, {:duplicate_host_key_type, type}),
+    do:
+      "the SSH host key file #{path} has two #{type} keys; keep at most one host key of each type"
+
+  defp read(path) do
+    case File.read(path) do
+      {:ok, bytes} -> decode(bytes)
+      {:error, :enoent} -> {:error, :missing_host_key_file}
+      {:error, reason} -> {:error, {:unreadable_host_key_file, reason}}
+    end
+  end
+
+  defp decode(bytes) do
+    case :ssh_file.decode(bytes, :public_key) do
+      keys when is_list(keys) -> {:ok, keys}
+      {:error, _reason} -> {:error, :invalid_host_key_file}
+    end
+  end
+
+  defp build_public_keys(keys), do: Enum.reduce_while(keys, {:ok, []}, &add_public_key/2)
+
+  # A repeated fingerprint names one key, so it is dropped rather than refused.
+  # `unique_key_types/1` refuses the other case, two different keys of one type.
+  defp add_public_key({key, _attrs}, {:ok, public_keys}) do
+    case to_ssh_public_key(key) do
+      {:ok, %SshPublicKey{} = public_key} ->
+        entry = public_key_entry(public_key)
+
+        if Enum.any?(public_keys, &(&1.fingerprint == entry.fingerprint)),
+          do: {:cont, {:ok, public_keys}},
+          else: {:cont, {:ok, public_keys ++ [entry]}}
+
+      {:error, _reason} ->
+        {:halt, {:error, :invalid_host_key_file}}
+    end
+  end
+
+  defp public_key_entry(%SshPublicKey{} = public_key) do
+    %{
+      type: public_key.line |> String.split() |> hd(),
+      public_key: public_key.line,
+      fingerprint: public_key.fingerprint
+    }
+  end
+
+  defp supported_algorithms(keys) do
+    supported =
+      keys
+      |> Enum.flat_map(fn {key, _attrs} -> algorithms(key) end)
+      |> Enum.uniq()
+
+    case supported do
+      [] -> {:error, :unsupported_host_key_type}
+      supported -> {:ok, supported}
+    end
+  end
+
+  # Two different keys of one type are refused because `host_key/2` selects one for an offered
+  # algorithm and `Daemon.host_keys/0` advertises by type, so either key would be a silent choice.
+  # `add_public_key/2` drops the harmless case, the same fingerprint twice.
+  defp unique_key_types(host_keys) do
+    types = Enum.map(host_keys, & &1.type)
+
+    case types -- Enum.uniq(types) do
+      [] -> :ok
+      [duplicate | _rest] -> {:error, {:duplicate_host_key_type, duplicate}}
     end
   end
 

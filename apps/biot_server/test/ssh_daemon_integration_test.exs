@@ -4,7 +4,7 @@ defmodule Biot.Server.SshDaemonIntegrationTest do
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.ShellFrame
   alias Biot.Server.{AccessHarness, SshKeys}
-  alias Biot.Server.Ssh.Daemon
+  alias Biot.Server.Ssh.{Daemon, KeyCallback}
   alias Biot.Server.TestFixtures
 
   @timeout 8_000
@@ -21,12 +21,26 @@ defmodule Biot.Server.SshDaemonIntegrationTest do
       assert output == ""
     end
 
+    erlang_user_dir = Path.join(directory, "erlang-client")
+    File.mkdir_p!(erlang_user_dir)
+    File.cp!(user_key, Path.join(erlang_user_dir, "id_ed25519"))
+
     on_exit(fn -> File.rm_rf!(directory) end)
 
-    %{host_key: host_key, user_key: user_key, unknown_key: unknown_key}
+    %{
+      host_key: host_key,
+      user_key: user_key,
+      unknown_key: unknown_key,
+      erlang_user_dir: erlang_user_dir
+    }
   end
 
-  setup %{host_key: host_key, user_key: user_key, unknown_key: unknown_key} do
+  setup %{
+    host_key: host_key,
+    user_key: user_key,
+    unknown_key: unknown_key,
+    erlang_user_dir: erlang_user_dir
+  } do
     previous_host_key = Application.get_env(:biot_server, :ssh_host_key_file)
     previous_port = Application.get_env(:biot_server, :ssh_port)
     port = free_port()
@@ -62,7 +76,8 @@ defmodule Biot.Server.SshDaemonIntegrationTest do
       user: BiotId.to_string(biot.id),
       key: key,
       user_key: user_key,
-      unknown_key: unknown_key
+      unknown_key: unknown_key,
+      erlang_user_dir: erlang_user_dir
     }
   end
 
@@ -176,6 +191,49 @@ defmodule Biot.Server.SshDaemonIntegrationTest do
     assert status != 0
   end
 
+  test "closed stdin cannot hide a stream that the peer already closed", context do
+    command = ssh_command(context, context.user_key, ["--", "cat"])
+
+    task =
+      Task.async(fn ->
+        System.cmd("sh", ["-c", command <> " < /dev/null"], stderr_to_stdout: true)
+      end)
+
+    open = AccessHarness.await_open(context.peer)
+    attach = AccessHarness.attach(context.peer, open.stream_id)
+    assert :ok = :ssl.close(attach)
+
+    assert {_output, status} = Task.await(task, @timeout)
+    assert status != 0
+  end
+
+  test "an Erlang SSH client receives EOF when the agent stream is lost", context do
+    {:ok, connection} =
+      :ssh.connect(~c"127.0.0.1", context.port, erlang_ssh_options(context), @timeout)
+
+    on_exit(fn -> :ssh.close(connection) end)
+
+    {:ok, channel} = :ssh_connection.session_channel(connection, @timeout)
+    client = start_erlang_exec(connection, channel)
+    on_exit(fn -> send(client, :stop) end)
+
+    open = AccessHarness.await_open(context.peer)
+    attach = AccessHarness.attach(context.peer, open.stream_id)
+    assert_receive {:erlang_exec, ^client, :success}, @timeout
+    assert :ok = :ssl.close(attach)
+
+    events = await_ssh_channel(connection, channel, [])
+    assert {:exit_status, channel, 255} in events
+    assert {:eof, channel} in events
+  end
+
+  test "host-key selection fails closed for an unsupported algorithm", context do
+    {:ok, pinned} = KeyCallback.validate(context.host_key)
+    options = [key_cb_private: [pinned: pinned]]
+
+    assert KeyCallback.host_key(:"ecdsa-sha2-nistp256", options) == {:error, :no_key_found}
+  end
+
   test "the daemon keeps serving its pinned host key after the file is rotated", context do
     original = ssh_keyscan(context.port)
     rotated = Path.join(Path.dirname(context.host_key), "rotated-host")
@@ -227,6 +285,49 @@ defmodule Biot.Server.SshDaemonIntegrationTest do
       "-o",
       "ConnectTimeout=3"
     ]
+  end
+
+  defp erlang_ssh_options(context) do
+    [
+      user: String.to_charlist(context.user),
+      user_dir: String.to_charlist(context.erlang_user_dir),
+      silently_accept_hosts: true,
+      user_interaction: false,
+      connect_timeout: @timeout
+    ]
+  end
+
+  defp await_ssh_channel(connection, channel, events) do
+    receive do
+      {:erlang_ssh_event, ^connection, {:closed, ^channel}} ->
+        Enum.reverse([{:closed, channel} | events])
+
+      {:erlang_ssh_event, ^connection, message} ->
+        await_ssh_channel(connection, channel, [message | events])
+    after
+      @timeout -> flunk("Erlang SSH channel did not close: #{inspect(events)}")
+    end
+  end
+
+  defp start_erlang_exec(connection, channel) do
+    parent = self()
+
+    spawn(fn ->
+      result = :ssh_connection.exec(connection, channel, ~c"cat", @timeout)
+      send(parent, {:erlang_exec, self(), result})
+      relay_erlang_ssh_events(parent, connection)
+    end)
+  end
+
+  defp relay_erlang_ssh_events(parent, connection) do
+    receive do
+      {:ssh_cm, ^connection, message} ->
+        send(parent, {:erlang_ssh_event, connection, message})
+        relay_erlang_ssh_events(parent, connection)
+
+      :stop ->
+        :ok
+    end
   end
 
   defp ssh_keyscan(port) do

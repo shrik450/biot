@@ -196,8 +196,6 @@ defmodule Biot.Server.Ssh.Channel do
 
   defp fold_events([{:exit, status} | _rest], state), do: exit_channel(state, status)
   defp fold_events([:lost | _rest], state), do: lost_channel(state)
-  # A close without a preceding exit frame is a lost session, never a success.
-  defp fold_events([:closed | _rest], state), do: lost_channel(state)
 
   defp arm(state) do
     case Streams.ask(state.stream) do
