@@ -94,4 +94,42 @@ defmodule Biot.Node.Host.FileSystem do
       end
     end)
   end
+
+  @doc """
+  The physical path `path` names, with every symlink in it followed.
+
+  A relative symlink means different things to the kernel and to `File.cp_r/3`: the kernel resolves
+  it against the directory that physically holds it, while `File.cp_r/3` resolves it lexically
+  against the path it was reached by. A directory reached through another symlink therefore copies
+  its inner links from the wrong base. Resolving once here means every later call sees the physical
+  directory and the two agree. `path` is absolute; only the final physical path is normalized,
+  because normalizing the input first would collapse a `..` that the kernel resolves physically.
+  """
+  @spec real_path(String.t()) :: String.t()
+  def real_path(path), do: path |> resolve(0) |> Path.expand()
+
+  # Each component is checked in turn, so the link is whichever component is one rather than a guess
+  # about the shape of the path. `physical` holds only components already followed; the kernel's own
+  # limit is 40 links, so a longer chain is left for the caller's operation to fail on.
+  defp resolve(path, depth) when depth >= 40, do: path
+
+  defp resolve(path, depth) do
+    ["/" | components] = Path.split(path)
+    follow("/", components, depth)
+  end
+
+  defp follow(physical, [], _depth), do: physical
+
+  defp follow(physical, [component | rest], depth) do
+    candidate = Path.join(physical, component)
+
+    case :file.read_link(candidate) do
+      {:ok, target} ->
+        target = if Path.type(target) == :absolute, do: target, else: Path.join(physical, target)
+        resolve(Path.join([target | rest]), depth + 1)
+
+      _not_a_link ->
+        follow(candidate, rest, depth)
+    end
+  end
 end

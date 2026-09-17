@@ -31,6 +31,7 @@ defmodule Biot.Node.Host.Config do
   """
 
   alias Biot.Node.Host.Command
+  alias Biot.Node.Host.FileSystem
   alias Biot.Protocol.Platform
 
   @enforce_keys [
@@ -157,7 +158,8 @@ defmodule Biot.Node.Host.Config do
          sleep_executable: sleep_executable,
          podman_network_command: podman_network_command,
          builder_image: builder_image,
-         build_support_dir: Application.app_dir(:biot_node, "priv/build_support"),
+         build_support_dir:
+           FileSystem.real_path(Application.app_dir(:biot_node, "priv/build_support")),
          fetch_ca_bundle: fetch_ca_bundle,
          binary_cache_urls: binary_cache_urls,
          binary_cache_keys: binary_cache_keys,

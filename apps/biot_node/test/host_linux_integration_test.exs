@@ -6,6 +6,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   alias Biot.Node.DataRootLock
   alias Biot.Node.Host
   alias Biot.Node.Host.Command
+  alias Biot.Node.Host.Config
   alias Biot.Node.Host.ContainerEvents
   alias Biot.Node.Host.Environment, as: HostEnvironment
   alias Biot.Node.Host.Inspection
@@ -24,6 +25,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   alias Biot.Node.Repo
   alias Biot.Node.RetryState
   alias Biot.Node.StorePath
+  alias Biot.Node.TestHostRange
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.BiotSpec
   alias Biot.Protocol.Desired
@@ -78,7 +80,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
     on_exit(fn ->
       if Port.info(server), do: Port.close(server)
-      :persistent_term.erase(Biot.Node.Host.Config)
+      :persistent_term.erase(Config)
       remove_all_test_containers(settings)
       File.chmod(data_root, 0o700)
       System.cmd("podman", ["unshare", "chown", "-R", "0:0", data_root], stderr_to_stdout: true)
@@ -215,7 +217,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     assert Host.inspect_state(biot_id, host).container == settled.container
 
     bundle = bundle(host, environment_id)
-    curl = curl_executable(bundle)
+    curl = curl_executable(host, bundle)
 
     assert eventually(fn ->
              container_curl(host, first_container, curl, "GET", "/") == {"", 0}
@@ -311,6 +313,9 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     assert {:run, {:resolve, ^broken_environment, _, _} = resolve} = decision(broken, host)
     assert :ok = Host.run(resolve, host)
 
+    # The allocation was initialized earlier in this test, so re-read it before pinning it.
+    allocation = Journal.allocation(biot_id)
+
     assert {:run, {:prepare, ^broken_environment, _manifest, ^allocation} = prepare} =
              decision(broken, host)
 
@@ -401,7 +406,13 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     before = MapSet.new(Path.wildcard(Path.join(System.tmp_dir!(), "biot-command-*")))
     Application.put_env(:biot_node, :podman_executable, executable)
 
-    on_exit(fn -> Application.put_env(:biot_node, :podman_executable, previous) end)
+    # The reader reads `Host.Config`, which the module setup loaded. Reload so the override reaches it.
+    {:ok, _config} = Config.load()
+
+    on_exit(fn ->
+      Application.put_env(:biot_node, :podman_executable, previous)
+      {:ok, _config} = Config.load()
+    end)
 
     reader = start_supervised!(ContainerEvents)
     Process.sleep(1_500)
@@ -409,8 +420,15 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     assert Process.alive?(reader)
     assert Process.whereis(ContainerEvents) == reader
 
-    after_files = MapSet.new(Path.wildcard(Path.join(System.tmp_dir!(), "biot-command-*")))
-    assert MapSet.difference(after_files, before) == MapSet.new()
+    # The reader opens a new stream every retry interval, and a live stream legitimately owns its
+    # files, so wait for a quiet moment rather than racing one. A stream that was not released
+    # would leave its files behind forever and time this wait out.
+    assert eventually(fn ->
+             MapSet.difference(
+               MapSet.new(Path.wildcard(Path.join(System.tmp_dir!(), "biot-command-*"))),
+               before
+             ) == MapSet.new()
+           end)
   end
 
   test "a cancelled worker has the real isolated spec and leaves its store usable" do
@@ -614,7 +632,11 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     assert actual_mounts == expected_mounts
     assert inspection["HostConfig"]["ReadonlyRootfs"]
     assert inspection["HostConfig"]["Tmpfs"] |> Map.keys() |> Enum.sort() == ["/run", "/tmp"]
-    assert StorePath.to_string(bundle.rootfs) in inspection["Config"]["CreateCommand"]
+
+    assert PrivateStore.host_path(host.config, biot_id, bundle.rootfs) in inspection["Config"][
+             "CreateCommand"
+           ]
+
     refute File.exists?(Path.join(Paths.biot(host.config, biot_id), "rootfs"))
 
     socket_path = Path.join(Paths.run(host.config, biot_id), "agent.sock")
@@ -632,8 +654,12 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
                                                  allocation.uid_range.count - 1)
   end
 
-  defp curl_executable(bundle) do
-    environment = bundle.environment_file |> StorePath.to_string() |> File.read!()
+  defp curl_executable(host, bundle) do
+    environment =
+      host.config
+      |> PrivateStore.host_path(host.biot_id, bundle.environment_file)
+      |> File.read!()
+
     [path] = Regex.run(~r{/nix/store/[^\s:'"]*curl[^\s:'"]*/bin}, environment)
     Path.join(path, "curl")
   end
@@ -1020,12 +1046,14 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   end
 
   defp host_settings(data_root, fetch_ca_bundle) do
+    {uid_start, uid_count} = TestHostRange.subordinate_ids()
+
     [
       data_root: data_root,
       fetch_ca_bundle: fetch_ca_bundle,
-      uid_range_base: 100_000,
+      uid_range_base: uid_start,
       uid_range_count: 1_024,
-      uid_range_limit: 165_536,
+      uid_range_limit: uid_start + uid_count,
       git_executable: "git",
       podman_executable: "podman",
       podman_network_command: "slirp4netns",

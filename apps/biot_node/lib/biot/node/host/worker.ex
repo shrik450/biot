@@ -217,6 +217,13 @@ defmodule Biot.Node.Host.Worker do
   # but without `SYS_ADMIN` the build gets as far as naming its sandbox host and fails there.
   # Both act only within the worker's user namespace, over the allocation's mapped range.
   #
+  # The label is the third option, and it is the worker declaring what it is rather than the node
+  # inspecting the host. A sandboxed build mounts a fresh `/proc`, and the stock SELinux policy
+  # lets `container_t` remount `/proc` but never mount it: `container_t` is a plain container, and
+  # the policy reserves the mount machinery for `container_engine_t`, the type for a container
+  # engine running inside a container. That is what a worker is, whether or not the host has
+  # SELinux; where it does not, Podman ignores the label and the container is unconfined.
+  #
   # The image root is read only: a worker's writable state is the mounts it was given, and the
   # image paths Nix still writes to get a fresh tmpfs each run.
   defp podman_arguments(config, %Spec{} = spec) do
@@ -230,6 +237,8 @@ defmodule Biot.Node.Host.Worker do
       spec.network,
       "--security-opt",
       "unmask=/proc/*",
+      "--security-opt",
+      "label=type:container_engine_t",
       "--cap-add",
       "SYS_ADMIN",
       "--log-driver",

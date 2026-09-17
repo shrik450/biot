@@ -16,6 +16,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
   alias Biot.Node.Journal.Migrator
   alias Biot.Node.Repo
   alias Biot.Node.SecretRequest
+  alias Biot.Node.TestHostRange
   alias Biot.Protocol.AuthorizationValue
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.BiotSpec
@@ -551,11 +552,13 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
   end
 
   defp host_settings(data_root) do
+    {uid_start, uid_count} = TestHostRange.subordinate_ids()
+
     [
       data_root: data_root,
-      uid_range_base: 100_000,
+      uid_range_base: uid_start,
       uid_range_count: 1_024,
-      uid_range_limit: 165_536,
+      uid_range_limit: uid_start + uid_count,
       git_executable: "git",
       podman_executable: "podman",
       podman_network_command: "slirp4netns",
