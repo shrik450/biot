@@ -18,6 +18,9 @@ defmodule BiotWeb.Components.Publication do
 
   @spec publication_panel(map()) :: Phoenix.LiveView.Rendered.t()
   def publication_panel(assigns) do
+    assigns =
+      assign(assigns, :publish_summary, UserMessage.summary(assigns.publish_error, [:port]))
+
     ~H"""
     <section class="surface publication-panel" aria-labelledby="publications-heading">
       <div class="section-heading">
@@ -151,7 +154,7 @@ defmodule BiotWeb.Components.Publication do
           publish
         </button>
       </form>
-      <p :if={@publish_error} class="form-error" role="alert">{UserMessage.error(@publish_error)}</p>
+      <p :if={@publish_summary} class="form-error" role="alert">{@publish_summary}</p>
     </section>
     """
   end

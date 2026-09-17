@@ -1,6 +1,13 @@
 defmodule BiotWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :biot_web
 
+  # Request identity and the client address come first, so the host dispatch and the app agree on
+  # the caller. The dispatch then decides before any socket, static file, parser, or router plug.
+  plug Plug.RequestId
+  plug :put_client_address
+  plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
+  plug BiotWeb.Plugs.HostDispatch
+
   socket "/live", Phoenix.LiveView.Socket,
     websocket: [
       check_origin: {BiotWeb.Plugs.ControlOrigin, :socket_origin?, []},
@@ -33,11 +40,6 @@ defmodule BiotWeb.Endpoint do
     plug Phoenix.LiveReloader
     plug Phoenix.CodeReloader
   end
-
-  plug Plug.RequestId
-  # Before telemetry, so request logs and metrics see the client rather than the edge.
-  plug :put_client_address
-  plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],

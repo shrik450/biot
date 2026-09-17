@@ -4,10 +4,10 @@
 
 - `apps/biot_protocol` owns shared parsed values and wire codecs.
 - `apps/biot_server` owns server modules, queries, policy, and the server database.
-- `apps/biot_web` owns the Phoenix HTTP API, the LiveView UI, and the browser terminal.
+- `apps/biot_web` owns the Phoenix HTTP API, the LiveView UI, the browser terminal, and the preview proxy.
 - `apps/biot_node` owns reconciliation, host effects, environment handling, and container sessions.
 - `nix/` owns the module schema, the `build.nix` entry point, and example layers. `nix/README.md` holds the build contract for the node host layer.
-- `cli` contains the Go command-line client.
+- `cli` contains the Go command-line client and its vendored `golang.org/x/term` and `golang.org/x/sys`.
 - `config` contains shared Mix and runtime configuration.
 - `docker/linux-host` contains the Linux host image for node host tests.
 - `agent/` contains the Go agent and its vendored dependencies.
@@ -155,9 +155,10 @@ A new status cannot compile until all six functions answer it.
 `Actor` is the authenticated caller.
 `CommandError` is the model's error union.
 `CommandError` includes `destroyed` for lifecycle changes against a destroyed Biot.
-`DomainName` parses the control host and publication domain and enforces that no preview hostname
-can overlap the control host. `Login.Settings` parses the required HTTPS OIDC configuration once at
-release boot.
+`DomainName` parses the control host and publication domain, enforces that no preview hostname can
+overlap the control host, and `classify/3` is the one host-dispatch read: it returns `:control`,
+`{:preview, hostname}`, or `:unknown` for one request `Host`. `within?/2` is the boot-time
+overlap check. `Login.Settings` parses the required HTTPS OIDC configuration once at release boot.
 
 ### Application modules
 
@@ -178,7 +179,7 @@ release boot.
 - `Authorization` owns the `grants` and `role` types and the pure role and policy predicates.
 - `NodeConnections` is a thin layer over `Control.Registry`, the one node membership table. The key is the node ID, the process is the control connection, and the value is the connection ID and state. Only the owning control process writes its entry, through `put/2` and `delete/1`. The entry leaves the Registry when that process exits. `current/1`, `connection_pid/1`, `ready/1`, and `ready_connection/1` skip an entry whose process is already dead.
 - `NodeWake` provides one PubSub topic per node, plus `spec_changed/2` and `subscribe/1`.
-- `BiotChange` provides one PubSub topic per Biot, plus `changed/1`, `subscribe/1`, and `unsubscribe/1`. A browser reader subscribes to the Biot its page shows and reloads its authorized projection on `{:biot_changed, biot_id}`.
+- `BiotChange` provides one PubSub topic per Biot, plus `changed/1`, `subscribe/1`, and `unsubscribe/1`. A browser reader subscribes to the Biot its page shows and reloads its authorized projection on `{:biot_changed, biot_id}`. An admission that meets a `stale_access` refusal subscribes too, so the node's applied revision wakes it without polling.
 - `CommitEffects` is the one post-commit fence: `enforce/1` takes a `%CommitEffects{owners:, wakes:, readers:}` struct, closes owners, wakes nodes, then notifies readers, in that order. It is the only caller of `BiotChange.changed/1`, so no reader notification can fire before a commit.
 - `Delivery` owns the one delivery rule: the caller must own a non-destroyed Biot whose assigned node is ready, and it returns that node's live connection.
 - `Secrets` delivers, removes, and lists runtime secrets. Delivery commits `direct_secret_exposure_possible` before sending, notifies the Biot's readers after that commit, and that historical marker is never cleared. `FetchCredentials` uses the same delivery rule but does not set the marker, queue work, or make a durable server write; its effect reaches readers with the next observation. `Queries.SecretView` projects the names returned by `list/2`.
@@ -257,8 +258,11 @@ records which closes reach each owner.
 Registration comes before the snapshot read, so a withdrawal that commits later
 finds the owner. A close that arrives during any step stops the admission with
 `forbidden`, and closes the stream if it is already open. A `stale_access`
-refusal reads the snapshot once more and opens again within the same deadline. A
-second `stale_access` returns `timeout` and sends no third open. A node's
+refusal subscribes to the Biot's `BiotChange` topic and then repeats one pair:
+read the snapshot again and open again. A snapshot that now denies returns
+`forbidden` at once; each later `{:biot_changed, biot_id}` repeats the pair. One
+deadline of `stream_open_timeout_ms`, set once when admission starts, bounds the
+whole wait, so a retry cannot outlive the timeout the caller agreed to. A node's
 `unknown_biot` becomes `not_found`. Any failure unregisters the process.
 
 `Access.handle_owner_message/2` handles each message an owner receives while it holds a
@@ -346,8 +350,9 @@ credentials at or past their expiry.
 canonical line and fingerprint, and maps a duplicate fingerprint to
 `already_registered`. `authenticate/1` takes a parsed `%SshPublicKey{}` and finds
 only a key of an enabled principal. `list/1` and `remove/2` scope to the actor.
-After its delete commits, `remove/2` closes the session owners of that key.
-`Queries.SshKeyView` is the projection.
+After its delete commits, `remove/2` closes the session owners of that key and
+closes every live SSH connection authenticated with it, through
+`Ssh.Authentications.connections/1` and `:ssh.close/1`. `Queries.SshKeyView` is the projection.
 
 `PreviewHandoff` owns single-use preview codes. `begin/4` requires a live control
 proof and view authority for an active publication. `finish/3` checks the
@@ -497,6 +502,51 @@ all run in one process, so exactly one of attach and abandon wins. It checks the
 node and connection identity against `NodeConnections`, and a control loss
 reports `:node_unavailable` to every caller on that connection.
 
+### Ssh daemon
+
+`Biot.Server.Ssh.Daemon` is the supervised `:ssh` daemon. It is the last child of
+`Biot.Server.Application`, after `Control.Listener`, and `apps/biot_server/mix.exs` declares `:ssh`
+as an extra application. `init/1` ignores an unset `:ssh_host_key_file`, so the daemon is simply
+not started where no SSH settings exist; a release always requires one. Otherwise it pins the host
+key and calls `:ssh.daemon/2`. `terminate/2` stops the whole daemon with `:ssh.stop_daemon/1`;
+`:ssh.close/1` closes one live connection and is what `SshKeys.remove/2` uses.
+
+The daemon offers public key authentication only, no subsystems, no forwarding, and no shell
+beyond `Ssh.Channel`:
+
+- The host key is pinned at boot. `Ssh.KeyCallback.validate/1` reads and decodes the operator's
+  OpenSSH file once with `:ssh_file.decode/2`, fails boot on an unusable file, and returns the
+  decoded keys with the algorithms they support. `Daemon` passes that value into
+  `key_cb: {KeyCallback, [pinned: pinned]}` when it starts `:ssh.daemon/2`, so OTP holds it in the
+  key callback's private options and `host_key/2` only selects from `key_cb_private`. The served
+  key never lives in a globally readable term, and replacing the file cannot change the key served
+  to a new client. The algorithm table is Biot's own, not an OTP-internal helper: RSA, Ed25519, and
+  ECDSA P-256, P-384, and P-521, and `preferred_algorithms: [public_key: pinned.algorithms]`
+  offers only those.
+- `Ssh.KeyCallback.is_auth_key/3` turns the offered OTP public key back into an OpenSSH line,
+  parses it with `SshPublicKey`, and authenticates it through `SshKeys.authenticate/1`, which reads
+  the stored key by fingerprint, so a removed key fails on the next channel. It records the
+  connection's `Authentication` once per handshake in `Ssh.Authentications`.
+- `Ssh.Authentications` is a duplicate-key `Registry` that ties a connection to its key. The
+  connection handler process owns both entries: `{:connection, pid}` carries the
+  `Authentication`, and `{:key, key_id}` carries the pid. `connections/1` returns every live
+  connection for a key, and the entries vanish when the handler exits.
+- `Ssh.Channel` implements `:ssh_server_channel` and is a session owner. `{:ssh_channel_up, ...}`
+  reads the login user as a `BiotId` and the connection's `Authentication` from `Authentications`; a
+  bad user or a missing authentication stops the channel. `pty` records the terminal type and size
+  with `xterm-256color` and 80x24 defaults, `window-change` becomes `Streams.resize`, `data`
+  becomes `Streams.write`, and `eof` writes the terminal EOF byte `0x04`. Agent output goes out
+  through `:ssh_connection.send/3`, and the agent's exit frame becomes the channel's exit status
+  followed by `send_eof`; a lost or closed stream never reports success and uses status 255.
+- The browser terminal's path is the same path here. `shell` and `exec` both call
+  `Access.open_shell/3`, so `Admission`, `Owners`, and `Streams` are shared. Each channel admits
+  itself again, so a revoked shell grant denies the next channel even while the SSH connection
+  stays open, and `Access.close/1` is the single close on every exit path.
+- `Ssh.Command` is the pure exec-line tokenizer. It honors single quotes, double quotes, and
+  backslash escapes, and an explicitly quoted empty word (`""` or `''`) becomes an empty
+  argument. An unterminated quote or an empty command is `:invalid_command`, and the channel then
+  rejects the `exec` request rather than hand an unparsed line to a shell.
+
 ### Control protocol
 
 - `Control.Listener` accepts mutually authenticated TLS node connections.
@@ -575,22 +625,37 @@ do not cascade from them. Preview sessions and handoffs do cascade from their co
 Integration tests hit the real SQLite test database.
 
 The suite exercises lifecycle, enrollment, policy, projections, authentication, stream admission,
-control synchronization, and failure handling through real SQLite transactions and real OTP
-processes. Pure planner, authorization, projection, and parser tests use properties and exhaustive
-tables. Integration harnesses speak the actual TLS control protocol and, where stream behavior is
-under test, run the real Go agent. No tests mock internal module calls.
+control synchronization, failure handling, and the SSH daemon through real SQLite transactions and
+real OTP processes. Pure planner, authorization, projection, and parser tests use properties and
+exhaustive tables. Integration harnesses speak the actual TLS control protocol and, where stream
+behavior is under test, run the real Go agent. `ssh_daemon_integration_test.exs` generates real
+keys with `ssh-keygen`, starts the daemon on a real port, and drives it with the real `ssh` client:
+a registered key opens a shell, an unregistered key is refused, `exec` returns the agent's exit
+status, closed stdin sends the terminal EOF so `cat` does not hang, port forwarding and sftp are
+refused, removing a key closes the live connection, and stopping the daemon leaves the supervisor
+alive. No tests mock internal module calls.
 
 ## `apps/biot_web`
 
-The web app owns the HTTP API, browser login, the LiveView UI, and the browser terminal. The
-preview proxy and preview callback consumer are not built yet.
+The web app owns the HTTP API, browser login, the LiveView UI, the browser terminal, and the
+preview proxy. It is the only app that answers a public request.
 
 ### Application and request boundaries
 
 - `BiotWeb.Application` starts `BiotWeb.PubSub` and `BiotWeb.Endpoint`.
-- `BiotWeb.Endpoint` serves static assets and the LiveView socket, parses requests, applies the
-  Phoenix session, and installs `BiotWeb.Router`. It resolves the client address before telemetry.
+- `BiotWeb.Endpoint` is the one request path. It assigns the request ID, resolves the client
+  address, emits telemetry, dispatches on the request `Host`, and only then serves static assets and
+  the LiveView socket, parses requests, applies the Phoenix session, and installs `BiotWeb.Router`.
   Both LiveView transports accept only the endpoint's exact origin.
+- `BiotWeb.Plugs.HostDispatch` is the first plug that can answer a request, after `Plug.RequestId`,
+  `put_client_address`, and `Plug.Telemetry` and before the `/live` socket, `Plug.Static`, and
+  `Plug.Parsers`. It reads `:control_host` and `:publication_domain` and classifies `conn.host`
+  through `Biot.Server.DomainName.classify/3`: `:control` continues through the endpoint as the
+  application; `{:preview, hostname}` is answered entirely by `BiotWeb.Preview.Proxy`;
+  `:unknown` gets the not-found page. The control host is matched first, so a published hostname
+  can never take over the control host, and `config/releases/server.exs` also refuses a control
+  host inside the publication domain at boot, because every preview hostname is a name under that
+  domain.
 - `BiotWeb.Router` has a browser pipeline with sessions, CSRF, control-origin checks, and
   `ControlSession`. The browser scope serves the landing page, login, logout, the terminal socket
   upgrade, and an authenticated `live_session` whose `on_mount` hook is `LiveAuth`. Its API pipeline
@@ -599,9 +664,12 @@ preview proxy and preview callback consumer are not built yet.
 - `BiotWeb.ClientAddress` parses `BIOT_TRUSTED_EDGE_PEERS` as individual IPv4 or IPv6 addresses.
   `resolve/3` trusts `X-Forwarded-For` only when the immediate peer is listed, and uses the last
   parsed entry. It canonicalizes IPv4-mapped IPv6 addresses and keeps the peer address on failure.
-- `BiotWeb.Cookies` owns `__Host-biot_session` and `__Host-biot_login`, their `Secure`, `HttpOnly`,
-  `SameSite=Lax`, path, and lifetime attributes. The login cookie is sealed pending OIDC state;
-  the session cookie holds only the control token and CSRF token.
+- `BiotWeb.Cookies` names every Biot cookie: `__Host-biot_session`, `__Host-biot_login`,
+  `__Host-biot_preview`, and `__Host-biot_handoff`. All four are `Secure`, `HttpOnly`,
+  `SameSite=Lax`, path `/`, and have no `Domain`, so only the control host can set or read them. The
+  login cookie is sealed pending OIDC state, the session cookie holds only the control token and
+  CSRF token, the preview cookie holds a preview session token, and the handoff cookie holds the
+  single-use challenge.
 - `BiotWeb.Params` is the pure request parser. It keeps path and body fields separate, parses
   protocol values, collects invalid fields, and applies the page default of 50 and limit of 200.
 - `BiotWeb.Plugs.ControlSession` authenticates the session token through `Sessions` and removes a
@@ -612,6 +680,73 @@ preview proxy and preview callback consumer are not built yet.
 - `BiotWeb` provides the Phoenix controller, router, HTML, and LiveView macros. `Layouts` embeds
   the root template, while `ErrorHTML` renders status messages and `ErrorJSON` returns
   `{"error":"internal"}` for crashes and a status tag for other endpoint errors.
+
+### Preview proxy
+
+`BiotWeb.Preview.Proxy.call/2` is the one entry for a preview host, reached only from the host
+plug. `Proxy` is the imperative shell: one call owns one port stream from admission to close. The
+`/__biot/callback` path goes to `Preview.Callback`, any other `/__biot/...` path is the not-found
+page, and every other path is proxied. `Preview.Limits` holds the operator bounds
+(`preview_request_max_bytes`, `preview_request_chunk_bytes`, `preview_head_max_bytes`,
+`preview_exchange_timeout_ms`, `preview_handshake_timeout_ms`); `max_frame_bytes` still bounds
+WebSocket frames and reassembly.
+
+The modules split into a pure core and the process that owns the stream:
+
+- `Preview.Identity` chooses the authentication surface by which proof is presented, and only
+  which. An `X-Biot-Authorization` header is authenticated as a bearer credential even when the
+  credential is bad, so a bad credential never falls back to the preview cookie. Without that
+  header, `Sessions.preview/2` reads the preview cookie; with no cookie the proxy begins the
+  handoff by minting a challenge, setting the handoff cookie, and redirecting to
+  `/preview/authorize`. `Publications.active_by_hostname/2` sends an unpublished hostname to the
+  not-found page before admission, and `Access.open_preview/2` runs the same proof-and-policy
+  snapshot as any other owner.
+- `Preview.Request` is pure. `head/2` builds the upstream HTTP/1.1 request: Biot-owned headers
+  (`x-biot-*`, `x-forwarded-*`, `forwarded`, and cookies whose name starts with `__Host-biot_`) are
+  dropped and replaced, and the application's own `Authorization` and cookies pass through
+  unchanged. `upgrade_head/2` is the WebSocket variant; it keeps the client's `Upgrade` and
+  `Sec-WebSocket-*` headers and drops `permessage-deflate` so the relay never tunnels a compression
+  it cannot see through. The proxy reads the inbound body in `request_chunk_bytes` chunks, bounds
+  the whole body at `request_max_bytes`, and writes each chunk to the stream.
+- `Preview.Response` parses the upstream head with `:erlang.decode_packet/3` and owns only what is
+  Biot's: the cumulative `head_max_bytes` budget (the terminating blank line included), the 1xx
+  skip, the surviving headers, and `framing/2`, which reads the status, the method, and the
+  `Transfer-Encoding`/`Content-Length` headers to choose `:none`, `{:length, n}`, `:chunked`, or
+  `:close`. `sanitize_headers/1` drops hop-by-hop headers and any `Set-Cookie` naming a Biot cookie.
+  A malformed head becomes the `agent_unreachable` page, because no response byte has been sent.
+- `Preview.Body` is the pure body re-framer, and it is where the upstream framing stops being the
+  browser's framing. `length/1` counts down a declared length, `chunked/1` walks chunk-size lines,
+  data, the CRLF terminator, and a whole trailer section bounded by `head_max_bytes`, and `close/1`
+  streams until close. The proxy always sends a chunked response, so nothing after a declared end
+  can be mistaken for another body; a framing error closes the stream and the connection.
+- `Preview.WebSocket` is Biot's own RFC 6455 codec. The stream is a raw byte channel, and the two
+  directions need different work: `encode/3` writes one masked client frame for a whole message the
+  browser handed over, and `decode/2` parses server frames, reassembles fragments, and returns
+  typed events without interpreting a payload. Every declared length is checked against
+  `max_frame_bytes` before the payload is taken, a reassembled message is bounded by the same
+  value, control frames have their own 125-byte limit, and a close frame must carry a permitted
+  code and a valid UTF-8 reason. Biot does not use `Bandit.WebSocket.Frame`: Bandit's `WebSock`
+  adapter already gives whole browser messages and its frame struct is private to the adapter,
+  while the application side must forward an opcode and its bytes unchanged.
+- `Preview.Upgrade` is the controller side of an upgrade: it authenticates the caller, applies
+  `Preview.Origin.allowed?/2` to the `Origin` header (a cookie-authenticated upgrade must carry
+  exactly the publication's origin; a credential client may omit `Origin` but must match if it
+  sends one), and hands the connection to `Preview.Socket` with the WebSocket frame bound.
+- `Preview.Socket` is the `WebSock` handler and the stream owner. It performs the upstream
+  handshake, validates the 101 including `Sec-WebSocket-Accept`, and relays frames in both
+  directions. Browser pings are answered by Bandit and application pings by the proxy, so no control
+  frame crosses the tunnel. An application close frame's code and reason are forwarded once
+  validated; a lost control connection, a policy revocation, or a stream that closes without an
+  application close frame becomes a close with a Biot-chosen code. Every exit path closes the
+  stream through `Access.close/1`.
+- `Preview.Failure` and `Preview.Page` turn a failure into an inert HTML page with inline styling
+  and `cache-control: no-store`. A failure page never loads the control host's assets or cookies,
+  because a preview host is a different origin. A failure before the response head is committed
+  becomes a page; a failure after it is committed closes the connection, which the browser sees as
+  a truncated chunked body.
+- `Preview.Callback` consumes the handoff on the preview host: it reads the challenge cookie,
+  exchanges the code through `PreviewHandoff.finish/3`, sets the preview cookie, clears the
+  handoff, and returns the browser to the path it first asked for.
 
 ### API modules and routes
 
@@ -669,6 +804,8 @@ fallbacks. Credential creation has no API route; the account LiveView creates cr
   control session calls `PreviewHandoff.begin/4` and redirects to the publication URL plus
   `PreviewPaths.callback()`. An absent session redirects through `/login` and preserves this
   request. Invalid input, missing publication, and missing view authority return 400, 404, and 403.
+  The redirect lands on the preview host, where `BiotWeb.Preview.Callback` finishes the handoff and
+  sets the preview cookie.
 - `BiotWeb.SessionController` logs out the current control session and redirects to `/`; the server
   closes its previews and handoffs while other logins and credentials remain valid.
 
@@ -750,16 +887,26 @@ JavaScript, WebAssembly, and license files into `priv/static`. `mix esbuild` bun
 
 ### Tests
 
-`BiotWeb.ConnCase` owns the SQL sandbox and JSON request helpers. `TestFixtures`
-builds principals, nodes, Biots, and environments through server records.
+`BiotWeb.ConnCase` owns the SQL sandbox and JSON request helpers. `BiotWeb.ConnCase.build_conn/0`
+builds on the configured control host, because the host plug answers `Phoenix.ConnTest`'s default
+`www.example.com` with the preview not-found page. `TestFixtures` builds principals, nodes, Biots,
+and environments through server records.
 `BiotWeb.OidcPeer` is a real Bandit test provider with discovery, JWKS, `/authorize`, and `/token`.
 It records state, nonce, and S256 challenge values, verifies client credentials and PKCE, signs
 RS256 ID tokens, and consumes authorization codes once.
 
 The web suite exercises every API route against real SQLite, browser and bearer separation, CSRF
 and exact-origin rules, cookie scope, logout closure, OIDC discovery and PKCE against a real local
-provider, and preview handoffs. Property tests fuzz bearer, callback, parameter, and client-address
-boundaries.
+provider, and preview handoffs. `preview_proxy_integration_test.exs` drives the whole proxy against
+a real upstream Plug: a streamed request and a streamed response, an unpublished host, a missing
+view grant and its page, credential-versus-cookie precedence, Biot-cookie stripping, a sibling
+preview origin before an upgrade, a revoked grant closing an open WebSocket, and the status of
+every proxy failure. `preview_web_socket_test.exs` is the pure codec suite: a property over
+arbitrary bytes, every truncation of a valid frame, declared-length rejection before allocation,
+fragment reassembly and interruption, close payload forms, and the control-frame limit.
+`browser_flows_integration_test.exs` runs the real UI in Wallaby: sign-in and list, a detail page
+that updates on a server change, the browser terminal, and a credentialed create. Property tests
+fuzz bearer, callback, parameter, and client-address boundaries.
 
 ## `apps/biot_node`
 
@@ -1253,6 +1400,53 @@ The Go agent suite includes request and frame fuzz targets plus real Unix-socket
 tests. CI runs it directly; `docker/linux-host/run-tests.sh` runs the full Mix suite in the privileged
 Linux host image.
 
+## `cli/`
+
+The Go command-line client. It uses no CLI framework. `internal/command` is a small tree of
+`Command` values (`Name`, `Synopsis`, `Description`, `Options`, `Run`, `Children`) and `Execute`
+walks it; `cmd/biot/main.go` owns `rootCommand`, sorts its children by a fixed order, and turns an
+`exitStatusError` into the process exit status. The per-area files `commands.go`, `lifecycle.go`,
+`publication.go`, `access.go`, `secrets.go`, `account_commands.go`, and `operations_commands.go`
+register the 25 top-level commands from `init`. Four of them group subcommands: `secret` (`set`,
+`rm`, `list`), `fetch-credential` (`set`, `rm`), `ssh-key` (`add`, `list`, `rm`), and `token`
+(`create`, `list`, `revoke`).
+
+To add a command, append one `&command.Command{...}` to the `rootCommand.Children` call in the
+matching area file, or add a file with its own `init` that does the same. Give it a `Run` of type
+`func(command.Context, []string) error` and parse the arguments by hand; there is no global flag
+parser, so each command owns its own checking and its own `--help` text. `command.Context` carries
+`Stdout` and `Stderr`, and `internal/command` also has `RequireArguments` and `RejectUnknown` for
+the common cases.
+
+- `internal/api` is the HTTP client. `New/3` validates and normalizes the server URL and default
+  transport, `Request/5` sends and decodes JSON and bounds a response at 8 MiB, and the error
+  vocabulary is explicit: one table of `CommandError` tags and one of field reasons, both checked
+  at init so a new server reason cannot pass silently. One method wraps one API route, and a shared
+  helper builds the `*api.Error`.
+- `internal/config` reads and writes `$XDG_CONFIG_HOME/biot/config.json`, which holds the server URL
+  and bearer token. The directory is mode 0700, the file is mode 0600, and a save writes a
+  same-directory temporary file and renames it into place.
+- `internal/input` reads a line, a hidden terminal secret through `golang.org/x/term`, or bounded
+  stdin bytes. Every secret path clears its buffer.
+- `internal/resolve` resolves a name or canonical ID to one Biot, and reports an ambiguous name with
+  the matching IDs. `internal/id` mints the client-side canonical UUID a create needs.
+- `golang.org/x/term` and `golang.org/x/sys` are vendored under `cli/vendor`; `cli/go.mod` has no
+  other requirement.
+
+`biot ssh` resolves a Biot, reads the SSH host and port from `GET /api/deployment`, and execs the
+system `ssh` client with the Biot ID as the user. It passes the remote command through after `--`,
+turns the SSH exit status into the CLI's exit status, and, when `ssh` reports a public key
+authentication failure, prints a hint to register a key with `biot ssh-key add`.
+
+`cli/e2e` is behind the `e2e` build tag. `TestMain` builds the real `biot` binary, and
+`harness_test.go` gives each test an isolated `XDG_CONFIG_HOME`, `HOME`, and `TMPDIR`, a transparent
+recording reverse proxy in front of the real server, `/proc` inspection helpers, and a PTY runner.
+It needs a running server plus `BIOT_E2E_TOKEN` and `BIOT_E2E_BIOT`; see `.work/cli-e2e-howto.md`.
+`secret_handling_test.go` proves that secret bytes reach the server unchanged, that a NUL byte
+reaches the real parser, that invalid UTF-8 is refused rather than rewritten, and that a hidden
+prompt leaks neither to the process table nor to shell history. The `cmd/biot` and `internal`
+packages have their own unit tests.
+
 ## Releases
 
 The root Mix project defines two releases.
@@ -1297,6 +1491,14 @@ go vet ./...
 go test ./...
 ```
 
+The CLI's `e2e` suite is manual and needs a running server, `BIOT_E2E_TOKEN`, and
+`BIOT_E2E_BIOT`:
+
+```sh
+cd cli
+go test -tags e2e ./e2e/...
+```
+
 ## CI
 
 `.github/workflows/ci.yml` installs Nix and sets up Erlang 28.5, Elixir 1.20.4, and Go 1.26.x.
@@ -1307,9 +1509,14 @@ agent Go checks. The host-tests job runs the full Mix suite in the privileged Li
 
 `config/test.exs` uses `_build/test/biot_server_test.sqlite3` and the Ecto SQL sandbox.
 `config/releases/server.exs` requires an absolute `BIOT_SERVER_DATABASE`, parses the control host
-and publication domain as DNS names, rejects an overlapping control host, and requires complete
-HTTPS OIDC settings. It also owns server TLS, listener, heartbeat, sweep, request, stream, SSH,
-session, credential, operator-file, and trusted-edge settings. The login callback is
+and publication domain as DNS names, rejects a control host that is the publication domain or a
+name under it (so no preview hostname can ever be the control host), and requires complete HTTPS
+OIDC settings. It also owns server TLS, listener, heartbeat, sweep, request, stream, preview, SSH,
+session, credential, operator-file, and trusted-edge settings. The SSH settings are
+`BIOT_SSH_ADVERTISED_HOST`, `BIOT_SSH_PORT`, and `BIOT_SSH_HOST_KEY_FILE`, and the preview bounds
+are `BIOT_PREVIEW_REQUEST_MAX_BYTES`, `BIOT_PREVIEW_REQUEST_CHUNK_BYTES`,
+`BIOT_PREVIEW_HEAD_MAX_BYTES`, `BIOT_PREVIEW_EXCHANGE_TIMEOUT_MS`, and
+`BIOT_PREVIEW_HANDSHAKE_TIMEOUT_MS`. The login callback is
 `https://<PHX_HOST>/login/callback`. Phoenix filters `value`, `code`, `state`, and `challenge` from
 request logs.
 

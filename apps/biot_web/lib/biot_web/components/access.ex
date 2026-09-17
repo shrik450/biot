@@ -21,6 +21,11 @@ defmodule BiotWeb.Components.Access do
 
   @spec access_panel(map()) :: Phoenix.LiveView.Rendered.t()
   def access_panel(assigns) do
+    assigns =
+      assigns
+      |> assign(:action_summary, UserMessage.summary(assigns.action_error, []))
+      |> assign(:share_summary, UserMessage.summary(assigns.share_error, [:email, :kind]))
+
     ~H"""
     <section class="surface access-panel" aria-labelledby="access-heading">
       <div class="section-heading">
@@ -108,8 +113,8 @@ defmodule BiotWeb.Components.Access do
           <p class="muted">Share shell or one active publication below.</p>
         </div>
 
-        <p :if={@action_error} class="form-error" role="alert">
-          {UserMessage.error(@action_error)}
+        <p :if={@action_summary} class="form-error" role="alert">
+          {@action_summary}
         </p>
 
         <form
@@ -168,7 +173,7 @@ defmodule BiotWeb.Components.Access do
             share
           </button>
         </form>
-        <p :if={@share_error} class="form-error" role="alert">{UserMessage.error(@share_error)}</p>
+        <p :if={@share_summary} class="form-error" role="alert">{@share_summary}</p>
       </div>
     </section>
     """

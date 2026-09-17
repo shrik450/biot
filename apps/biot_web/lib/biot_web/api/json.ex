@@ -10,6 +10,7 @@ defmodule BiotWeb.Api.Json do
 
   alias Biot.Protocol.ContainerState
   alias Biot.Protocol.Desired
+  alias Biot.Protocol.EnvironmentSelection
   alias Biot.Protocol.ExecutionReport
   alias Biot.Protocol.Failure
   alias Biot.Protocol.IncarnationId
@@ -17,7 +18,8 @@ defmodule BiotWeb.Api.Json do
   alias Biot.Protocol.Port
   alias Biot.Protocol.PrincipalId
   alias Biot.Server.Policy
-  alias Biot.Server.Queries.AccessView
+  alias Biot.Server.Queries.AccessDisplayView
+  alias Biot.Server.Queries.AccessDisplayView.Grant
   alias Biot.Server.Queries.BiotView
   alias Biot.Server.Queries.CredentialView
   alias Biot.Server.Queries.DeploymentView
@@ -32,7 +34,7 @@ defmodule BiotWeb.Api.Json do
           PrincipalView.t()
           | BiotView.t()
           | OperationView.t()
-          | AccessView.t()
+          | AccessDisplayView.t()
           | PublicationView.t()
           | SecretView.t()
           | DeploymentView.t()
@@ -56,6 +58,7 @@ defmodule BiotWeb.Api.Json do
       "node_id" => to_string(biot.node_id),
       "role" => role(biot.role),
       "desired" => Desired.encode(biot.desired),
+      "environment" => environment(biot.environment),
       "actual" => actual(biot.actual),
       "node" => Atom.to_string(biot.node),
       "operation" => operation(biot.operation),
@@ -77,14 +80,10 @@ defmodule BiotWeb.Api.Json do
     }
   end
 
-  def encode(%AccessView{} = access) do
+  def encode(%AccessDisplayView{} = access) do
     %{
-      "owner_id" => to_string(access.owner_id),
-      "shell_grants" => Enum.map(access.shell_grants, &to_string/1),
-      "view_grants" =>
-        Enum.map(access.view_grants, fn grant ->
-          %{"port" => grant.port.value, "principal_id" => to_string(grant.principal_id)}
-        end)
+      "owner" => encode(access.owner),
+      "grants" => Enum.map(access.grants, &grant/1)
     }
   end
 
@@ -148,6 +147,14 @@ defmodule BiotWeb.Api.Json do
     }
   end
 
+  defp grant(%Grant{kind: :shell, principal: principal}) do
+    %{"kind" => "shell", "principal" => encode(principal)}
+  end
+
+  defp grant(%Grant{kind: {:view, port}, principal: principal}) do
+    %{"kind" => "view", "port" => port.value, "principal" => encode(principal)}
+  end
+
   @doc "Encodes whether the assigned node has applied a Biot's access revision."
   @spec enforcement(Policy.enforcement()) :: %{String.t() => String.t()}
   def enforcement(:applied), do: %{"kind" => "applied"}
@@ -182,6 +189,11 @@ defmodule BiotWeb.Api.Json do
 
   defp installed_environment(nil), do: nil
   defp installed_environment(environment_id), do: to_string(environment_id)
+
+  defp environment(nil), do: nil
+
+  defp environment(%EnvironmentSelection{} = selection),
+    do: EnvironmentSelection.encode(selection)
 
   defp container(:unknown), do: %{"kind" => "unknown"}
   defp container(:absent), do: %{"kind" => "absent"}

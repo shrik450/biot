@@ -18,6 +18,7 @@ defmodule BiotWeb.Live.BiotTabLive do
   }
 
   alias Biot.Server.Access
+  alias Biot.Server.CommandError
   alias Biot.Server.FetchCredentials
   alias Biot.Server.Principals
   alias Biot.Server.Publications
@@ -164,7 +165,7 @@ defmodule BiotWeb.Live.BiotTabLive do
         {:noreply,
          assign(socket,
            publication_pending: false,
-           publish_error: {:invalid_input, %{port: [reason]}}
+           publish_error: CommandError.invalid_input(%{port: [reason]})
          )}
 
       _not_owner ->
@@ -207,7 +208,7 @@ defmodule BiotWeb.Live.BiotTabLive do
          assign(socket,
            armed_unpublish: nil,
            publication_pending: false,
-           publish_error: {:invalid_input, %{port: [reason]}}
+           publish_error: CommandError.invalid_input(%{port: [reason]})
          )}
 
       _invalid ->
@@ -250,12 +251,15 @@ defmodule BiotWeb.Live.BiotTabLive do
         {:noreply,
          assign(socket,
            access_pending: false,
-           share_error: {:invalid_input, %{email: [:unknown_principal]}}
+           share_error: CommandError.invalid_input(%{email: [:unknown_principal]})
          )}
 
       {:error, reason} ->
         {:noreply,
-         assign(socket, access_pending: false, share_error: {:invalid_input, %{kind: [reason]}})}
+         assign(socket,
+           access_pending: false,
+           share_error: CommandError.invalid_input(%{kind: [reason]})
+         )}
 
       _not_owner ->
         {:noreply, socket}
@@ -396,7 +400,7 @@ defmodule BiotWeb.Live.BiotTabLive do
            armed_secret: nil,
            secret_name: "",
            secret_pending: false,
-           secret_error: {:invalid_input, %{name: [reason]}}
+           secret_error: CommandError.invalid_input(%{name: [reason]})
          )}
 
       _invalid ->
@@ -439,7 +443,10 @@ defmodule BiotWeb.Live.BiotTabLive do
     else
       {:error, reason} ->
         {:noreply,
-         assign(socket, fetch_pending: false, fetch_error: {:invalid_input, %{value: [reason]}})}
+         assign(socket,
+           fetch_pending: false,
+           fetch_error: CommandError.invalid_input(%{value: [reason]})
+         )}
 
       _not_owner ->
         {:noreply, assign(socket, fetch_pending: false, fetch_error: :not_requested)}

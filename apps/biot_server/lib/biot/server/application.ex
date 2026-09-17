@@ -25,7 +25,9 @@ defmodule Biot.Server.Application do
           {Registry, keys: :unique, name: Biot.Server.Control.Registry},
           Biot.Server.Nodes.Startup,
           Biot.Server.Streams.Pending,
-          Biot.Server.Control.Listener
+          Biot.Server.Ssh.Authentications,
+          Biot.Server.Control.Listener,
+          Biot.Server.Ssh.Daemon
         ]
 
     opts = [strategy: :one_for_one, name: Biot.Server.Supervisor]

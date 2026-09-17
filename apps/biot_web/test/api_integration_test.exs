@@ -372,11 +372,33 @@ defmodule BiotWeb.ApiIntegrationTest do
     end
 
     grants = get(api_conn(context.bearer_token), "/api/biots/#{context.biot.id}/grants")
-    assert json_body(grants)["shell_grants"] == [to_string(context.collaborator.id)]
 
-    assert json_body(grants)["view_grants"] == [
-             %{"port" => 3000, "principal_id" => to_string(context.collaborator.id)}
-           ]
+    assert json_body(grants) == %{
+             "owner" => %{
+               "id" => to_string(context.owner.id),
+               "email" => "person-1@example.test",
+               "name" => "Person 1"
+             },
+             "grants" => [
+               %{
+                 "kind" => "shell",
+                 "principal" => %{
+                   "id" => to_string(context.collaborator.id),
+                   "email" => "person-2@example.test",
+                   "name" => "Person 2"
+                 }
+               },
+               %{
+                 "kind" => "view",
+                 "port" => 3000,
+                 "principal" => %{
+                   "id" => to_string(context.collaborator.id),
+                   "email" => "person-2@example.test",
+                   "name" => "Person 2"
+                 }
+               }
+             ]
+           }
 
     assert json_response(delete(api_conn(context.bearer_token), view_path), 200)["result"] ==
              "applied"

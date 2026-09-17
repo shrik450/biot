@@ -283,7 +283,7 @@ defmodule BiotWeb.Params do
         {:ok, Map.new(fields, fn {field, {:ok, value}} -> {field, value} end)}
 
       errors ->
-        {:error, {:invalid_input, errors}}
+        CommandError.invalid_input(errors)
     end
   end
 

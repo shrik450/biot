@@ -4,7 +4,7 @@ defmodule BiotWeb.ConnCase do
   use ExUnit.CaseTemplate
 
   import Plug.Conn
-  import Phoenix.ConnTest
+  import Phoenix.ConnTest, except: [build_conn: 0]
 
   alias Biot.Server.Repo
   alias Ecto.Adapters.SQL.Sandbox
@@ -14,7 +14,7 @@ defmodule BiotWeb.ConnCase do
   using do
     quote do
       import Plug.Conn
-      import Phoenix.ConnTest
+      import Phoenix.ConnTest, except: [build_conn: 0]
       import BiotWeb.ConnCase
 
       @endpoint BiotWeb.Endpoint
@@ -25,6 +25,18 @@ defmodule BiotWeb.ConnCase do
     owner = Sandbox.start_owner!(Repo, shared: not tags[:async])
     on_exit(fn -> Sandbox.stop_owner(owner) end)
     :ok
+  end
+
+  @doc """
+  Builds a conn on the control host.
+
+  `Phoenix.ConnTest.build_conn/0` defaults the host to `www.example.com`, which is not the control
+  host, so `BiotWeb.Plugs.HostDispatch` correctly answers it with the 404 page. A real browser
+  arrives on the control host, so the suite does too.
+  """
+  @spec build_conn() :: Plug.Conn.t()
+  def build_conn do
+    %{Phoenix.ConnTest.build_conn() | host: Application.fetch_env!(:biot_server, :control_host)}
   end
 
   @spec json_request(Plug.Conn.t(), atom(), String.t(), map() | nil) :: Plug.Conn.t()

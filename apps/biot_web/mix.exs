@@ -36,6 +36,7 @@ defmodule BiotWeb.MixProject do
       {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:phoenix_live_view, "~> 1.2.0"},
       {:lazy_html, ">= 0.1.0", only: :test},
+      {:wallaby, "~> 0.30", only: :test},
       {:websock, "~> 0.5.3"},
       {:websock_adapter, "~> 0.6.0"},
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},

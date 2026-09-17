@@ -42,7 +42,7 @@ defmodule Biot.Server.Principals do
   end
 
   def identify(_issuer, _subject, _claims) do
-    {:error, {:invalid_input, %{identity: [:invalid_format]}}}
+    CommandError.invalid_input(%{identity: [:invalid_format]})
   end
 
   @spec reload() :: :ok | {:error, rejection()}

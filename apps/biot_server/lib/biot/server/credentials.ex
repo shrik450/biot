@@ -123,10 +123,10 @@ defmodule Biot.Server.Credentials do
 
     cond do
       DateTime.compare(expires_at, now) != :gt ->
-        {:error, {:invalid_input, %{expires_at: [:not_future]}}}
+        CommandError.invalid_input(%{expires_at: [:not_future]})
 
       DateTime.compare(expires_at, latest) == :gt ->
-        {:error, {:invalid_input, %{expires_at: [:too_far]}}}
+        CommandError.invalid_input(%{expires_at: [:too_far]})
 
       true ->
         :ok

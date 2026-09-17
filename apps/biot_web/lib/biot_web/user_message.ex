@@ -2,6 +2,7 @@ defmodule BiotWeb.UserMessage do
   @moduledoc "The small, user-facing vocabulary for server and form results."
 
   alias Biot.Protocol.Failure
+  alias Biot.Protocol.FieldReason
 
   @field_labels %{
     repository: "repository",
@@ -9,8 +10,8 @@ defmodule BiotWeb.UserMessage do
     node_id: "node",
     environment: "environment",
     initial_state: "initial state",
-    runtime_secrets: "runtime secrets",
-    source_credentials: "source-fetch credentials",
+    runtime_secrets: "runtime secret",
+    source_credentials: "source-fetch credential",
     port: "port",
     email: "email",
     kind: "grant",
@@ -21,6 +22,40 @@ defmodule BiotWeb.UserMessage do
     id: "id",
     form: "form"
   }
+
+  # A field reason completes "<label> ...", so the sentence never repeats the label and, where
+  # there is one, names the next step. `FieldReason.all/0` is the closed vocabulary; the check
+  # below refuses to compile a browser that cannot say one of its reasons.
+  @field_reason_sentences %{
+    missing: "is required.",
+    invalid_format: "has an invalid format.",
+    out_of_range: "is outside the allowed range.",
+    too_long: "is too long.",
+    too_short: "is too short.",
+    invalid_value: "has an invalid value.",
+    reserved_name: "is reserved; choose another name.",
+    nul_byte: "must not contain a NUL byte.",
+    secret_value_too_large: "is larger than the maximum allowed size.",
+    too_many_layers: "has too many layers; remove one.",
+    repository_url_too_long: "is longer than the maximum repository URL length.",
+    source_ref_too_long: "is longer than the maximum reference length.",
+    embedded_credentials:
+      "must not embed credentials; deliver them as a source-fetch credential instead.",
+    no_default_node: "is required because the server has no default node; choose one.",
+    already_registered: "is already registered; use a different key.",
+    not_future: "must be in the future; choose a later time.",
+    too_far: "is beyond the allowed lifetime; choose an earlier time.",
+    unknown_principal: "does not identify a known principal; check the email address.",
+    not_requested: "is not currently requested.",
+    not_ready: "is not ready yet.",
+    publication_not_active: "is no longer active; reload and choose an active one."
+  }
+
+  missing_sentences = FieldReason.all() -- Map.keys(@field_reason_sentences)
+
+  if missing_sentences != [] do
+    raise "BiotWeb.UserMessage has no sentence for field reasons: #{inspect(missing_sentences)}"
+  end
 
   @spec error(term()) :: String.t()
   def error({:error, reason}), do: error(reason)
@@ -48,17 +83,31 @@ defmodule BiotWeb.UserMessage do
   def error(:capacity_exceeded), do: "The selected node has no available capacity."
   def error(:not_requested), do: "The node is not currently requesting a credential."
   def error(:publication_not_active), do: "That publication is no longer active."
-  def error(:missing), do: "is required."
-  def error(:invalid_format), do: "has an invalid format."
-  def error(:out_of_range), do: "is outside the allowed range."
-  def error(:too_long), do: "is too long."
-  def error(:too_short), do: "is too short."
-  def error(:invalid_value), do: "has an invalid value."
-  def error(:not_ready), do: "is not ready yet."
   def error(:unknown_principal), do: "That principal could not be found."
+
+  def error(reason) when is_atom(reason),
+    do: Map.get(@field_reason_sentences, reason, "The server could not complete that request.")
 
   def error({_kind, _detail}), do: "The server rejected that request."
   def error(_reason), do: "The server could not complete that request."
+
+  @doc """
+  The sentence to show above a form, or nil when the inline field messages already say everything.
+
+  `rendered_fields` names the fields whose message the form prints next to the input. A field
+  reason for one of those stays with the input; a field reason for any other field, and every
+  error that is not `:invalid_input`, stays here. Each message then appears exactly once.
+  """
+  @spec summary(term(), [atom()]) :: String.t() | nil
+  def summary(nil, _rendered_fields), do: nil
+
+  def summary({:invalid_input, fields}, rendered_fields) when is_map(fields) do
+    unattached = Map.reject(fields, fn {field, _reasons} -> field in rendered_fields end)
+
+    if map_size(unattached) == 0, do: nil, else: invalid_fields(unattached)
+  end
+
+  def summary(error, _rendered_fields), do: error(error)
 
   @spec failure_label(Failure.t()) :: String.t()
   def failure_label(%Failure{stage: stage, code: code}), do: "#{stage} / #{code}"
@@ -91,7 +140,9 @@ defmodule BiotWeb.UserMessage do
 
   defp field_label(field), do: Map.get(@field_labels, field, "field")
 
-  defp reason_text(reason) when is_atom(reason), do: error(reason)
+  defp reason_text(reason) when is_atom(reason),
+    do: Map.get(@field_reason_sentences, reason, "has an invalid value.")
+
   defp reason_text(reason) when is_binary(reason), do: reason
   defp reason_text(_reason), do: "has an invalid value."
 end

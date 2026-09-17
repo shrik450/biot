@@ -12,5 +12,6 @@ config :biot_server, expiry_sweep_interval_ms: nil, auth_check_interval_ms: nil
 
 config :biot_web, BiotWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
+  url: [host: "localhost", port: 4002],
   secret_key_base: "Xpejv1jxyCS+IgiREufELTFm1QtRZBxZQSQX5HQNB+lnY3P7iGxKNDMId3XFv1Lv",
   server: false

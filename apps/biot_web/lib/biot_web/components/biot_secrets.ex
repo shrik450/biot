@@ -18,6 +18,11 @@ defmodule BiotWeb.Components.BiotSecrets do
 
   @spec secrets_panel(map()) :: Phoenix.LiveView.Rendered.t()
   def secrets_panel(assigns) do
+    assigns =
+      assigns
+      |> assign(:secret_summary, UserMessage.summary(assigns.secret_error, [:name, :value]))
+      |> assign(:fetch_summary, UserMessage.summary(assigns.fetch_error, [:value]))
+
     ~H"""
     <div class="secrets-panels">
       <section class="surface" aria-labelledby="runtime-secrets-heading">
@@ -145,7 +150,7 @@ defmodule BiotWeb.Components.BiotSecrets do
             phx-disable-with="delivering…"
           >deliver / replace</button>
         </form>
-        <p :if={@secret_error} class="form-error" role="alert">{UserMessage.error(@secret_error)}</p>
+        <p :if={@secret_summary} class="form-error" role="alert">{@secret_summary}</p>
       </section>
 
       <section :if={fetch_source(@fetch_source)} class="surface" aria-labelledby="fetch-heading">
@@ -192,7 +197,7 @@ defmodule BiotWeb.Components.BiotSecrets do
             phx-disable-with="delivering…"
           >deliver for this source</button>
         </form>
-        <p :if={@fetch_error} class="form-error" role="alert">{UserMessage.error(@fetch_error)}</p>
+        <p :if={@fetch_summary} class="form-error" role="alert">{@fetch_summary}</p>
       </section>
     </div>
     """

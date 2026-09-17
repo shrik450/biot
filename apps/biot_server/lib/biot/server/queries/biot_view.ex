@@ -4,6 +4,7 @@ defmodule Biot.Server.Queries.BiotView do
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.BiotName
   alias Biot.Protocol.Desired
+  alias Biot.Protocol.EnvironmentSelection
   alias Biot.Protocol.NodeId
   alias Biot.Protocol.Port
   alias Biot.Protocol.PrincipalId
@@ -36,7 +37,8 @@ defmodule Biot.Server.Queries.BiotView do
       :node,
       :operation,
       :connection,
-      :publications
+      :publications,
+      :environment
     ]
 
     @type t :: %__MODULE__{
@@ -47,7 +49,8 @@ defmodule Biot.Server.Queries.BiotView do
             node: Node.t(),
             operation: Operation.t() | nil,
             connection: NodeConnections.connection() | nil,
-            publications: list()
+            publications: list(),
+            environment: EnvironmentSelection.t() | nil
           }
   end
 
@@ -63,6 +66,7 @@ defmodule Biot.Server.Queries.BiotView do
     :operation,
     :access,
     :publications,
+    :environment,
     :direct_secret_exposure_possible
   ]
   defstruct [
@@ -77,6 +81,7 @@ defmodule Biot.Server.Queries.BiotView do
     :operation,
     :access,
     :publications,
+    :environment,
     :direct_secret_exposure_possible
   ]
 
@@ -92,6 +97,7 @@ defmodule Biot.Server.Queries.BiotView do
           operation: OperationView.t() | nil,
           access: %{revision: pos_integer(), enforcement: Policy.enforcement()},
           publications: [%{port: Port.t(), url: String.t()}],
+          environment: EnvironmentSelection.t() | nil,
           direct_secret_exposure_possible: boolean()
         }
 
@@ -104,7 +110,8 @@ defmodule Biot.Server.Queries.BiotView do
         node: %Node{} = node,
         operation: operation,
         connection: connection,
-        publications: publications
+        publications: publications,
+        environment: environment
       }) do
     %__MODULE__{
       id: biot.id,
@@ -121,6 +128,7 @@ defmodule Biot.Server.Queries.BiotView do
         enforcement: Enforcement.access(biot, access_observation, connection)
       },
       publications: publications,
+      environment: environment,
       direct_secret_exposure_possible: biot.direct_secret_exposure_possible
     }
   end

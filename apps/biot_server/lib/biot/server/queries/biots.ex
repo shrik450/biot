@@ -19,6 +19,7 @@ defmodule Biot.Server.Queries.Biots do
 
   alias Biot.Server.Schema.{
     AccessObservation,
+    Environment,
     Node,
     Observation,
     Operation
@@ -57,19 +58,28 @@ defmodule Biot.Server.Queries.Biots do
       |> join(:left, [biot, _node, _observation], access_observation in AccessObservation,
         on: access_observation.biot_id == biot.id
       )
+      |> join(
+        :inner,
+        [biot, _node, _observation, _access_observation],
+        environment in Environment,
+        on: environment.id == biot.desired_environment_id and environment.biot_id == biot.id
+      )
       |> after_id(after_id)
       |> order_by([biot], asc: biot.id)
       |> limit(^limit)
-      |> select([biot, node, observation, access_observation], {
+      |> select([biot, node, observation, access_observation, environment], {
         biot,
         node,
         observation,
-        access_observation
+        access_observation,
+        environment
       })
       |> Repo.all()
 
     biot_ids =
-      Enum.map(rows, fn {biot, _node, _observation, _access_observation} -> biot.id end)
+      Enum.map(rows, fn {biot, _node, _observation, _access_observation, _environment} ->
+        biot.id
+      end)
 
     operations = latest_operations_for(biot_ids)
     publications = Publications.active_for(biot_ids)
@@ -77,7 +87,7 @@ defmodule Biot.Server.Queries.Biots do
     publication_domain = Application.fetch_env!(:biot_server, :publication_domain)
 
     views =
-      Enum.map(rows, fn {biot, node, observation, access_observation} ->
+      Enum.map(rows, fn {biot, node, observation, access_observation, environment} ->
         actor_grants = Map.fetch!(grants, biot.id)
 
         project_view(
@@ -88,6 +98,7 @@ defmodule Biot.Server.Queries.Biots do
           access_observation,
           Map.get(operations, biot.id),
           Map.get(publications, biot.id, []),
+          environment,
           publication_domain
         )
       end)
@@ -97,6 +108,10 @@ defmodule Biot.Server.Queries.Biots do
 
   defp load_view(biot, role) do
     node = Repo.get!(Node, biot.node_id)
+
+    environment =
+      Repo.get_by!(Environment, id: biot.desired_environment_id, biot_id: biot.id)
+
     observation = Repo.get(Observation, biot.id)
     access_observation = Repo.get(AccessObservation, biot.id)
     operation = Map.get(latest_operations_for([biot.id]), biot.id)
@@ -111,6 +126,7 @@ defmodule Biot.Server.Queries.Biots do
       access_observation,
       operation,
       publications,
+      environment,
       publication_domain
     )
   end
@@ -123,6 +139,7 @@ defmodule Biot.Server.Queries.Biots do
          access_observation,
          operation,
          publications,
+         environment,
          publication_domain
        ) do
     visible_publications =
@@ -138,7 +155,8 @@ defmodule Biot.Server.Queries.Biots do
       node: node,
       operation: operation,
       connection: NodeConnections.current(node.id),
-      publications: visible_publications
+      publications: visible_publications,
+      environment: environment.selection
     })
   end
 

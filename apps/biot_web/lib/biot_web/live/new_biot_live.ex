@@ -178,10 +178,21 @@ defmodule BiotWeb.Live.NewBiotLive do
   @spec render(map()) :: Phoenix.LiveView.Rendered.t()
   def render(assigns) do
     assigns =
-      assign(
-        assigns,
+      assigns
+      |> assign(
         :creation_fetch_source,
         creation_fetch_source(Map.get(assigns, :creation_view))
+      )
+      |> assign(
+        :form_summary,
+        UserMessage.summary(assigns.form_error, [
+          :repository,
+          :name,
+          :node_id,
+          :environment,
+          :runtime_secrets,
+          :source_credentials
+        ])
       )
 
     ~H"""
@@ -239,7 +250,7 @@ defmodule BiotWeb.Live.NewBiotLive do
         phx-hook="FormBehavior"
         data-unsaved-changes="true"
       >
-        <p :if={@form_error} class="form-error" role="alert">{UserMessage.error(@form_error)}</p>
+        <p :if={@form_summary} class="form-error" role="alert">{@form_summary}</p>
 
         <div class="form-field">
           <label for="biot-repository">repository HTTPS URL</label>

@@ -14,6 +14,7 @@ defmodule BiotWeb.Live.NewBiotForm do
   }
 
   alias Biot.Server.Biots.Create
+  alias Biot.Server.CommandError
 
   @version Enum.max(Version.supported())
 
@@ -46,7 +47,7 @@ defmodule BiotWeb.Live.NewBiotForm do
       end)
 
     if errors != %{} do
-      {:error, {:invalid_input, errors}}
+      CommandError.invalid_input(errors)
     else
       {:ok, repository} = fields.repository
       {:ok, name} = fields.name
@@ -77,7 +78,7 @@ defmodule BiotWeb.Live.NewBiotForm do
     end
   end
 
-  def parse(_params), do: {:error, {:invalid_input, %{form: [:invalid_format]}}}
+  def parse(_params), do: CommandError.invalid_input(%{form: [:invalid_format]})
 
   @spec empty_layer(non_neg_integer()) :: map()
   def empty_layer(id), do: %{id: id, source: "", ref: ""}

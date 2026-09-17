@@ -333,7 +333,7 @@ defmodule Biot.Server.Biots do
   defp requested_node_id(:default) do
     case Application.get_env(:biot_server, :default_node_id) do
       %NodeId{} = node_id -> {:ok, node_id}
-      nil -> {:error, {:invalid_input, %{node_id: [:no_default_node]}}}
+      nil -> CommandError.invalid_input(%{node_id: [:no_default_node]})
     end
   end
 

@@ -14,6 +14,7 @@ defmodule Biot.Server.Access.Admission do
   alias Biot.Server.Actor
   alias Biot.Server.Authentication
   alias Biot.Server.Authentication.Validity
+  alias Biot.Server.BiotChange
   alias Biot.Server.Repo
   alias Biot.Server.Streams
   alias Biot.Server.Streams.Stream
@@ -63,7 +64,7 @@ defmodule Biot.Server.Access.Admission do
     :ok = drain_closes()
     :ok = Owners.register(biot_id, principal_id, Validity.proof_keys(authentication))
 
-    case admit_registered(biot_id, deadline, snapshot, true) do
+    case admit_registered(biot_id, deadline, snapshot) do
       {:ok, %Stream{}} = admitted ->
         admitted
 
@@ -112,31 +113,66 @@ defmodule Biot.Server.Access.Admission do
     |> Enum.each(&Owners.close_proof/1)
   end
 
-  defp admit_registered(biot_id, deadline, snapshot, retry?) do
+  defp admit_registered(biot_id, deadline, snapshot) do
     with :ok <- no_close(),
          {:ok, %__MODULE__{} = admission} <- read_snapshot(snapshot),
          :ok <- no_close() do
-      case Streams.open_until(
-             admission.node_id,
-             biot_id,
-             admission.access_revision,
-             admission.target,
-             deadline
-           ) do
-        {:ok, %Stream{} = stream} ->
-          mark_admitted(stream, admission.expires_at)
-
-        {:error, :stale_access} when retry? ->
-          admit_registered(biot_id, deadline, snapshot, false)
-
-        {:error, :stale_access} ->
-          {:error, :timeout}
-
-        {:error, reason} ->
-          {:error, open_error(reason)}
+      case open(biot_id, admission, deadline) do
+        {:ok, %Stream{} = stream} -> mark_admitted(stream, admission.expires_at)
+        {:error, :stale_access} -> wait_for_applied(biot_id, deadline, snapshot)
+        {:error, reason} -> {:error, open_error(reason)}
       end
     end
   end
+
+  defp open(biot_id, admission, deadline) do
+    Streams.open_until(
+      admission.node_id,
+      biot_id,
+      admission.access_revision,
+      admission.target,
+      deadline
+    )
+  end
+
+  # The node reports every applied access revision through the report path, which fans out on the
+  # Biot's change topic. Wait for that signal and re-read policy; a policy denial is final, and the
+  # original open deadline bounds the wait. Subscribing first means a signal that already fired is
+  # covered by the immediate retry, because the node has then applied the revision.
+  defp wait_for_applied(biot_id, deadline, snapshot) do
+    :ok = BiotChange.subscribe(biot_id)
+
+    try do
+      retry_open(biot_id, deadline, snapshot)
+    after
+      BiotChange.unsubscribe(biot_id)
+    end
+  end
+
+  defp retry_open(biot_id, deadline, snapshot) do
+    with :ok <- before(deadline),
+         :ok <- no_close(),
+         {:ok, %__MODULE__{} = admission} <- read_snapshot(snapshot),
+         :ok <- no_close() do
+      case open(biot_id, admission, deadline) do
+        {:ok, %Stream{} = stream} -> mark_admitted(stream, admission.expires_at)
+        {:error, :stale_access} -> retry_until_applied(biot_id, deadline, snapshot)
+        {:error, reason} -> {:error, open_error(reason)}
+      end
+    end
+  end
+
+  defp retry_until_applied(biot_id, deadline, snapshot) do
+    receive do
+      {:biot_changed, ^biot_id} -> retry_open(biot_id, deadline, snapshot)
+      {:biot_access, :close} -> {:error, :forbidden}
+    after
+      remaining(deadline) -> {:error, :timeout}
+    end
+  end
+
+  defp before(deadline), do: if(remaining(deadline) > 0, do: :ok, else: {:error, :timeout})
+  defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
   defp mark_admitted(%Stream{id: stream_id, connection_pid: connection_pid} = stream, expires_at) do
     :ok =

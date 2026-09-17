@@ -7,6 +7,7 @@ defmodule BiotWeb.Live.AccountLive do
   import BiotWeb.Components.AppShell
 
   alias Biot.Protocol.{CredentialId, SshKeyId}
+  alias Biot.Server.CommandError
   alias Biot.Server.Credentials
   alias Biot.Server.Principals
   alias Biot.Server.Queries.PrincipalView
@@ -101,7 +102,8 @@ defmodule BiotWeb.Live.AccountLive do
        |> assign(:credential_error, nil)}
     else
       {:error, :invalid_format} ->
-        {:noreply, assign(socket, :credential_error, {:invalid_input, %{id: [:invalid_format]}})}
+        {:noreply,
+         assign(socket, :credential_error, CommandError.invalid_input(%{id: [:invalid_format]}))}
 
       {:error, error} ->
         {:noreply, assign(socket, :credential_error, error)}
@@ -165,7 +167,8 @@ defmodule BiotWeb.Live.AccountLive do
       end
     else
       {:error, :invalid_format} ->
-        {:noreply, assign(socket, :ssh_key_error, {:invalid_input, %{id: [:invalid_format]}})}
+        {:noreply,
+         assign(socket, :ssh_key_error, CommandError.invalid_input(%{id: [:invalid_format]}))}
 
       _not_armed_or_present ->
         {:noreply, socket}
@@ -184,6 +187,17 @@ defmodule BiotWeb.Live.AccountLive do
   @impl true
   @spec render(map()) :: Phoenix.LiveView.Rendered.t()
   def render(assigns) do
+    assigns =
+      assigns
+      |> assign(
+        :credential_summary,
+        UserMessage.summary(assigns.credential_error, [:label, :expires_at])
+      )
+      |> assign(
+        :ssh_key_summary,
+        UserMessage.summary(assigns.ssh_key_error, [:label, :public_key])
+      )
+
     ~H"""
     <.app_shell
       current_section={@current_section}
@@ -315,8 +329,8 @@ defmodule BiotWeb.Live.AccountLive do
           <button type="button" class="button button-secondary" phx-click="dismiss-credential">dismiss</button>
         </div>
 
-        <p :if={@credential_error} class="form-error" role="alert">
-          {UserMessage.error(@credential_error)}
+        <p :if={@credential_summary} class="form-error" role="alert">
+          {@credential_summary}
         </p>
 
         <form
@@ -437,8 +451,8 @@ defmodule BiotWeb.Live.AccountLive do
             <p class="section-description">Registered public keys for shell access.</p>
           </div>
         </div>
-        <p :if={@ssh_key_error} class="form-error" role="alert">
-          {UserMessage.error(@ssh_key_error)}
+        <p :if={@ssh_key_summary} class="form-error" role="alert">
+          {@ssh_key_summary}
         </p>
         <form
           id="ssh-key-form"
@@ -592,11 +606,11 @@ defmodule BiotWeb.Live.AccountLive do
     case DateTime.from_iso8601(value) do
       {:ok, datetime, 0} -> {:ok, datetime}
       {:ok, datetime, _offset} -> {:ok, datetime}
-      {:error, _reason} -> {:error, {:invalid_input, %{expires_at: [:invalid_format]}}}
+      {:error, _reason} -> CommandError.invalid_input(%{expires_at: [:invalid_format]})
     end
   end
 
-  defp parse_expiry(_value), do: {:error, {:invalid_input, %{expires_at: [:invalid_format]}}}
+  defp parse_expiry(_value), do: CommandError.invalid_input(%{expires_at: [:invalid_format]})
 
   defp display(nil), do: "—"
   defp display(value), do: value

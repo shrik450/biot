@@ -21,6 +21,7 @@ defmodule Biot.Server.SshKeys do
   alias Biot.Server.Queries.SshKeyView
   alias Biot.Server.Repo
   alias Biot.Server.Schema.SshKey
+  alias Biot.Server.Ssh.Authentications
 
   @spec add(Actor.t() | nil, String.t(), String.t()) ::
           {:ok, SshKeyView.t()} | {:error, CommandError.t()}
@@ -62,8 +63,31 @@ defmodule Biot.Server.SshKeys do
           )
         )
 
-      if deleted == 1, do: Owners.close_proof({:ssh_key, key_id}), else: {:error, :not_found}
+      if deleted == 1, do: remove_key(key_id), else: {:error, :not_found}
     end
+  end
+
+  defp remove_key(key_id) do
+    Owners.close_proof({:ssh_key, key_id})
+    # Socket teardown must not block the API request that removed the key.
+    {:ok, _pid} = Task.start(fn -> close_connections(key_id) end)
+    :ok
+  end
+
+  # A removed key usually means a lost device, so the connection itself goes, not only the
+  # channels it holds. Each channel also closes its stream through its owner registration.
+  defp close_connections(key_id) do
+    key_id
+    |> Authentications.connections()
+    |> Enum.each(fn connection ->
+      if Process.alive?(connection), do: safe_close(connection)
+    end)
+  end
+
+  defp safe_close(connection) do
+    :ssh.close(connection)
+  catch
+    _kind, _reason -> :ok
   end
 
   @spec authenticate(SshPublicKey.t()) :: {:ok, Authentication.t()} | :error
@@ -104,7 +128,7 @@ defmodule Biot.Server.SshKeys do
   defp insert_result({:ok, key}), do: {:ok, SshKeyView.project(key)}
 
   defp insert_result({:error, %Ecto.Changeset{errors: [fingerprint: _error]}}) do
-    {:error, {:invalid_input, %{public_key: [:already_registered]}}}
+    CommandError.invalid_input(%{public_key: [:already_registered]})
   end
 
   defp insert_result({:error, changeset}) do
@@ -116,7 +140,7 @@ defmodule Biot.Server.SshKeys do
   defp parse_public_key(line) do
     case SshPublicKey.parse(line) do
       {:ok, public_key} -> {:ok, public_key}
-      {:error, :invalid_format} -> {:error, {:invalid_input, %{public_key: [:invalid_format]}}}
+      {:error, :invalid_format} -> CommandError.invalid_input(%{public_key: [:invalid_format]})
     end
   end
 end

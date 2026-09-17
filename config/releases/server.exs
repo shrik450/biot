@@ -102,11 +102,13 @@ config :biot_server, Biot.Server.Repo, database: absolute_path.("BIOT_SERVER_DAT
 config :biot_server,
   default_node_id: default_node_id,
   oidc: oidc,
+  control_host: control_host,
   node_registrations_file: System.get_env("BIOT_NODE_REGISTRATIONS"),
   disabled_principals_file: System.get_env("BIOT_DISABLED_PRINCIPALS"),
   publication_domain: publication_domain,
   ssh_advertised_host: required.("BIOT_SSH_ADVERTISED_HOST"),
   ssh_port: port.("BIOT_SSH_PORT"),
+  ssh_host_key_file: absolute_path.("BIOT_SSH_HOST_KEY_FILE"),
   control_port: positive_integer.("BIOT_CONTROL_PORT", 4443),
   control_session_lifetime_ms: positive_integer.("BIOT_SESSION_LIFETIME_HOURS", 168) * 3_600_000,
   credential_max_lifetime_ms:
@@ -124,7 +126,16 @@ config :biot_server,
   node_request_timeout_ms: positive_integer.("BIOT_NODE_REQUEST_TIMEOUT_MS", 10_000),
   node_response_max_bytes: positive_integer.("BIOT_NODE_RESPONSE_MAX_BYTES", 256_000),
   stream_open_timeout_ms: positive_integer.("BIOT_STREAM_OPEN_TIMEOUT_MS", 30_000),
-  max_frame_bytes: positive_integer.("BIOT_MAX_FRAME_BYTES", 1_000_000)
+  max_frame_bytes: positive_integer.("BIOT_MAX_FRAME_BYTES", 1_000_000),
+  preview_request_max_bytes:
+    positive_integer.("BIOT_PREVIEW_REQUEST_MAX_BYTES", 8_000_000),
+  preview_request_chunk_bytes:
+    positive_integer.("BIOT_PREVIEW_REQUEST_CHUNK_BYTES", 65_536),
+  preview_head_max_bytes: positive_integer.("BIOT_PREVIEW_HEAD_MAX_BYTES", 65_536),
+  preview_exchange_timeout_ms:
+    positive_integer.("BIOT_PREVIEW_EXCHANGE_TIMEOUT_MS", 30_000),
+  preview_handshake_timeout_ms:
+    positive_integer.("BIOT_PREVIEW_HANDSHAKE_TIMEOUT_MS", 10_000)
 
 config :biot_web, trusted_edge_peers: trusted_edge_peers
 

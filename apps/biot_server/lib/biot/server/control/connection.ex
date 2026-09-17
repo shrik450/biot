@@ -416,7 +416,6 @@ defmodule Biot.Server.Control.Connection do
          :ok <- no_stream_bytes(state.buffer),
          {:ok, owner, kind} <-
            Pending.attach(node.id, attach.connection_id, attach.stream_id, self(), socket.socket),
-         :ok <- send_message(socket, %Message.Attached{}, :handshake),
          :ok <- hand_off(socket, owner, attach.stream_id, kind) do
       reference = Process.monitor(owner)
 
@@ -621,10 +620,20 @@ defmodule Biot.Server.Control.Connection do
     end
   end
 
+  # Keep the socket passive and move it to the owner before sending Attached, so the node is not
+  # cleared to send until the owner controls delivery. This is a protocol invariant, not a guard
+  # for a known bug, and it does not depend on ThousandIsland declining to re-arm active: :once
+  # while this handler callback returns.
   defp hand_off(socket, owner, stream_id, kind) do
-    with :ok <- :ssl.controlling_process(socket.socket, owner) do
+    with :ok <- :ssl.setopts(socket.socket, active: false),
+         :ok <- :ssl.controlling_process(socket.socket, owner),
+         :ok <- send_message(socket, %Message.Attached{}, :handshake) do
       send(owner, {:stream_attached, stream_id, kind, socket.socket})
       :ok
+    else
+      {:error, _reason} = error ->
+        _ = :ssl.close(socket.socket)
+        error
     end
   end
 

@@ -11,7 +11,10 @@ defmodule BiotWeb.Cookies do
 
   @session_name "__Host-biot_session"
   @login_name "__Host-biot_login"
+  @preview_name "__Host-biot_preview"
+  @handoff_name "__Host-biot_handoff"
   @login_max_age 10 * 60
+  @handoff_max_age 5 * 60
   @attributes [secure: true, http_only: true, same_site: "Lax", path: "/"]
 
   @spec session_name() :: String.t()
@@ -19,6 +22,12 @@ defmodule BiotWeb.Cookies do
 
   @spec login_name() :: String.t()
   def login_name, do: @login_name
+
+  @spec preview_name() :: String.t()
+  def preview_name, do: @preview_name
+
+  @spec handoff_name() :: String.t()
+  def handoff_name, do: @handoff_name
 
   @spec login_max_age() :: pos_integer()
   def login_max_age, do: @login_max_age
@@ -44,4 +53,14 @@ defmodule BiotWeb.Cookies do
       max_age: div(Sessions.control_lifetime_ms(), 1000)
     ] ++ @attributes
   end
+
+  @doc "Options for the preview session cookie, which lasts as long as its parent login."
+  @spec preview_options() :: keyword()
+  def preview_options do
+    [max_age: div(Sessions.control_lifetime_ms(), 1000)] ++ @attributes
+  end
+
+  @doc "Options for the short-lived preview handoff challenge cookie."
+  @spec handoff_options() :: keyword()
+  def handoff_options, do: [max_age: @handoff_max_age] ++ @attributes
 end

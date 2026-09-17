@@ -23,7 +23,7 @@ defmodule Biot.Server.AccessAdmissionIntegrationTest do
   alias Biot.Server.Tokens
 
   @shell %ShellRequest{term: "xterm", cols: 80, rows: 24, command: nil}
-  @open_timeout_ms 1_000
+  @open_timeout_ms 300
   @ssh_key "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINzyzz1M9L5KLhn5k5Lh3Peq0ipDgKB4DPAJ0A7UqS06"
 
   setup_all do
@@ -444,20 +444,73 @@ defmodule Biot.Server.AccessAdmissionIntegrationTest do
       assert stream_id == second.stream_id
     end
 
-    test "a second stale revision returns timeout at once and sends no third open", context do
+    test "a stale admission waits for an applied-revision signal and then succeeds", context do
+      {_token, authentication} = AccessHarness.control(context.collaborator)
+      owner = Owner.start()
+      Owner.admit(owner, shell(authentication, context.biot))
+
+      first = AccessHarness.await_open(context.peer)
+      bump_access_revision(context.biot)
+      AccessHarness.refuse(context.peer, first.stream_id, :stale_access)
+
+      second = AccessHarness.await_open(context.peer)
+      assert second.access_revision == 2
+      AccessHarness.refuse(context.peer, second.stream_id, :stale_access)
+      AccessHarness.no_message(context.peer, Biot.Protocol.Message.OpenStream, 100)
+      AccessHarness.apply_access(context.peer, context.biot.id, 2)
+
+      third = AccessHarness.await_open(context.peer)
+      assert third.access_revision == 2
+      _attach = AccessHarness.attach(context.peer, third.stream_id)
+      assert {:ok, %Stream{id: stream_id}} = Owner.await_admitted(owner)
+      assert stream_id == third.stream_id
+    end
+
+    test "a withdrawn grant during a stale wait answers forbidden", context do
+      {_token, authentication} = AccessHarness.control(context.collaborator)
+      owner = Owner.start()
+      Owner.admit(owner, shell(authentication, context.biot))
+
+      first = AccessHarness.await_open(context.peer)
+      bump_access_revision(context.biot)
+      AccessHarness.refuse(context.peer, first.stream_id, :stale_access)
+
+      second = AccessHarness.await_open(context.peer)
+      AccessHarness.refuse(context.peer, second.stream_id, :stale_access)
+
+      Repo.delete_all(
+        from(g in ShellGrant,
+          where: g.biot_id == ^context.biot.id and g.principal_id == ^context.collaborator.id
+        )
+      )
+
+      bump_access_revision(context.biot)
+      AccessHarness.apply_access(context.peer, context.biot.id, 3)
+
+      assert Owner.await_admitted(owner) == {:error, :forbidden}
+      AccessHarness.no_message(context.peer, Biot.Protocol.Message.OpenStream, 100)
+      assert AccessHarness.registered_keys(owner) == []
+    end
+
+    test "a stale admission returns timeout only when its deadline expires without a signal",
+         context do
       {_token, authentication} = AccessHarness.control(context.collaborator)
       owner = Owner.start()
       started = System.monotonic_time(:millisecond)
       Owner.admit(owner, shell(authentication, context.biot))
 
       first = AccessHarness.await_open(context.peer)
+      bump_access_revision(context.biot)
       AccessHarness.refuse(context.peer, first.stream_id, :stale_access)
+
       second = AccessHarness.await_open(context.peer)
       AccessHarness.refuse(context.peer, second.stream_id, :stale_access)
 
-      assert Owner.await_admitted(owner) == {:error, :timeout}
-      assert System.monotonic_time(:millisecond) - started < @open_timeout_ms
-      AccessHarness.no_message(context.peer, Biot.Protocol.Message.OpenStream, 300)
+      assert Owner.await_admitted(owner, 2_000) == {:error, :timeout}
+      elapsed = System.monotonic_time(:millisecond) - started
+      assert elapsed >= @open_timeout_ms - 50, "admission returned too early after #{elapsed} ms"
+      assert elapsed < @open_timeout_ms + 300, "admission took #{elapsed} ms"
+      AccessHarness.no_message(context.peer, Biot.Protocol.Message.OpenStream, 100)
       assert AccessHarness.registered_keys(owner) == []
     end
 
