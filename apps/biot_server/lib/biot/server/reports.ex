@@ -9,6 +9,7 @@ defmodule Biot.Server.Reports do
   alias Biot.Protocol.ConnectionId
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.ExecutionReport
+  alias Biot.Protocol.Failure
   alias Biot.Protocol.Manifest
   alias Biot.Protocol.NodeId
   alias Biot.Server.CommitEffects
@@ -51,7 +52,8 @@ defmodule Biot.Server.Reports do
       |> Ecto.Multi.merge(&observation_writes/1)
 
     case Repo.transaction(multi, mode: :immediate) do
-      {:ok, %{result: :stored}} ->
+      {:ok, %{result: :stored} = changes} ->
+        log_execution_failure(Map.get(changes, :execution_failure), node_id, biot_id)
         CommitEffects.enforce(%CommitEffects{owners: [], wakes: [], readers: [biot_id]})
         {:ok, :stored}
 
@@ -209,13 +211,24 @@ defmodule Biot.Server.Reports do
   end
 
   defp observation_writes(%{plan: {:store, observation, operation, outcome}}) do
-    Ecto.Multi.new()
-    |> Ecto.Multi.insert(:observation, observation,
-      on_conflict: {:replace, observation_fields()},
-      conflict_target: :biot_id
-    )
-    |> maybe_update_operation(operation, outcome)
-    |> Ecto.Multi.put(:result, :stored)
+    multi =
+      Ecto.Multi.new()
+      |> Ecto.Multi.insert(:observation, observation,
+        on_conflict: {:replace, observation_fields()},
+        conflict_target: :biot_id
+      )
+      |> maybe_update_operation(operation, outcome)
+
+    multi =
+      case {outcome, observation.failure} do
+        {{:failed, %Failure{}}, {target_revision, %Failure{} = failure}} ->
+          Ecto.Multi.put(multi, :execution_failure, {target_revision, failure})
+
+        _other ->
+          multi
+      end
+
+    Ecto.Multi.put(multi, :result, :stored)
   end
 
   defp maybe_update_operation(multi, %Operation{} = operation, :succeeded) do
@@ -236,6 +249,21 @@ defmodule Biot.Server.Reports do
 
   defp maybe_update_operation(multi, _operation, :pending), do: multi
   defp maybe_update_operation(multi, _operation, :no_change), do: multi
+
+  defp log_execution_failure(nil, _node_id, _biot_id), do: :ok
+
+  defp log_execution_failure(
+         {target_revision, %Failure{} = failure},
+         node_id,
+         biot_id
+       ) do
+    Logger.warning(
+      "node execution failed: node_id=#{NodeId.to_string(node_id)} " <>
+        "biot_id=#{BiotId.to_string(biot_id)} target_revision=#{target_revision} " <>
+        "stage=#{failure.stage} code=#{failure.code} retry=#{failure.retry} " <>
+        "message=#{inspect(failure.message)}"
+    )
+  end
 
   defp operation_outcome(%Operation{outcome: outcome}, _biot, _report)
        when outcome in [:succeeded, :failed, :superseded],

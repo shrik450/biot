@@ -13,9 +13,12 @@ defmodule Biot.Server.Streams do
   cannot send the next chunk until the owner has processed this one.
   """
 
+  require Logger
+
   alias Biot.Protocol.BiotId
   alias Biot.Protocol.Message
   alias Biot.Protocol.NodeId
+  alias Biot.Protocol.Port
   alias Biot.Protocol.ShellFrame
   alias Biot.Protocol.StreamFailure
   alias Biot.Protocol.StreamId
@@ -56,28 +59,32 @@ defmodule Biot.Server.Streams do
         deadline
       )
       when is_integer(deadline) do
-    with {:ok, connection_pid, connection_id} <- ready_connection(node_id),
-         :ok <- before(deadline) do
-      id = StreamId.generate()
-      kind = StreamTarget.kind(target)
-      :ok = Pending.register(id, node_id, connection_id, connection_pid, kind, self())
+    result =
+      with {:ok, connection_pid, connection_id} <- ready_connection(node_id),
+           :ok <- before(deadline) do
+        id = StreamId.generate()
+        kind = StreamTarget.kind(target)
+        :ok = Pending.register(id, node_id, connection_id, connection_pid, kind, self())
 
-      message = %Message.OpenStream{
-        connection_id: connection_id,
-        access_revision: access_revision,
-        stream_id: id,
-        biot_id: biot_id,
-        target: target
-      }
+        message = %Message.OpenStream{
+          connection_id: connection_id,
+          access_revision: access_revision,
+          stream_id: id,
+          biot_id: biot_id,
+          target: target
+        }
 
-      case ControlConnection.open_stream(connection_pid, message, remaining(deadline)) do
-        :ok ->
-          await(id, connection_pid, deadline)
+        case ControlConnection.open_stream(connection_pid, message, remaining(deadline)) do
+          :ok ->
+            await(id, connection_pid, deadline)
 
-        {:error, :node_unavailable} ->
-          deadline(id, connection_pid, deadline, :node_unavailable)
+          {:error, :node_unavailable} ->
+            deadline(id, connection_pid, deadline, :node_unavailable)
+        end
       end
-    end
+
+    log_timeout(result, node_id, biot_id, target)
+    result
   end
 
   @doc """
@@ -143,6 +150,18 @@ defmodule Biot.Server.Streams do
   defp remaining(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
   defp before(deadline), do: if(remaining(deadline) > 0, do: :ok, else: {:error, :timeout})
+
+  defp log_timeout({:error, :timeout}, node_id, biot_id, target) do
+    Logger.warning(
+      "stream open timed out: biot_id=#{BiotId.to_string(biot_id)} " <>
+        "node_id=#{NodeId.to_string(node_id)} target=#{target_description(target)}"
+    )
+  end
+
+  defp log_timeout(_result, _node_id, _biot_id, _target), do: :ok
+
+  defp target_description({:port, port}), do: "port=#{Port.to_string(port)}"
+  defp target_description({:shell, _request}), do: "shell"
 
   defp await(id, connection_pid, deadline) do
     receive do
