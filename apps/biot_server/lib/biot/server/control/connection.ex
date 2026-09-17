@@ -300,7 +300,9 @@ defmodule Biot.Server.Control.Connection do
         {:DOWN, reference, :process, _pid, _reason},
         {socket, %State{owner_monitor: reference} = state}
       ) do
-    {:stop, :normal, {socket, state}}
+    # The socket belongs to the stream owner now. Route its normal end through ThousandIsland's
+    # close callback instead of the bare-normal termination path, which is treated as an error.
+    {:stop, {:shutdown, :stream_owner_closed}, {socket, state}}
   end
 
   @impl GenServer
@@ -334,12 +336,25 @@ defmodule Biot.Server.Control.Connection do
   end
 
   @impl ThousandIsland.Handler
+  def handle_close(_socket, %State{phase: :ready, node_id: node_id} = state) do
+    Logger.warning("node control connection closed for node #{node_id}")
+    cleanup(state)
+  end
+
   def handle_close(_socket, state), do: cleanup(state)
 
   @impl ThousandIsland.Handler
   def handle_error(reason, _socket, state) do
-    Logger.warning("node control connection closed: #{inspect(reason)}")
+    log_control_error(reason, state)
     cleanup(state)
+  end
+
+  defp log_control_error(reason, %State{phase: :ready, node_id: node_id}) do
+    Logger.warning("node control connection failed for node #{node_id}: #{inspect(reason)}")
+  end
+
+  defp log_control_error(reason, _state) do
+    Logger.warning("node control connection failed: #{inspect(reason)}")
   end
 
   @impl ThousandIsland.Handler
