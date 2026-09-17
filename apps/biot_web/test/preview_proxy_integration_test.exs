@@ -178,6 +178,82 @@ defmodule BiotWeb.PreviewProxyIntegrationTest do
     assert response.body == "abcde"
   end
 
+  test "a request body exactly at the limit is forwarded", context do
+    previous_max = Application.get_env(:biot_server, :preview_request_max_bytes)
+    previous_chunk = Application.get_env(:biot_server, :preview_request_chunk_bytes)
+    Application.put_env(:biot_server, :preview_request_max_bytes, 4)
+    Application.put_env(:biot_server, :preview_request_chunk_bytes, 2)
+
+    on_exit(fn ->
+      Application.put_env(:biot_server, :preview_request_max_bytes, previous_max)
+      Application.put_env(:biot_server, :preview_request_chunk_bytes, previous_chunk)
+    end)
+
+    {:ok, proxy, proxy_port} = start_proxy()
+    on_exit(fn -> stop_bandit(proxy) end)
+
+    client =
+      Task.async(fn ->
+        http_request(
+          proxy_port,
+          preview_host(context.hostname),
+          "/exact",
+          [
+            {"content-length", "4"},
+            {"x-biot-authorization", "Bearer " <> context.viewer_credential}
+          ],
+          "abcd"
+        )
+      end)
+
+    open = AccessHarness.await_open(context.peer)
+    attach = AccessHarness.attach(context.peer, open.stream_id)
+    :ok = :ssl.send(attach, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+
+    response = Task.await(client, @timeout)
+    assert response.status == 200
+    assert response.body == "ok"
+    _ = :ssl.close(attach)
+  end
+
+  test "a request body one byte over the limit is refused after cumulative reads", context do
+    previous_max = Application.get_env(:biot_server, :preview_request_max_bytes)
+    previous_chunk = Application.get_env(:biot_server, :preview_request_chunk_bytes)
+    Application.put_env(:biot_server, :preview_request_max_bytes, 4)
+    Application.put_env(:biot_server, :preview_request_chunk_bytes, 2)
+
+    on_exit(fn ->
+      Application.put_env(:biot_server, :preview_request_max_bytes, previous_max)
+      Application.put_env(:biot_server, :preview_request_chunk_bytes, previous_chunk)
+    end)
+
+    {:ok, proxy, proxy_port} = start_proxy()
+    on_exit(fn -> stop_bandit(proxy) end)
+
+    client =
+      Task.async(fn ->
+        http_request(
+          proxy_port,
+          preview_host(context.hostname),
+          "/over",
+          [
+            {"content-length", "5"},
+            {"x-biot-authorization", "Bearer " <> context.viewer_credential}
+          ],
+          "abcde"
+        )
+      end)
+
+    open = AccessHarness.await_open(context.peer)
+    attach = AccessHarness.attach(context.peer, open.stream_id)
+    :ok = :ssl.send(attach, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+
+    response = Task.await(client, @timeout)
+    assert response.status == 413
+    assert response.body =~ "Request too large"
+    _ = :ssl.close(attach)
+  end
+
   test "a person without a view grant gets 403 with a control-host link", context do
     {:ok, proxy, proxy_port} = start_proxy()
     on_exit(fn -> stop_bandit(proxy) end)
@@ -277,6 +353,47 @@ defmodule BiotWeb.PreviewProxyIntegrationTest do
       ])
 
     assert denied.status == 403
+  end
+
+  test "an incomplete upstream handshake at the exact limit keeps waiting for more bytes",
+       context do
+    previous_head_max = Application.get_env(:biot_server, :preview_head_max_bytes)
+    Application.put_env(:biot_server, :preview_head_max_bytes, 34)
+
+    on_exit(fn ->
+      Application.put_env(:biot_server, :preview_head_max_bytes, previous_head_max)
+    end)
+
+    {:ok, proxy, proxy_port} = start_proxy()
+    on_exit(fn -> stop_bandit(proxy) end)
+
+    client =
+      Task.async(fn ->
+        {:ok, socket} =
+          websocket_connect(
+            proxy_port,
+            preview_host(context.hostname),
+            [
+              {"x-biot-authorization", "Bearer " <> context.viewer_credential}
+            ],
+            nil
+          )
+
+        result = :gen_tcp.recv(socket, 0, @timeout)
+        :gen_tcp.close(socket)
+        result
+      end)
+
+    open = AccessHarness.await_open(context.peer)
+    attach = AccessHarness.attach(context.peer, open.stream_id)
+    assert {:ok, _handshake} = :ssl.recv(attach, 0, @timeout)
+    :ok = :ssl.send(attach, "HTTP/1.1 101 Switching Protocols\r\n")
+
+    assert Task.yield(client, 100) == nil
+
+    :ok = :ssl.close(attach)
+    result = Task.await(client, @timeout)
+    assert match?({:error, :closed}, result) or match?({:ok, _data}, result)
   end
 
   test "upstream Biot cookies are stripped while ordinary cookies pass through", context do

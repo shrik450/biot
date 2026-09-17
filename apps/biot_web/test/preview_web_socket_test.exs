@@ -42,6 +42,9 @@ defmodule BiotWeb.PreviewWebSocketTest do
     assert WebSocket.decode(WebSocket.new(@max), <<0x82, 127, 0x80, 0, 0, 0, 0, 0, 0, 1>>) ==
              {:error, :invalid_frame}
 
+    assert WebSocket.decode(WebSocket.new(@max), <<0x82, 127, 0x80, 0, 0, 0, 0, 0, 0, 0>>) ==
+             {:error, :invalid_frame}
+
     assert {:ok, [{:data, :binary, payload}], %WebSocket{buffer: <<>>}} =
              WebSocket.decode(WebSocket.new(@max), server_frame(0x2, :binary.copy(<<7>>, @max)))
 
