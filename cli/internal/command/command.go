@@ -34,6 +34,12 @@ func (c *Command) Execute(context Context, arguments []string) error {
 	if arguments[0] == "--help" || arguments[0] == "-h" {
 		return c.Help(context, arguments[1:])
 	}
+	if strings.HasPrefix(arguments[0], "-") {
+		if c.Run != nil {
+			return c.Run(context, arguments)
+		}
+		return fmt.Errorf("unknown flag %q; run biot %s --help", arguments[0], c.Name)
+	}
 	for _, child := range c.Children {
 		if child.Name == arguments[0] {
 			return child.Execute(context, arguments[1:])
@@ -83,8 +89,15 @@ func RequireArguments(commandName string, arguments []string, count int) error {
 func RejectUnknown(arguments []string, allowed ...string) error {
 	for _, argument := range arguments {
 		if strings.HasPrefix(argument, "-") && !contains(allowed, argument) {
-			return fmt.Errorf("unknown option %q", argument)
+			return fmt.Errorf("unknown flag %q", argument)
 		}
+	}
+	return nil
+}
+
+func RequireAtMostArguments(commandName string, arguments []string, count int) error {
+	if len(arguments) > count {
+		return fmt.Errorf("%s accepts at most %d argument%s; run biot %s --help", commandName, count, plural(count), commandName)
 	}
 	return nil
 }

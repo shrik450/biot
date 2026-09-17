@@ -29,7 +29,8 @@ defmodule Biot.MixProject do
       check: [
         "format --check-formatted",
         "credo --strict",
-        "compile --warnings-as-errors --force"
+        "compile --warnings-as-errors --force",
+        "biot.check_cli_error_vocabulary"
       ]
     ]
   end

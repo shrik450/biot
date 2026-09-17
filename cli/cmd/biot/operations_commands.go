@@ -57,7 +57,17 @@ func init() {
 }
 
 func runSSH(commandContext command.Context, arguments []string) error {
-	if len(arguments) == 0 {
+	separator := len(arguments)
+	for index, argument := range arguments {
+		if argument == "--" {
+			separator = index
+			break
+		}
+	}
+	if err := rejectUnknown("ssh", arguments[:separator], "--identity", "--"); err != nil {
+		return err
+	}
+	if len(arguments) == 0 || separator == 0 {
 		return errors.New("ssh expects a Biot name or ID; run biot ssh --help")
 	}
 	reference := arguments[0]
@@ -98,7 +108,20 @@ func runSSH(commandContext command.Context, arguments []string) error {
 	if deployment.SSH.Host == "" || deployment.SSH.Port < 1 || deployment.SSH.Port > 65_535 {
 		return errors.New("the server returned unusable SSH connection details")
 	}
-	sshArguments := make([]string, 0, 5+len(remoteCommand))
+	if len(deployment.SSH.HostKeys) == 0 {
+		return errors.New("the server has no SSH host key configured; ask an administrator to set BIOT_SSH_HOST_KEY_FILE")
+	}
+	knownHosts, err := writeKnownHosts(deployment.SSH.Host, deployment.SSH.Port, deployment.SSH.HostKeys)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(knownHosts)
+	sshArguments := make([]string, 0, 11+len(remoteCommand))
+	sshArguments = append(sshArguments,
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "UserKnownHostsFile="+knownHosts,
+		"-o", "GlobalKnownHostsFile=/dev/null",
+	)
 	if identity != "" {
 		sshArguments = append(sshArguments, "-i", identity)
 	}
@@ -129,9 +152,52 @@ func runSSH(commandContext command.Context, arguments []string) error {
 	return nil
 }
 
+func writeKnownHosts(host string, port int, keys []api.HostKey) (string, error) {
+	file, err := os.CreateTemp("", "biot-known-hosts-")
+	if err != nil {
+		return "", fmt.Errorf("prepare SSH host-key verification: %w", err)
+	}
+	path := file.Name()
+	remove := true
+	defer func() {
+		if remove {
+			_ = file.Close()
+			_ = os.Remove(path)
+		}
+	}()
+
+	address := knownHostsAddress(host, port)
+	for _, key := range keys {
+		if key.Type == "" || key.PublicKey == "" || key.Fingerprint == "" {
+			return "", errors.New("the server returned an incomplete SSH host key; ask an administrator to check its configuration")
+		}
+		if !strings.HasPrefix(key.PublicKey, key.Type+" ") {
+			return "", errors.New("the server returned an invalid SSH host key; ask an administrator to check its configuration")
+		}
+		if _, err := fmt.Fprintf(file, "%s %s\n", address, strings.TrimSpace(key.PublicKey)); err != nil {
+			return "", fmt.Errorf("prepare SSH host-key verification: %w", err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("prepare SSH host-key verification: %w", err)
+	}
+	remove = false
+	return path, nil
+}
+
+func knownHostsAddress(host string, port int) string {
+	if strings.Contains(host, ":") {
+		return fmt.Sprintf("[%s]:%d", strings.Trim(host, "[]"), port)
+	}
+	if port == 22 {
+		return host
+	}
+	return fmt.Sprintf("[%s]:%d", host, port)
+}
+
 func runNodes(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 0 {
-		return errors.New("nodes takes no arguments; run biot nodes --help")
+	if err := validateArguments("nodes", arguments, 0); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -181,8 +247,8 @@ func runNodes(commandContext command.Context, arguments []string) error {
 }
 
 func runDiagnose(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("diagnose expects a Biot name or ID; run biot diagnose --help")
+	if err := validateArguments("diagnose", arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -207,8 +273,8 @@ func runDiagnose(commandContext command.Context, arguments []string) error {
 }
 
 func runLogs(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("logs expects a Biot name or ID; run biot logs --help")
+	if err := validateArguments("logs", arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {

@@ -21,7 +21,7 @@ defmodule BiotWeb.Components.BiotSecrets do
     assigns =
       assigns
       |> assign(:secret_summary, UserMessage.summary(assigns.secret_error, [:name, :value]))
-      |> assign(:fetch_summary, UserMessage.summary(assigns.fetch_error, [:value]))
+      |> assign(:fetch_summary, fetch_summary(assigns.fetch_error))
 
     ~H"""
     <div class="secrets-panels">
@@ -207,4 +207,13 @@ defmodule BiotWeb.Components.BiotSecrets do
 
   defp fetch_source(%{__struct__: RepositorySource}), do: true
   defp fetch_source(_source), do: false
+
+  # `:not_requested` is this panel's own state, not a field or command error: the node stopped
+  # waiting between the page's snapshot and the submit. Say what to do about it, the way every
+  # other message in the product does.
+  defp fetch_summary(:not_requested),
+    do:
+      "The node is not waiting for a credential right now. If it still needs one, it will ask again and this page will show the request; wait for that before delivering."
+
+  defp fetch_summary(error), do: UserMessage.summary(error, [:value])
 end

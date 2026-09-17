@@ -25,7 +25,7 @@ func init() {
 			Name:        "share",
 			Synopsis:    "biot share NAME_OR_ID --to EMAIL (--port PORT | --shell)",
 			Description: "Give one person shell access or access to one published port.",
-			Options: "  --to EMAIL       Principal email to resolve.\n" +
+			Options: "  --to EMAIL       Required. Person to grant access to.\n" +
 				"  --port PORT      Grant access to one published port.\n" +
 				"  --shell          Grant shell access.\n" +
 				"  -h, --help       Show this help.",
@@ -35,7 +35,7 @@ func init() {
 			Name:        "unshare",
 			Synopsis:    "biot unshare NAME_OR_ID --to EMAIL (--port PORT | --shell)",
 			Description: "Remove one person's shell access or publication access.",
-			Options: "  --to EMAIL       Principal email to resolve.\n" +
+			Options: "  --to EMAIL       Required. Person whose access should be removed.\n" +
 				"  --port PORT      Remove access to one published port.\n" +
 				"  --shell          Remove shell access.\n" +
 				"  -h, --help       Show this help.",
@@ -139,6 +139,9 @@ func shareDescription(kind string, options shareOptions) string {
 }
 
 func parseShareOptions(action string, arguments []string) (shareOptions, error) {
+	if err := rejectUnknown(action, arguments, "--to", "--port", "--shell"); err != nil {
+		return shareOptions{}, err
+	}
 	if len(arguments) == 0 {
 		return shareOptions{}, fmt.Errorf("%s expects a Biot name or ID and sharing options; run biot %s --help", action, action)
 	}
@@ -189,8 +192,8 @@ func parseShareOptions(action string, arguments []string) (shareOptions, error) 
 }
 
 func runGrants(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("grants expects a Biot name or ID; run biot grants --help")
+	if err := validateArguments("grants", arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {

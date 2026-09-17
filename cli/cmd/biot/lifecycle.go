@@ -30,13 +30,14 @@ func init() {
 			Name:        "create",
 			Synopsis:    "biot create --repo URL --name NAME [options]",
 			Description: "Create a Biot and wait until it is ready.",
-			Options: "  --repo URL              HTTPS repository to check out.\n" +
-				"  --name NAME             Biot name.\n" +
+			Options: "  --repo URL              Required. HTTPS repository to check out.\n" +
+				"  --name NAME             Required. Name for the new Biot.\n" +
 				"  --node ID               Node ID (the server chooses one by default).\n" +
 				"  --layer URL#REF         Nix layer source; repeatable.\n" +
 				"  --secret NAME           Runtime secret name; repeatable.\n" +
 				"  --fetch-credential URL  Source-fetch credential URL; repeatable.\n" +
-				"  --stdin                 Read one credential value from standard input.",
+				"  --stdin                 Read exactly one value from standard input; use with exactly one --secret or --fetch-credential.\n" +
+				"  -h, --help              Show this help.",
 			Run: runCreate,
 		},
 		&command.Command{
@@ -211,8 +212,8 @@ func runStop(commandContext command.Context, arguments []string) error {
 }
 
 func runLifecycle(commandContext command.Context, arguments []string, action string) error {
-	if len(arguments) != 1 {
-		return fmt.Errorf("%s expects a Biot name or ID; run biot %s --help", action, action)
+	if err := validateArguments(action, arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -242,8 +243,8 @@ func runLifecycle(commandContext command.Context, arguments []string, action str
 }
 
 func runRestart(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("restart expects a Biot name or ID; run biot restart --help")
+	if err := validateArguments("restart", arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -285,8 +286,8 @@ func runRestart(commandContext command.Context, arguments []string) error {
 }
 
 func runRebuild(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("rebuild expects a Biot name or ID; run biot rebuild --help")
+	if err := validateArguments("rebuild", arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -314,8 +315,8 @@ func runRebuild(commandContext command.Context, arguments []string) error {
 }
 
 func runDestroy(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("destroy expects a Biot name or ID; run biot destroy --help")
+	if err := validateArguments("destroy", arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -340,8 +341,8 @@ func runDestroy(commandContext command.Context, arguments []string) error {
 }
 
 func runWait(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("wait expects a Biot name or ID; run biot wait --help")
+	if err := validateArguments("wait", arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -364,6 +365,9 @@ func runWait(commandContext command.Context, arguments []string) error {
 }
 
 func parseCreateOptions(arguments []string) (createOptions, error) {
+	if err := rejectUnknown("create", arguments, "--repo", "--name", "--node", "--layer", "--secret", "--fetch-credential", "--stdin"); err != nil {
+		return createOptions{}, err
+	}
 	options := createOptions{}
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]

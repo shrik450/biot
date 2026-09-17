@@ -3,6 +3,8 @@ defmodule BiotWeb.ClosedVocabularyTest do
 
   import Phoenix.LiveViewTest
 
+  alias Biot.Protocol.FieldReason
+  alias Biot.Server.CommandError
   alias BiotWeb.Components.Role
   alias BiotWeb.Components.Status
   alias BiotWeb.Live.BiotTabs
@@ -32,6 +34,64 @@ defmodule BiotWeb.ClosedVocabularyTest do
       assert BiotTabs.visible?(%{role: role}, tab) == MapSet.member?(expected[name], tab),
              "unexpected visibility for #{name}/#{tab}"
     end
+  end
+
+  test "every field reason has a distinct non-generic rendered sentence" do
+    messages =
+      for reason <- FieldReason.all(), into: %{} do
+        {reason, UserMessage.error({:invalid_input, %{kind: [reason]}})}
+      end
+
+    assert map_size(messages) == length(FieldReason.all())
+
+    for {reason, message} <- messages do
+      assert String.starts_with?(message, "grant "), "#{reason} was not rendered as a field"
+      refute message == "The server could not complete that request."
+    end
+
+    assert map_size(Map.new(messages, fn {_reason, message} -> {message, true} end)) ==
+             length(FieldReason.all())
+  end
+
+  test "an unknown field reason raises instead of rendering a fallback" do
+    assert_raise KeyError, fn ->
+      UserMessage.error({:invalid_input, %{kind: [:invented_reason]}})
+    end
+  end
+
+  test "every field reason also has a non-generic atom message" do
+    for reason <- FieldReason.all() do
+      refute UserMessage.error(reason) == "The server could not complete that request."
+    end
+  end
+
+  test "field reasons are not whole sentences glued after a field label" do
+    assert UserMessage.field_error(:kind, :publication_not_active) ==
+             "grant is no longer active; reload and choose an active one."
+
+    assert UserMessage.error({:invalid_input, %{kind: [:publication_not_active]}}) ==
+             "grant is no longer active; reload and choose an active one."
+  end
+
+  test "CommandError rejects a reason outside the closed vocabulary" do
+    assert_raise ArgumentError, ~r/unknown field reason/, fn ->
+      CommandError.invalid_input(%{name: [:invented_reason]})
+    end
+  end
+
+  test "CommandError accepts every declared reason" do
+    for reason <- FieldReason.all() do
+      assert {:error, {:invalid_input, %{name: [^reason]}}} =
+               CommandError.invalid_input(%{name: [reason]})
+    end
+  end
+
+  test "summary leaves inline errors at their fields and retains unattached errors" do
+    error = {:invalid_input, %{name: [:missing], form: [:invalid_format]}}
+
+    assert UserMessage.summary(error, [:name]) == "form has an invalid format."
+    assert UserMessage.summary(error, [:name, :form]) == nil
+    assert UserMessage.summary(:name_conflict, [:name]) == "That Biot name is already in use."
   end
 
   test "UserMessage covers every CommandError variant with its public wording" do

@@ -2,7 +2,7 @@
 
 // Package e2e drives the real biot binary against a real Biot server. It is
 // behind the e2e build tag because it needs a running Phoenix server, a bearer
-// token, and a Biot the token can read. See .work/cli-e2e-howto.md.
+// token, and a Biot the token can read. See README.md in this directory.
 package e2e
 
 import (

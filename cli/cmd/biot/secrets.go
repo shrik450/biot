@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/shrik450/biot/cli/internal/command"
@@ -25,7 +24,7 @@ func init() {
 					Name:        "set",
 					Synopsis:    "biot secret set NAME_OR_ID SECRET_NAME [--stdin]",
 					Description: "Read one hidden runtime secret value and deliver it to a Biot.",
-					Options: "  --stdin         Read exactly one value from standard input.\n" +
+					Options: "  --stdin         Read exactly one secret value from standard input.\n" +
 						"  -h, --help       Show this help.",
 					Run: runSecretSet,
 				},
@@ -55,7 +54,7 @@ func init() {
 					Name:        "set",
 					Synopsis:    "biot fetch-credential set NAME_OR_ID SOURCE_URL [--stdin]",
 					Description: "Read one hidden source-fetch credential and deliver it to a Biot.",
-					Options: "  --stdin         Read exactly one value from standard input.\n" +
+					Options: "  --stdin         Read exactly one source-fetch credential from standard input.\n" +
 						"  -h, --help       Show this help.",
 					Run: runFetchCredentialSet,
 				},
@@ -99,8 +98,8 @@ func runSecretSet(commandContext command.Context, arguments []string) error {
 }
 
 func runSecretRemove(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 2 {
-		return errors.New("secret rm expects a Biot name or ID and a secret name; run biot secret rm --help")
+	if err := validateArguments("secret rm", arguments, 2); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -120,8 +119,8 @@ func runSecretRemove(commandContext command.Context, arguments []string) error {
 }
 
 func runSecretList(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("secret list expects a Biot name or ID; run biot secret list --help")
+	if err := validateArguments("secret list", arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -175,8 +174,8 @@ func runFetchCredentialSet(commandContext command.Context, arguments []string) e
 }
 
 func runFetchCredentialRemove(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 2 {
-		return errors.New("fetch-credential rm expects a Biot name or ID and a source URL; run biot fetch-credential rm --help")
+	if err := validateArguments("fetch-credential rm", arguments, 2); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -196,6 +195,9 @@ func runFetchCredentialRemove(commandContext command.Context, arguments []string
 }
 
 func parseValueCommand(action string, arguments []string) (string, string, bool, error) {
+	if err := rejectUnknown(action, arguments, "--stdin"); err != nil {
+		return "", "", false, err
+	}
 	positionals := make([]string, 0, 2)
 	stdin := false
 	for _, argument := range arguments {
@@ -206,12 +208,9 @@ func parseValueCommand(action string, arguments []string) (string, string, bool,
 			stdin = true
 			continue
 		}
-		if strings.HasPrefix(argument, "-") {
-			return "", "", false, fmt.Errorf("unknown %s option %q; run biot %s --help", action, argument, action)
-		}
 		positionals = append(positionals, argument)
 	}
-	if len(positionals) != 2 {
+	if err := command.RequireArguments(action, positionals, 2); err != nil {
 		return "", "", false, fmt.Errorf("%s expects a Biot name or ID and a value name; run biot %s --help", action, action)
 	}
 	return positionals[0], positionals[1], stdin, nil

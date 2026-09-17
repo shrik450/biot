@@ -1,0 +1,32 @@
+already_registered|field|0|is already registered; use a different key.|none
+capacity_exceeded|command|0|The selected node has no available capacity.|none
+creation_conflict|command|0|A Biot with that ID is already being created.|none
+destroyed|command|0|This Biot has been destroyed.|none
+embedded_credentials|field|0|must not embed credentials; deliver them as a source-fetch credential instead.|none
+forbidden|command|0|You do not have permission to do that.|none
+hostname_conflict|command|0|That hostname is already in use.|none
+invalid_format|field|0|has an invalid format.|none
+invalid_input|command|0|The request contains invalid input.|none
+invalid_value|field|0|has an invalid value.|none
+missing|field|0|is required.|none
+name_conflict|command|0|That Biot name is already in use.|none
+name_too_long|field|63|is longer than 63 characters; shorten it.|none
+no_default_node|field|0|is required because the server has no default node; choose one.|none
+node_abandoned|command|0|The selected node is abandoned.|none
+node_disabled|command|0|The selected node is disabled.|none
+not_found|command|0|That resource was not found.|none
+not_future|field|0|must be in the future; choose a later time.|none
+not_ready|field|0|is not ready yet.|none
+nul_byte|field|0|must not contain a NUL byte.|none
+out_of_range|field|0|is outside the allowed range.|none
+publication_not_active|field|0|is no longer active.|required
+repository_url_too_long|field|2048|is longer than 2048 characters; shorten it.|none
+reserved_name|field|0|is reserved; choose another name.|none
+revision_conflict|command|0|This Biot changed; its current revision is {revision}.|required
+secret_value_too_large|field|65536|is larger than 65536 bytes; shorten it.|none
+source_ref_too_long|field|256|is longer than 256 characters; shorten it.|none
+temporarily_unavailable|command|0|The server could not provide that resource right now.|none
+too_far|field|0|is beyond the allowed lifetime; choose an earlier time.|none
+too_many_layers|field|16|has more than 16 layers; remove one.|none
+unauthenticated|command|0|Your session is no longer valid.|required
+unknown_principal|field|0|does not identify a known principal; check the email address.|none

@@ -9,10 +9,19 @@ import (
 	"os/signal"
 	"strings"
 
+	"github.com/shrik450/biot/cli/internal/api"
 	"golang.org/x/term"
 )
 
-const maxSecretBytes = 64 * 1024
+var maxSecretBytes = secretValueLimit()
+
+func secretValueLimit() int {
+	limit, ok := api.FieldReasonLimit("secret_value_too_large")
+	if !ok {
+		panic("CLI vocabulary has no secret value limit")
+	}
+	return limit
+}
 
 func IsTerminal(file *os.File) bool {
 	return term.IsTerminal(int(file.Fd()))
@@ -67,19 +76,19 @@ func Secret(prompt string, input *os.File, output io.Writer) ([]byte, error) {
 	}
 	if len(value) > maxSecretBytes {
 		clear(value)
-		return nil, errors.New("secret value is too long")
+		return nil, errors.New(api.FieldReasonMessage("value", "secret_value_too_large"))
 	}
 	return value, nil
 }
 
 func StdinSecret(input io.Reader) ([]byte, error) {
-	value, err := io.ReadAll(io.LimitReader(input, maxSecretBytes+1))
+	value, err := io.ReadAll(io.LimitReader(input, int64(maxSecretBytes)+1))
 	if err != nil {
 		return nil, fmt.Errorf("read secret from stdin: %w", err)
 	}
 	if len(value) > maxSecretBytes {
 		clear(value)
-		return nil, errors.New("secret value is too long")
+		return nil, errors.New(api.FieldReasonMessage("value", "secret_value_too_large"))
 	}
 	return value, nil
 }

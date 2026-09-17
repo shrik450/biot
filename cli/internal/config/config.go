@@ -88,3 +88,18 @@ func Remove() error {
 	}
 	return nil
 }
+
+func Exists() (bool, error) {
+	path, err := Path()
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("check Biot configuration: %w", err)
+}

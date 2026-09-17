@@ -76,8 +76,8 @@ func init() {
 }
 
 func runSSHKeyAdd(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("ssh-key add expects a public-key file; run biot ssh-key add --help")
+	if err := validateArguments("ssh-key add", arguments, 1); err != nil {
+		return err
 	}
 	contents, err := os.ReadFile(arguments[0])
 	if err != nil {
@@ -109,8 +109,8 @@ func runSSHKeyAdd(commandContext command.Context, arguments []string) error {
 }
 
 func runSSHKeyList(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 0 {
-		return errors.New("ssh-key list takes no arguments; run biot ssh-key list --help")
+	if err := validateArguments("ssh-key list", arguments, 0); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -134,8 +134,8 @@ func runSSHKeyList(commandContext command.Context, arguments []string) error {
 }
 
 func runSSHKeyRemove(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("ssh-key rm expects a key ID; run biot ssh-key rm --help")
+	if err := validateArguments("ssh-key rm", arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -151,8 +151,8 @@ func runSSHKeyRemove(commandContext command.Context, arguments []string) error {
 }
 
 func runTokenCreate(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 0 {
-		return errors.New("token create takes no arguments; run biot token create --help")
+	if err := validateArguments("token create", arguments, 0); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -165,8 +165,8 @@ func runTokenCreate(commandContext command.Context, arguments []string) error {
 }
 
 func runTokenList(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 0 {
-		return errors.New("token list takes no arguments; run biot token list --help")
+	if err := validateArguments("token list", arguments, 0); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -194,8 +194,8 @@ func runTokenList(commandContext command.Context, arguments []string) error {
 }
 
 func runTokenRevoke(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("token revoke expects a credential ID; run biot token revoke --help")
+	if err := validateArguments("token revoke", arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {

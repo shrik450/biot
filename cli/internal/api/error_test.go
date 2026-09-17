@@ -79,7 +79,9 @@ func TestInvalidInputMessageIsDeterministic(t *testing.T) {
 		"node_id": {"no_default_node"},
 	}
 	message := invalidInputMessage(fields)
-	if !strings.HasPrefix(message, "name is required.; node_id has no default node") {
+	name := strings.Index(message, "name ")
+	nodeID := strings.Index(message, "node_id ")
+	if name == -1 || nodeID == -1 || name > nodeID {
 		t.Fatalf("field errors should be sorted by field name: %q", message)
 	}
 }

@@ -12,9 +12,21 @@ import (
 var rootCommand = &command.Command{
 	Name:        "biot",
 	Synopsis:    "biot <command> [options]",
-	Description: "Manage Biot development environments through a Biot server.",
-	Options:     "  -h, --help       Show this help.",
+	Description: "Biot provides development environments managed through a Biot server. Start with: biot login SERVER_URL",
+	Options:     "  -h, --help       Show this help.\n  --version        Show the client version.",
+	Run: func(context command.Context, arguments []string) error {
+		if err := command.RejectUnknown(arguments, "--version"); err != nil {
+			return fmt.Errorf("%w; run biot --help", err)
+		}
+		if len(arguments) == 1 && arguments[0] == "--version" {
+			_, err := fmt.Fprintln(context.Stdout, "biot "+clientVersion)
+			return err
+		}
+		return errors.New("run biot --help for available commands")
+	},
 }
+
+const clientVersion = "dev"
 
 var commandOrderNames = map[string]int{
 	"login": 0, "logout": 1, "list": 2, "show": 3,
@@ -51,4 +63,18 @@ func commandOrder(name string) int {
 		return order
 	}
 	return 1000
+}
+
+func validateArguments(commandName string, arguments []string, count int, allowed ...string) error {
+	if err := rejectUnknown(commandName, arguments, allowed...); err != nil {
+		return err
+	}
+	return command.RequireArguments(commandName, arguments, count)
+}
+
+func rejectUnknown(commandName string, arguments []string, allowed ...string) error {
+	if err := command.RejectUnknown(arguments, allowed...); err != nil {
+		return fmt.Errorf("%w; run biot %s --help", err, commandName)
+	}
+	return nil
 }

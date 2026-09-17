@@ -23,9 +23,24 @@ import (
 func init() {
 	rootCommand.Children = append(rootCommand.Children, []*command.Command{
 		{
+			Name:        "help",
+			Synopsis:    "biot help",
+			Description: "Show the Biot command list and the first steps for a new user.",
+			Options:     "  -h, --help       Show this help.",
+			Run: func(commandContext command.Context, arguments []string) error {
+				if err := rejectUnknown("help", arguments); err != nil {
+					return err
+				}
+				if err := command.RequireArguments("help", arguments, 0); err != nil {
+					return err
+				}
+				return rootCommand.Help(commandContext, nil)
+			},
+		},
+		{
 			Name:        "login",
 			Synopsis:    "biot login [SERVER_URL]",
-			Description: "Open the Biot account page, save a bearer token, and verify it.",
+			Description: "Open the account page, save a bearer token, and verify it. SERVER_URL is the HTTP or HTTPS address of your Biot server, such as https://biot.example.com.",
 			Options:     "  -h, --help       Show this help.",
 			Run:         runLogin,
 		},
@@ -54,8 +69,11 @@ func init() {
 }
 
 func runLogin(commandContext command.Context, arguments []string) error {
-	if len(arguments) > 1 {
-		return errors.New("login accepts at most one server URL; run biot login --help")
+	if err := rejectUnknown("login", arguments); err != nil {
+		return err
+	}
+	if err := command.RequireAtMostArguments("login", arguments, 1); err != nil {
+		return err
 	}
 	terminal, closeTerminal := openTerminal()
 	defer closeTerminal()
@@ -103,6 +121,9 @@ func runLogin(commandContext command.Context, arguments []string) error {
 	defer cancel()
 	principal, err := client.Me(requestContext)
 	if err != nil {
+		if api.IsUnauthenticated(err) {
+			return errors.New("The token was not accepted. Check the token and run biot login again.")
+		}
 		return err
 	}
 	if err := config.Save(config.Config{ServerURL: client.ServerURL(), Token: string(token)}); err != nil {
@@ -113,19 +134,27 @@ func runLogin(commandContext command.Context, arguments []string) error {
 }
 
 func runLogout(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 0 {
-		return errors.New("logout takes no arguments; run biot logout --help")
+	if err := validateArguments("logout", arguments, 0); err != nil {
+		return err
+	}
+	saved, err := config.Exists()
+	if err != nil {
+		return err
 	}
 	if err := config.Remove(); err != nil {
 		return err
+	}
+	if !saved {
+		fmt.Fprintln(commandContext.Stdout, "There was no saved session.")
+		return nil
 	}
 	fmt.Fprintln(commandContext.Stdout, "Logged out.")
 	return nil
 }
 
 func runList(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 0 {
-		return errors.New("list takes no arguments; run biot list --help")
+	if err := validateArguments("list", arguments, 0); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {
@@ -153,8 +182,8 @@ func runList(commandContext command.Context, arguments []string) error {
 }
 
 func runShow(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("show expects a Biot name or ID; run biot show --help")
+	if err := validateArguments("show", arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {

@@ -3,24 +3,33 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
 const maxResponseBytes = 8 << 20
 
+const transportNoticeDelay = 2 * time.Second
+
 type Client struct {
 	baseURL *url.URL
 	token   string
 	http    *http.Client
+	notice  io.Writer
 }
 
 type Error struct {
@@ -31,95 +40,145 @@ type Error struct {
 	Cause           error
 }
 
-var commandErrorTags = []string{
-	"unauthenticated",
-	"not_found",
-	"forbidden",
-	"invalid_input",
-	"revision_conflict",
-	"destroyed",
-	"creation_conflict",
-	"name_conflict",
-	"hostname_conflict",
-	"node_disabled",
-	"node_abandoned",
-	"capacity_exceeded",
-	"temporarily_unavailable",
+func IsUnauthenticated(err error) bool {
+	var apiError *Error
+	return errors.As(err, &apiError) && apiError.Tag == "unauthenticated"
 }
 
-// This is the field-error vocabulary emitted by the current HTTP API. Keep the
-// list explicit so adding a server-side reason requires a client mapping too.
-var serverFieldErrorReasons = []string{
-	"missing",
-	"invalid_format",
-	"out_of_range",
-	"too_long",
-	"too_short",
-	"invalid_value",
-	"no_default_node",
-	"already_registered",
-	"not_future",
-	"too_far",
-	"unknown_principal",
-	"not_requested",
-	"publication_not_active",
-	"not_ready",
-	"nul_byte",
-	"secret_value_too_large",
-	"too_many_layers",
-	"repository_url_too_long",
-	"source_ref_too_long",
-	"embedded_credentials",
+// This is the generated vocabulary emitted by the current HTTP API. The Mix task checks the
+// artifact against the server vocabularies; the client embeds that same artifact here.
+//
+//go:embed error_vocabulary.txt
+var vocabularyFile string
+
+type vocabularyEntry struct {
+	kind     string
+	limit    int
+	sentence string
+	remedy   bool
 }
 
-var errorMessages = map[string]string{
-	"unauthenticated":         "Your session is no longer valid. Run biot login.",
-	"not_found":               "That resource was not found.",
-	"forbidden":               "You do not have permission to do that.",
-	"invalid_input":           "The request contains invalid input.",
-	"revision_conflict":       "This Biot changed; reload and try again.",
-	"destroyed":               "This Biot has been destroyed.",
-	"creation_conflict":       "A Biot with that ID is already being created.",
-	"name_conflict":           "That Biot name is already in use.",
-	"hostname_conflict":       "That hostname is already in use.",
-	"node_disabled":           "The selected node is disabled.",
-	"node_abandoned":          "The selected node is abandoned.",
-	"capacity_exceeded":       "The selected node has no available capacity.",
-	"temporarily_unavailable": "The server could not provide that resource right now.",
+var vocabulary = parseVocabulary(vocabularyFile)
+
+var clientRemedies = map[string]string{
+	"unauthenticated":        "Run biot login.",
+	"revision_conflict":      "Run the command again.",
+	"publication_not_active": "choose an active publication.",
 }
 
-var fieldReasonMessages = map[string]string{
-	"missing":                 "is required.",
-	"invalid_format":          "has an invalid format.",
-	"out_of_range":            "is outside the allowed range.",
-	"too_long":                "is too long.",
-	"too_short":               "is too short.",
-	"invalid_value":           "has an invalid value.",
-	"no_default_node":         "has no default node; pass --node with a node ID.",
-	"already_registered":      "is already registered.",
-	"not_future":              "must be in the future.",
-	"too_far":                 "is beyond the allowed lifetime.",
-	"unknown_principal":       "does not identify a known principal.",
-	"not_requested":           "is not currently requested.",
-	"publication_not_active":  "is no longer active.",
-	"not_ready":               "is not ready yet.",
-	"nul_byte":                "must not contain a NUL byte.",
-	"secret_value_too_large":  "is larger than the maximum secret size.",
-	"too_many_layers":         "has too many layers.",
-	"repository_url_too_long": "exceeds the maximum repository URL length.",
-	"source_ref_too_long":     "exceeds the maximum source reference length.",
-	"embedded_credentials":    "must not embed credentials.",
+var placeholderPattern = regexp.MustCompile(`\{([a-z_][a-z0-9_]*)\}`)
+
+var expectedPlaceholders = map[string][]string{
+	"revision_conflict": {"revision"},
 }
+
+var serverFieldErrorReasons = vocabularyNames("field")
+
+var commandErrorTags = vocabularyNames("command")
 
 func init() {
 	for _, tag := range commandErrorTags {
-		if strings.TrimSpace(errorMessages[tag]) == "" {
+		entry, ok := vocabulary[tag]
+		if !ok || entry.kind != "command" || strings.TrimSpace(entry.sentence) == "" {
 			panic("CLI error vocabulary is incomplete for " + tag)
 		}
 	}
 	for _, reason := range serverFieldErrorReasons {
-		if strings.TrimSpace(fieldReasonMessages[reason]) == "" {
+		entry, ok := vocabulary[reason]
+		if !ok || entry.kind != "field" || strings.TrimSpace(entry.sentence) == "" {
 			panic("CLI field-error vocabulary is incomplete for " + reason)
+		}
+	}
+	for reason, entry := range vocabulary {
+		remedy, hasRemedy := clientRemedies[reason]
+		if entry.remedy != hasRemedy {
+			panic("CLI remedy coverage is incomplete for " + reason)
+		}
+		if entry.remedy && strings.TrimSpace(remedy) == "" {
+			panic("CLI remedy is empty for " + reason)
+		}
+		if entry.remedy {
+			first, _ := utf8.DecodeRuneInString(remedy)
+			if (entry.kind == "field" && !unicode.IsLower(first)) ||
+				(entry.kind == "command" && !unicode.IsUpper(first)) {
+				panic("CLI remedy has the wrong capitalization for " + reason)
+			}
+		}
+		validatePlaceholders(reason, entry.sentence)
+	}
+	for reason := range clientRemedies {
+		entry, ok := vocabulary[reason]
+		if !ok || !entry.remedy {
+			panic("CLI remedy is not declared by the vocabulary for " + reason)
+		}
+	}
+}
+
+func parseVocabulary(contents string) map[string]vocabularyEntry {
+	if !strings.HasSuffix(contents, "\n") {
+		panic("embedded CLI vocabulary artifact must end with a newline")
+	}
+	lines := strings.Split(strings.TrimSuffix(contents, "\n"), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		panic("embedded CLI vocabulary artifact must not be empty")
+	}
+	entries := make(map[string]vocabularyEntry, len(lines))
+	previous := ""
+	for _, line := range lines {
+		parts := strings.Split(line, "|")
+		if len(parts) != 5 || parts[0] == "" || parts[1] == "" || parts[3] == "" {
+			panic("embedded CLI vocabulary artifact has an invalid line")
+		}
+		if parts[0] <= previous {
+			panic("embedded CLI vocabulary artifact must be sorted and unique")
+		}
+		if parts[1] != "field" && parts[1] != "command" {
+			panic("embedded CLI vocabulary artifact has an invalid kind")
+		}
+		limit, err := strconv.Atoi(parts[2])
+		if err != nil || limit < 0 {
+			panic("embedded CLI vocabulary artifact has an invalid limit")
+		}
+		if parts[4] != "none" && parts[4] != "required" {
+			panic("embedded CLI vocabulary artifact has an invalid remedy marker")
+		}
+		entries[parts[0]] = vocabularyEntry{
+			kind:     parts[1],
+			limit:    limit,
+			sentence: parts[3],
+			remedy:   parts[4] == "required",
+		}
+		previous = parts[0]
+	}
+	return entries
+}
+
+func vocabularyNames(kind string) []string {
+	names := make([]string, 0)
+	for name, entry := range vocabulary {
+		if entry.kind == kind {
+			names = append(names, name)
+		}
+	}
+	slicesSort(names)
+	return names
+}
+
+func validatePlaceholders(reason string, sentence string) {
+	placeholders := make([]string, 0)
+	for _, match := range placeholderPattern.FindAllStringSubmatch(sentence, -1) {
+		placeholders = append(placeholders, match[1])
+	}
+	if strings.Count(sentence, "{") != len(placeholders) || strings.Count(sentence, "}") != len(placeholders) {
+		panic("embedded CLI vocabulary artifact has an invalid placeholder for " + reason)
+	}
+	expected := expectedPlaceholders[reason]
+	if len(placeholders) != len(expected) {
+		panic("embedded CLI vocabulary artifact has unexpected placeholders for " + reason)
+	}
+	for index := range placeholders {
+		if placeholders[index] != expected[index] {
+			panic("embedded CLI vocabulary artifact has unexpected placeholders for " + reason)
 		}
 	}
 }
@@ -128,23 +187,17 @@ func (e *Error) Error() string {
 	if e.Cause != nil {
 		return e.Cause.Error()
 	}
-	if message, ok := errorMessages[e.Tag]; ok {
-		if e.Tag == "revision_conflict" {
-			return fmt.Sprintf("This Biot changed; its current revision is %d. Reload and try again.", e.CurrentRevision)
-		}
-		if e.Tag == "invalid_input" {
-			return invalidInputMessage(e.Fields)
-		}
-		return message
-	}
 	switch e.Tag {
 	case "revision_conflict":
-		return fmt.Sprintf("This Biot changed; its current revision is %d. Reload and try again.", e.CurrentRevision)
+		return renderCommandSentence(e.Tag, map[string]string{"revision": strconv.Itoa(e.CurrentRevision)})
 	case "invalid_input":
 		return invalidInputMessage(e.Fields)
 	case "internal":
 		return "The server could not complete that request."
 	default:
+		if entry, ok := vocabulary[e.Tag]; ok && entry.kind == "command" {
+			return renderCommandSentence(e.Tag, nil)
+		}
 		if e.Tag != "" {
 			return fmt.Sprintf("The server returned an error this client does not understand (code %q). Update biot and try again.", e.Tag)
 		}
@@ -155,16 +208,21 @@ func (e *Error) Error() string {
 func New(baseURL string, token string, transport http.RoundTripper) (*Client, error) {
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, errors.New("server URL must be an absolute HTTP URL without credentials or a query")
+		return nil, errors.New("server URL must be an absolute HTTP URL without credentials or a query.")
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, errors.New("server URL must use http or https")
+		return nil, errors.New("server URL must use http or https.")
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
-	return &Client{baseURL: parsed, token: token, http: &http.Client{Transport: transport, Timeout: 30 * time.Second}}, nil
+	return &Client{
+		baseURL: parsed,
+		token:   token,
+		http:    &http.Client{Transport: transport, Timeout: 30 * time.Second},
+		notice:  os.Stderr,
+	}, nil
 }
 
 func (c *Client) ServerURL() string { return c.baseURL.String() }
@@ -174,13 +232,13 @@ func (c *Client) Request(ctx context.Context, method string, path string, body a
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("encode request: %w", err)
+			return fmt.Errorf("encode request: %w.", err)
 		}
 		reader = bytes.NewReader(encoded)
 	}
 	requestPath, err := url.Parse(path)
 	if err != nil || requestPath.IsAbs() || requestPath.Host != "" {
-		return errors.New("invalid API path")
+		return errors.New("invalid API path.")
 	}
 	endpoint := *c.baseURL
 	endpoint.Path = strings.TrimRight(c.baseURL.Path, "/") + "/api/" + strings.TrimLeft(requestPath.Path, "/")
@@ -188,7 +246,7 @@ func (c *Client) Request(ctx context.Context, method string, path string, body a
 	endpoint.Fragment = ""
 	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), reader)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return fmt.Errorf("build request: %w.", err)
 	}
 	request.Header.Set("Accept", "application/json")
 	if body != nil {
@@ -197,14 +255,14 @@ func (c *Client) Request(ctx context.Context, method string, path string, body a
 	if c.token != "" {
 		request.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	response, err := c.http.Do(request)
+	response, err := c.do(request)
 	if err != nil {
-		return fmt.Errorf("contact the Biot server: %w", err)
+		return serverCommunicationError(c.ServerURL(), err)
 	}
 	defer response.Body.Close()
 	contents, err := readBounded(response.Body)
 	if err != nil {
-		return fmt.Errorf("read the Biot server response: %w", err)
+		return serverCommunicationError(c.ServerURL(), err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return parseError(response.StatusCode, contents)
@@ -213,9 +271,34 @@ func (c *Client) Request(ctx context.Context, method string, path string, body a
 		return nil
 	}
 	if err := json.Unmarshal(contents, result); err != nil {
-		return fmt.Errorf("decode the Biot server response: %w", err)
+		return fmt.Errorf("decode the Biot server response: %w.", err)
 	}
 	return nil
+}
+
+func (c *Client) do(request *http.Request) (*http.Response, error) {
+	if c.notice == nil {
+		return c.http.Do(request)
+	}
+
+	finished := make(chan struct{})
+	noticeDone := make(chan struct{})
+	go func() {
+		defer close(noticeDone)
+		timer := time.NewTimer(transportNoticeDelay)
+		defer timer.Stop()
+
+		select {
+		case <-timer.C:
+			fmt.Fprintf(c.notice, "Waiting for the Biot server at %s...\n", c.ServerURL())
+		case <-finished:
+		}
+	}()
+
+	response, err := c.http.Do(request)
+	close(finished)
+	<-noticeDone
+	return response, err
 }
 
 func (c *Client) Me(ctx context.Context) (Principal, error) {
@@ -324,7 +407,7 @@ func (c *Client) DeliverFetchCredential(ctx context.Context, id string, source s
 
 func secretJSONValue(value []byte) (string, error) {
 	if !utf8.Valid(value) {
-		return "", errors.New("secret values must be valid UTF-8; this API carries them as JSON strings")
+		return "", errors.New("secret values must be valid UTF-8; this API carries them as JSON strings.")
 	}
 	return string(value), nil
 }
@@ -559,9 +642,16 @@ type Publication struct {
 type Deployment struct {
 	PublicationDomain string `json:"publication_domain"`
 	SSH               struct {
-		Host string `json:"host"`
-		Port int    `json:"port"`
+		Host     string    `json:"host"`
+		Port     int       `json:"port"`
+		HostKeys []HostKey `json:"host_keys"`
 	} `json:"ssh"`
+}
+
+type HostKey struct {
+	Type        string `json:"type"`
+	PublicKey   string `json:"public_key"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 type OperationResult struct {
@@ -644,6 +734,56 @@ func readBounded(reader io.Reader) ([]byte, error) {
 	return contents, nil
 }
 
+func serverCommunicationError(serverURL string, err error) error {
+	var dnsError *net.DNSError
+	var operationError *net.OpError
+	var certificateError *tls.CertificateVerificationError
+
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("The Biot server at %s did not respond in time; check that it is running.", serverURL)
+	case errors.As(err, &certificateError):
+		return fmt.Errorf("The Biot server at %s did not present a trusted certificate; check its HTTPS certificate.", serverURL)
+	case errors.As(err, &dnsError):
+		return fmt.Errorf("The Biot server at %s could not be found; check the server URL.", serverURL)
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return fmt.Errorf("The Biot server at %s closed its response before it was complete; check that it is running.", serverURL)
+	case errors.As(err, &operationError):
+		return fmt.Errorf("The Biot server at %s is not accepting connections; check that it is running.", serverURL)
+	default:
+		cause := "unknown transport failure."
+		if err != nil {
+			cause = punctuate(leafError(err).Error())
+		}
+		return fmt.Errorf(
+			"Could not contact the Biot server at %s; check that it is running. Cause: %s",
+			serverURL,
+			cause,
+		)
+	}
+}
+
+func leafError(err error) error {
+	for {
+		unwrapped := errors.Unwrap(err)
+		if unwrapped == nil {
+			return err
+		}
+		err = unwrapped
+	}
+}
+
+func punctuate(message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return "unknown transport failure."
+	}
+	if strings.HasSuffix(message, ".") {
+		return message
+	}
+	return message + "."
+}
+
 func parseError(status int, contents []byte) *Error {
 	value := struct {
 		Error           string              `json:"error"`
@@ -662,7 +802,7 @@ func parseError(status int, contents []byte) *Error {
 
 func invalidInputMessage(fields map[string][]string) string {
 	if len(fields) == 0 {
-		return "The request contains invalid input."
+		return commandSentence("invalid_input")
 	}
 	keys := make([]string, 0, len(fields))
 	for key := range fields {
@@ -673,17 +813,66 @@ func invalidInputMessage(fields map[string][]string) string {
 	for _, key := range keys {
 		reasons := fields[key]
 		for _, reason := range reasons {
-			parts = append(parts, key+" "+reasonText(reason))
+			parts = append(parts, key+" "+fieldReasonSentence(reason))
 		}
+	}
+	if len(parts) == 0 {
+		return commandSentence("invalid_input")
 	}
 	return strings.Join(parts, "; ")
 }
 
 func reasonText(reason string) string {
-	if message, ok := fieldReasonMessages[reason]; ok {
-		return message
+	if message, ok := vocabulary[reason]; ok && message.kind == "field" {
+		return message.sentence
 	}
 	return fmt.Sprintf("has an unknown validation reason %q; update biot and try again.", reason)
+}
+
+func fieldReasonSentence(reason string) string {
+	return sentenceWithRemedy(reason, reasonText(reason))
+}
+
+func commandSentence(tag string) string {
+	entry, ok := vocabulary[tag]
+	if !ok || entry.kind != "command" || entry.sentence == "" {
+		panic("CLI command-error vocabulary is incomplete for " + tag)
+	}
+	return entry.sentence
+}
+
+func renderCommandSentence(tag string, replacements map[string]string) string {
+	sentence := commandSentence(tag)
+	for name, value := range replacements {
+		sentence = strings.ReplaceAll(sentence, "{"+name+"}", value)
+	}
+	if placeholderPattern.MatchString(sentence) {
+		panic("CLI command-error vocabulary left a placeholder in " + tag)
+	}
+	return sentenceWithRemedy(tag, sentence)
+}
+
+func sentenceWithRemedy(reason string, sentence string) string {
+	if remedy, ok := clientRemedies[reason]; ok {
+		if vocabulary[reason].kind == "field" {
+			return strings.TrimSuffix(sentence, ".") + "; " + remedy
+		}
+		return sentence + " " + remedy
+	}
+	return sentence
+}
+
+// FieldReasonMessage renders the sentence for a rejected field. It is also used by local input
+// guards so a value rejected before an HTTP request receives the same wording as a server reject.
+func FieldReasonMessage(field string, reason string) string {
+	return field + " " + fieldReasonSentence(reason)
+}
+
+// FieldReasonLimit returns the bound carried by a field reason. A zero limit means that reason has
+// no numeric bound in the generated vocabulary.
+func FieldReasonLimit(reason string) (int, bool) {
+	entry, ok := vocabulary[reason]
+	return entry.limit, ok && entry.kind == "field" && entry.limit > 0
 }
 
 func slicesSort(values []string) {

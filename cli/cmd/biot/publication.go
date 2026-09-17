@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -51,8 +50,8 @@ func runPublicationChange(commandContext command.Context, arguments []string, pu
 	if publish {
 		action = "publish"
 	}
-	if len(arguments) != 2 {
-		return fmt.Errorf("%s expects a Biot name or ID and a port; run biot %s --help", action, action)
+	if err := validateArguments(action, arguments, 2); err != nil {
+		return err
 	}
 	port, err := parsePort(arguments[1], action)
 	if err != nil {
@@ -94,8 +93,8 @@ func runPublicationChange(commandContext command.Context, arguments []string, pu
 }
 
 func runURLs(commandContext command.Context, arguments []string) error {
-	if len(arguments) != 1 {
-		return errors.New("urls expects a Biot name or ID; run biot urls --help")
+	if err := validateArguments("urls", arguments, 1); err != nil {
+		return err
 	}
 	client, err := loadClient()
 	if err != nil {

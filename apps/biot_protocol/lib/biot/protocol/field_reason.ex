@@ -12,8 +12,7 @@ defmodule Biot.Protocol.FieldReason do
     :missing,
     :invalid_format,
     :out_of_range,
-    :too_long,
-    :too_short,
+    :name_too_long,
     :invalid_value,
     :reserved_name,
     :nul_byte,
@@ -27,7 +26,6 @@ defmodule Biot.Protocol.FieldReason do
     :not_future,
     :too_far,
     :unknown_principal,
-    :not_requested,
     :not_ready,
     :publication_not_active
   ]

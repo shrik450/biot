@@ -2,8 +2,9 @@ package input
 
 import (
 	"bytes"
-	"strings"
 	"testing"
+
+	"github.com/shrik450/biot/cli/internal/api"
 )
 
 func TestStdinSecretPreservesEveryByteIncludingTrailingNewline(t *testing.T) {
@@ -31,8 +32,8 @@ func TestStdinSecretRejectsTooLargeValues(t *testing.T) {
 	overLimit := bytes.Repeat([]byte("a"), maxSecretBytes+1)
 	if _, err := StdinSecret(bytes.NewReader(overLimit)); err == nil {
 		t.Fatal("a value over the limit should be rejected")
-	} else if !strings.Contains(err.Error(), "too long") {
-		t.Fatalf("oversize error should name the size problem: %v", err)
+	} else if err.Error() != api.FieldReasonMessage("value", "secret_value_too_large") {
+		t.Fatalf("oversize error should reuse the shared vocabulary, got %v", err)
 	}
 }
 

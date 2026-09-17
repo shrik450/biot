@@ -4,20 +4,37 @@ defmodule Biot.Server.CommandError do
   alias Biot.Protocol.FieldReason
 
   @type field_errors :: %{optional(atom()) => [FieldReason.t()]}
+
+  @reasons [
+    {:unauthenticated, :unauthenticated},
+    {:not_found, :not_found},
+    {:forbidden, :forbidden},
+    {:invalid_input, quote(do: {:invalid_input, field_errors()})},
+    {:revision_conflict, quote(do: {:revision_conflict, pos_integer()})},
+    {:destroyed, :destroyed},
+    {:creation_conflict, :creation_conflict},
+    {:name_conflict, :name_conflict},
+    {:hostname_conflict, :hostname_conflict},
+    {:node_disabled, :node_disabled},
+    {:node_abandoned, :node_abandoned},
+    {:capacity_exceeded, :capacity_exceeded},
+    {:temporarily_unavailable, :temporarily_unavailable}
+  ]
+
   @type t ::
-          :unauthenticated
-          | :not_found
-          | :forbidden
-          | {:invalid_input, field_errors()}
-          | {:revision_conflict, pos_integer()}
-          | :destroyed
-          | :creation_conflict
-          | :name_conflict
-          | :hostname_conflict
-          | :node_disabled
-          | :node_abandoned
-          | :capacity_exceeded
-          | :temporarily_unavailable
+          unquote(
+            @reasons
+            |> Enum.map(&elem(&1, 1))
+            |> Enum.reduce(fn reason, acc -> {:|, [], [reason, acc]} end)
+          )
+
+  @doc "Every command error tag, including errors carrying detail."
+  @spec all() :: [atom()]
+  def all, do: Enum.map(@reasons, &elem(&1, 0))
+
+  @doc "Whether `reason` is a declared command error tag."
+  @spec member?(term()) :: boolean()
+  def member?(reason), do: reason in all()
 
   @doc """
   Builds the one `invalid_input` error shape.
