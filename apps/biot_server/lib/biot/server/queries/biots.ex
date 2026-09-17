@@ -22,8 +22,34 @@ defmodule Biot.Server.Queries.Biots do
     Environment,
     Node,
     Observation,
-    Operation
+    Operation,
+    Publication
   }
+
+  defmodule Records do
+    @moduledoc "The records loaded for one Biot, before a view is projected from them."
+
+    @enforce_keys [
+      :biot,
+      :node,
+      :observation,
+      :access_observation,
+      :operation,
+      :publications,
+      :environment
+    ]
+    defstruct @enforce_keys
+
+    @type t :: %__MODULE__{
+            biot: BiotRow.t(),
+            node: Node.t(),
+            observation: Observation.t() | nil,
+            access_observation: AccessObservation.t() | nil,
+            operation: Operation.t() | nil,
+            publications: [Publication.t()],
+            environment: Environment.t()
+          }
+  end
 
   @type page :: %{after: BiotId.t() | nil, limit: pos_integer()}
 
@@ -91,14 +117,16 @@ defmodule Biot.Server.Queries.Biots do
         actor_grants = Map.fetch!(grants, biot.id)
 
         project_view(
-          biot,
+          %Records{
+            biot: biot,
+            node: node,
+            observation: observation,
+            access_observation: access_observation,
+            operation: Map.get(operations, biot.id),
+            publications: Map.get(publications, biot.id, []),
+            environment: environment
+          },
           Authorization.role(actor, biot, actor_grants),
-          node,
-          observation,
-          access_observation,
-          Map.get(operations, biot.id),
-          Map.get(publications, biot.id, []),
-          environment,
           publication_domain
         )
       end)
@@ -119,44 +147,36 @@ defmodule Biot.Server.Queries.Biots do
     publication_domain = Application.fetch_env!(:biot_server, :publication_domain)
 
     project_view(
-      biot,
+      %Records{
+        biot: biot,
+        node: node,
+        observation: observation,
+        access_observation: access_observation,
+        operation: operation,
+        publications: publications,
+        environment: environment
+      },
       role,
-      node,
-      observation,
-      access_observation,
-      operation,
-      publications,
-      environment,
       publication_domain
     )
   end
 
-  defp project_view(
-         biot,
-         role,
-         node,
-         observation,
-         access_observation,
-         operation,
-         publications,
-         environment,
-         publication_domain
-       ) do
+  defp project_view(%Records{} = records, role, publication_domain) do
     visible_publications =
-      publications
+      records.publications
       |> PublicationView.visible(role)
       |> PublicationView.project(publication_domain)
 
     BiotView.project(%Input{
-      biot: biot,
+      biot: records.biot,
       role: role,
-      observation: observation,
-      access_observation: access_observation,
-      node: node,
-      operation: operation,
-      connection: NodeConnections.current(node.id),
+      observation: records.observation,
+      access_observation: records.access_observation,
+      node: records.node,
+      operation: records.operation,
+      connection: NodeConnections.current(records.node.id),
       publications: visible_publications,
-      environment: environment.selection
+      environment: records.environment.selection
     })
   end
 
