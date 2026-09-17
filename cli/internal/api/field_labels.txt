@@ -1,0 +1,16 @@
+email|email
+environment|environment
+expires_at|expiry
+form|form
+id|id
+initial_state|initial state
+kind|grant
+label|label
+name|name
+node_id|node
+port|port
+public_key|public key
+repository|repository
+runtime_secrets|runtime secret
+source_credentials|source-fetch credential
+value|value

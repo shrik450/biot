@@ -73,16 +73,20 @@ func TestUnknownFieldReasonIsActionable(t *testing.T) {
 	}
 }
 
+// TestInvalidInputMessageIsDeterministic proves fields are ordered by their
+// rendered label, not their wire name. kind's label is "grant" and id's label
+// is "id", so by label grant comes first; by wire key id comes first. The case
+// fails under the wire-name order, so it earns its place.
 func TestInvalidInputMessageIsDeterministic(t *testing.T) {
 	fields := map[string][]string{
-		"name":    {"missing"},
-		"node_id": {"no_default_node"},
+		"kind": {"invalid_format"},
+		"id":   {"missing"},
 	}
 	message := invalidInputMessage(fields)
-	name := strings.Index(message, "name ")
-	nodeID := strings.Index(message, "node_id ")
-	if name == -1 || nodeID == -1 || name > nodeID {
-		t.Fatalf("field errors should be sorted by field name: %q", message)
+	grant := strings.Index(message, "grant has an invalid format.")
+	id := strings.Index(message, "id is required.")
+	if grant == -1 || id == -1 || grant > id {
+		t.Fatalf("field errors should be ordered by rendered label: %q", message)
 	}
 }
 

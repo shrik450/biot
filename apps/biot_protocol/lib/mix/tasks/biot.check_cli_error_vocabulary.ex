@@ -4,7 +4,8 @@ defmodule Mix.Tasks.Biot.CheckCliErrorVocabulary do
 
   `cli/internal/api/error_vocabulary.txt` is generated from `Biot.Protocol.FieldReason` and
   `Biot.Server.CommandError` together with the facts and remedy coverage owned by
-  `BiotWeb.UserMessage`. Run this task with `--write` after changing either vocabulary or its
+  `BiotWeb.UserMessage`. `cli/internal/api/field_labels.txt` is generated from the same module's
+  human field labels. Run this task with `--write` after changing either vocabulary or its
   user-facing wording.
   """
 
@@ -16,6 +17,7 @@ defmodule Mix.Tasks.Biot.CheckCliErrorVocabulary do
 
   @repo_root Path.expand("../../../../..", __DIR__)
   @artifact_file Path.join(@repo_root, "cli/internal/api/error_vocabulary.txt")
+  @labels_file Path.join(@repo_root, "cli/internal/api/field_labels.txt")
   @separator "|"
   @template_placeholders %{revision_conflict: ["revision"]}
 
@@ -23,11 +25,20 @@ defmodule Mix.Tasks.Biot.CheckCliErrorVocabulary do
   def run(args) do
     recompile!()
     expected = expected_contents()
+    expected_labels = expected_label_contents()
 
     case args do
-      [] -> check_contents!(expected)
-      ["--write"] -> write_contents!(expected)
-      _other -> Mix.raise("expected no arguments or --write")
+      [] ->
+        check_contents!(@artifact_file, expected, "CLI error vocabulary")
+        check_contents!(@labels_file, expected_labels, "CLI field labels")
+        Mix.shell().info("CLI error vocabulary and field labels match the server")
+
+      ["--write"] ->
+        write_contents!(@artifact_file, expected)
+        write_contents!(@labels_file, expected_labels)
+
+      _other ->
+        Mix.raise("expected no arguments or --write")
     end
   end
 
@@ -72,6 +83,24 @@ defmodule Mix.Tasks.Biot.CheckCliErrorVocabulary do
     |> Kernel.<>("\n")
   end
 
+  defp expected_label_contents do
+    field_labels = :erlang.apply(BiotWeb.UserMessage, :field_labels, [])
+
+    field_labels
+    |> Enum.map(fn {field, label} ->
+      field = Atom.to_string(field)
+
+      if Enum.any?([field, label], &String.contains?(&1, [@separator, "\n", "\r"])) do
+        Mix.raise("CLI field label values cannot contain #{inspect(@separator)}: #{field}")
+      end
+
+      {field, label}
+    end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map_join("\n", fn {field, label} -> field <> @separator <> label end)
+    |> Kernel.<>("\n")
+  end
+
   defp entry(reason, kind, limit, sentence, remedy?) do
     reason_name = Atom.to_string(reason)
     validate_template!(reason, sentence)
@@ -108,39 +137,31 @@ defmodule Mix.Tasks.Biot.CheckCliErrorVocabulary do
   defp format_entry({reason, kind, limit, sentence, remedy}),
     do: Enum.join([reason, kind, Integer.to_string(limit), sentence, remedy], @separator)
 
-  defp check_contents!(expected) do
-    actual = read_contents!()
+  defp check_contents!(path, expected, description) do
+    actual = read_contents!(path)
 
     if actual != expected do
       Mix.raise(
-        "CLI error vocabulary artifact is out of date; run mix biot.check_cli_error_vocabulary --write\n" <>
+        "#{description} artifact is out of date; run mix biot.check_cli_error_vocabulary --write\n" <>
           unified_diff(expected, actual)
       )
     end
-
-    Mix.shell().info(
-      "CLI error vocabulary matches the server (#{length(FieldReason.all())} field reasons, " <>
-        "#{length(:erlang.apply(Biot.Server.CommandError, :all, []))} command errors)"
-    )
   end
 
-  defp write_contents!(expected) do
-    case File.write(@artifact_file, expected) do
+  defp write_contents!(path, expected) do
+    case File.write(path, expected) do
       :ok ->
-        Mix.shell().info("wrote #{@artifact_file}")
+        Mix.shell().info("wrote #{path}")
 
       {:error, reason} ->
-        Mix.raise("could not write #{@artifact_file}: #{:file.format_error(reason)}")
+        Mix.raise("could not write #{path}: #{:file.format_error(reason)}")
     end
   end
 
-  defp read_contents! do
-    case File.read(@artifact_file) do
-      {:ok, contents} ->
-        contents
-
-      {:error, reason} ->
-        Mix.raise("could not read #{@artifact_file}: #{:file.format_error(reason)}")
+  defp read_contents!(path) do
+    case File.read(path) do
+      {:ok, contents} -> contents
+      {:error, reason} -> Mix.raise("could not read #{path}: #{:file.format_error(reason)}")
     end
   end
 

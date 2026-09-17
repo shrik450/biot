@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -167,9 +168,9 @@ func TestUnknownFieldReasonUsesTheFallback(t *testing.T) {
 	}
 }
 
-// TestSeveralReasonsRenderInOneSentence checks the wire shape with more than
-// one field and more than one reason on a field.
-func TestSeveralReasonsRenderInOneSentence(t *testing.T) {
+// TestFieldReasonsUseCommasAndFieldsUseSemicolons checks the wire shape with
+// more than one field and more than one reason on a field.
+func TestFieldReasonsUseCommasAndFieldsUseSemicolons(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
 		response.WriteHeader(http.StatusUnprocessableEntity)
@@ -191,8 +192,137 @@ func TestSeveralReasonsRenderInOneSentence(t *testing.T) {
 	if err == nil {
 		t.Fatal("the server rejected the request but the client returned no error")
 	}
-	want := "name is required.; name is reserved; choose another name.; node_id is required because the server has no default node; choose one."
+	want := "name is required., name is reserved; choose another name.; node is required because the server has no default node; choose one."
 	if err.Error() != want {
 		t.Fatalf("rendered %q, want %q", err.Error(), want)
+	}
+}
+
+// TestTwoFieldsKeepMultipleReasonsTogether catches the case where each field
+// has its own sentence but the renderer loses the field grouping when one field
+// carries more than one reason.
+func TestTwoFieldsKeepMultipleReasonsTogether(t *testing.T) {
+	fields := map[string][]string{
+		"name":       {"missing"},
+		"repository": {"invalid_format", "repository_url_too_long"},
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(response).Encode(map[string]any{"error": "invalid_input", "fields": fields})
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := New(server.URL, "token", nil)
+	if err != nil {
+		t.Fatalf("build client: %v", err)
+	}
+	_, err = client.ListBiots(context.Background())
+	if err == nil {
+		t.Fatal("the server rejected the request but the client returned no error")
+	}
+	want := "name is required.; repository has an invalid format., repository is longer than 2048 characters; shorten it."
+	if err.Error() != want {
+		t.Fatalf("rendered %q, want %q", err.Error(), want)
+	}
+}
+
+// TestMultiFieldOrderMatchesTheServerLabels proves the CLI renders a multi-field
+// validation error exactly as the server does: ordered by the server's rendered
+// label and joined with "; ". The single-reason tests read the server-generated
+// error_vocabulary.txt through go:embed; this extends the same embedded-artifact
+// method to a multi-field case, using field_labels.txt for the labels and
+// error_vocabulary.txt for the sentences. The composition rule is restated here
+// because the artifacts carry the data, not the rule.
+//
+// Wire order is id, kind, node_id, public_key; label order is grant, id, node,
+// public key, so kind and id swap. The old client sorted by wire name and would
+// have rendered id first, so this case discriminates the two orders.
+func TestMultiFieldOrderMatchesTheServerLabels(t *testing.T) {
+	fields := map[string][]string{
+		"id":         {"missing"},
+		"kind":       {"invalid_format"},
+		"node_id":    {"no_default_node"},
+		"public_key": {"already_registered"},
+	}
+
+	order := []string{"id", "kind", "node_id", "public_key"}
+	sort.Slice(order, func(left, right int) bool {
+		return fieldLabels[order[left]] < fieldLabels[order[right]]
+	})
+	if order[0] != "kind" || order[1] != "id" {
+		t.Fatalf("this test needs the label order to differ from the wire order, got %v", order)
+	}
+
+	want := make([]string, 0, len(order))
+	for _, field := range order {
+		for _, reason := range fields[field] {
+			entry, ok := vocabulary[reason]
+			if !ok || entry.kind != "field" {
+				t.Fatalf("reason %q is not a field reason", reason)
+			}
+			if _, hasRemedy := clientRemedies[reason]; hasRemedy {
+				t.Fatalf("reason %q carries a remedy, so this test cannot derive its sentence from the artifact", reason)
+			}
+			want = append(want, fieldLabels[field]+" "+entry.sentence)
+		}
+	}
+	expected := strings.Join(want, "; ")
+
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(response).Encode(map[string]any{"error": "invalid_input", "fields": fields})
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := New(server.URL, "token", nil)
+	if err != nil {
+		t.Fatalf("build client: %v", err)
+	}
+	_, err = client.ListBiots(context.Background())
+	if err == nil {
+		t.Fatal("the server rejected the request but the client returned no error")
+	}
+	if got := err.Error(); got != expected {
+		t.Fatalf("rendered %q, want the server's rendering %q", got, expected)
+	}
+}
+
+// TestFieldLabelArtifactIsWellFormed reads the server-generated field_labels.txt
+// through go:embed. The server refuses to compile when two fields share a label,
+// so the label is a total order; the client relies on that to sort a multi-field
+// error. This checks the artifact carries one distinct label per field.
+func TestFieldLabelArtifactIsWellFormed(t *testing.T) {
+	if !strings.HasSuffix(fieldLabelsFile, "\n") {
+		t.Fatal("the label artifact must end with a newline")
+	}
+	lines := strings.Split(strings.TrimSuffix(fieldLabelsFile, "\n"), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		t.Fatal("the label artifact must not be empty")
+	}
+	previous := ""
+	labels := make(map[string]string, len(lines))
+	for index, line := range lines {
+		parts := strings.Split(line, "|")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			t.Fatalf("label artifact line %d is malformed: %q", index, line)
+		}
+		if parts[0] <= previous {
+			t.Fatalf("the label artifact is not sorted and unique: %q follows %q", parts[0], previous)
+		}
+		previous = parts[0]
+		labels[parts[0]] = parts[1]
+	}
+	if len(labels) != len(lines) {
+		t.Fatalf("the parsed labels have %d entries and the artifact has %d lines", len(labels), len(lines))
+	}
+	seen := make(map[string]string, len(labels))
+	for field, label := range labels {
+		if other, ok := seen[label]; ok {
+			t.Errorf("fields %q and %q share the label %q; the server refuses duplicate labels", field, other, label)
+		}
+		seen[label] = field
 	}
 }

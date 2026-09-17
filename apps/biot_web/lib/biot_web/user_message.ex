@@ -24,6 +24,17 @@ defmodule BiotWeb.UserMessage do
     form: "form"
   }
 
+  duplicate_field_labels =
+    @field_labels
+    |> Enum.group_by(fn {_field, label} -> label end, fn {field, _label} -> field end)
+    |> Enum.filter(fn {_label, fields} -> length(fields) > 1 end)
+    |> Enum.map(fn {label, fields} -> {label, Enum.sort(fields)} end)
+    |> Enum.sort_by(&elem(&1, 0))
+
+  if duplicate_field_labels != [] do
+    raise "BiotWeb.UserMessage has duplicate field labels: #{inspect(duplicate_field_labels)}"
+  end
+
   # A field reason completes "<label> ...", so the sentence never repeats the label and, where
   # there is one, names the next step. `FieldReason.all/0` is the closed vocabulary; the check
   # below refuses to compile a browser that cannot say one of its reasons.
@@ -147,6 +158,10 @@ defmodule BiotWeb.UserMessage do
   @spec client_remedies() :: %{atom() => String.t()}
   def client_remedies, do: @client_remedies
 
+  @doc "The human labels for fields shared with the command-line client."
+  @spec field_labels() :: %{atom() => String.t()}
+  def field_labels, do: @field_labels
+
   @spec error(
           CommandError.t()
           | FieldReason.t()
@@ -227,7 +242,7 @@ defmodule BiotWeb.UserMessage do
     end)
   end
 
-  defp field_label(field), do: Map.get(@field_labels, field, "field")
+  defp field_label(field), do: Map.get(@field_labels, field, to_string(field))
 
   defp command_sentence(reason, replacements \\ []) do
     sentence =

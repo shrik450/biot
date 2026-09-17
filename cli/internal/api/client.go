@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +52,9 @@ func IsUnauthenticated(err error) bool {
 //go:embed error_vocabulary.txt
 var vocabularyFile string
 
+//go:embed field_labels.txt
+var fieldLabelsFile string
+
 type vocabularyEntry struct {
 	kind     string
 	limit    int
@@ -59,6 +63,7 @@ type vocabularyEntry struct {
 }
 
 var vocabulary = parseVocabulary(vocabularyFile)
+var fieldLabels = parseFieldLabels(fieldLabelsFile)
 
 var clientRemedies = map[string]string{
 	"unauthenticated":        "Run biot login.",
@@ -151,6 +156,30 @@ func parseVocabulary(contents string) map[string]vocabularyEntry {
 		previous = parts[0]
 	}
 	return entries
+}
+
+func parseFieldLabels(contents string) map[string]string {
+	if !strings.HasSuffix(contents, "\n") {
+		panic("embedded CLI field-label artifact must end with a newline")
+	}
+	lines := strings.Split(strings.TrimSuffix(contents, "\n"), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		panic("embedded CLI field-label artifact must not be empty")
+	}
+	labels := make(map[string]string, len(lines))
+	previous := ""
+	for _, line := range lines {
+		parts := strings.Split(line, "|")
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			panic("embedded CLI field-label artifact has an invalid line")
+		}
+		if parts[0] <= previous {
+			panic("embedded CLI field-label artifact must be sorted and unique")
+		}
+		labels[parts[0]] = parts[1]
+		previous = parts[0]
+	}
+	return labels
 }
 
 func vocabularyNames(kind string) []string {
@@ -808,12 +837,18 @@ func invalidInputMessage(fields map[string][]string) string {
 	for key := range fields {
 		keys = append(keys, key)
 	}
-	slicesSort(keys)
+	sort.Slice(keys, func(left, right int) bool {
+		return fieldLabel(keys[left]) < fieldLabel(keys[right])
+	})
 	parts := make([]string, 0, len(keys))
 	for _, key := range keys {
 		reasons := fields[key]
+		fieldParts := make([]string, 0, len(reasons))
 		for _, reason := range reasons {
-			parts = append(parts, key+" "+fieldReasonSentence(reason))
+			fieldParts = append(fieldParts, fieldLabel(key)+" "+fieldReasonSentence(reason))
+		}
+		if len(fieldParts) > 0 {
+			parts = append(parts, strings.Join(fieldParts, ", "))
 		}
 	}
 	if len(parts) == 0 {
@@ -831,6 +866,13 @@ func reasonText(reason string) string {
 
 func fieldReasonSentence(reason string) string {
 	return sentenceWithRemedy(reason, reasonText(reason))
+}
+
+func fieldLabel(field string) string {
+	if label, ok := fieldLabels[field]; ok {
+		return label
+	}
+	return field
 }
 
 func commandSentence(tag string) string {
@@ -865,7 +907,7 @@ func sentenceWithRemedy(reason string, sentence string) string {
 // FieldReasonMessage renders the sentence for a rejected field. It is also used by local input
 // guards so a value rejected before an HTTP request receives the same wording as a server reject.
 func FieldReasonMessage(field string, reason string) string {
-	return field + " " + fieldReasonSentence(reason)
+	return fieldLabel(field) + " " + fieldReasonSentence(reason)
 }
 
 // FieldReasonLimit returns the bound carried by a field reason. A zero limit means that reason has
