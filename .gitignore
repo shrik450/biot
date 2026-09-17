@@ -11,6 +11,12 @@
 /apps/*/priv/static/assets/
 /apps/*/priv/static/cache_manifest.json
 
+# phx.digest output: a content-hashed copy of a tracked file in priv/static, its .gz, and the
+# original's .gz. The release regenerates and verifies them, so they are not tracked: a committed
+# digest could disagree with its source, and the set grows on every asset change.
+/apps/*/priv/static/**/*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].*
+/apps/*/priv/static/**/*.gz
+
 # Local databases
 *.sqlite3
 *.sqlite3-shm
@@ -30,4 +36,4 @@ cli/biot
 
 # ExUnit tmp_dir output
 /apps/*/tmp/
-/.work/
+.work/
