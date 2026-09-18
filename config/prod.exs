@@ -7,7 +7,10 @@ config :biot_web, BiotWeb.Endpoint, cache_static_manifest: "priv/static/cache_ma
 config :biot_web, BiotWeb.Endpoint,
   force_ssl: [
     rewrite_on: [:x_forwarded_proto],
+    # Health checks arrive over plain HTTP from an orchestrator that does not go through the edge,
+    # so the path reaches the app instead of a redirect to the control host.
     exclude: [
-      hosts: ["localhost", "127.0.0.1"]
+      hosts: ["localhost", "127.0.0.1"],
+      paths: ["/health"]
     ]
   ]

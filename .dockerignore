@@ -1,0 +1,11 @@
+# Build output and local state stay out of the image build context. Generated browser assets are
+# rebuilt from source; the digest and release steps regenerate them.
+_build/
+deps/
+.git/
+.work/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+apps/*/priv/static/assets/
+apps/*/priv/static/cache_manifest.json
