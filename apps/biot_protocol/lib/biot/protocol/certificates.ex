@@ -77,6 +77,25 @@ defmodule Biot.Protocol.Certificates do
     end
   end
 
+  @doc """
+  Returns the peer identity of a certificate PEM file, the same value `issue/2` prints.
+
+  This lets an operator enroll a node from its issued certificate instead of copying the
+  fingerprint by hand.
+  """
+  @spec fingerprint(Path.t()) ::
+          {:ok, String.t()} | {:error, :missing_certificate | :malformed_certificate}
+  def fingerprint(path) do
+    with {:ok, pem} <- File.read(path),
+         {:ok, certificate} <- Certificate.from_pem(pem),
+         {:ok, fingerprint} <- PeerIdentity.from_certificate(Certificate.to_der(certificate)) do
+      {:ok, fingerprint}
+    else
+      {:error, :enoent} -> {:error, :missing_certificate}
+      _other -> {:error, :malformed_certificate}
+    end
+  end
+
   defp leaf(:server), do: {:ok, "server", "/CN=biot-server", :server}
 
   defp leaf({:node, name}) do

@@ -91,86 +91,88 @@ The server's runtime needs no root; only the one-time setup steps marked **Root.
 unprivileged service account, ordinary ownership of its database and key material, and listeners on
 ports the service account can bind.
 
-### 1. Create the service account and deploy the release
+There are two ways to run it:
 
-Each step that needs root is marked **Root.**; the rest run as yourself.
+- **The compose file**, documented in [docker/server/README.md](../docker/server/README.md). It
+  builds the image and starts one server with a small environment file, and suits trying the
+  server, a demo, or one host with no systemd. It is **not a production deployment**: it publishes
+  plain HTTP and does not terminate TLS.
+- **A release under systemd**, this section. It suits a long-lived server behind the operator's
+  edge. [deploy/install-server.sh](../deploy/install-server.sh) performs the host setup, and
+  [deploy/install-node.sh](../deploy/install-node.sh) does the same for a node.
 
-1. **Root.** Create the service account:
+### Run the installer
 
-   ```sh
-   sudo useradd --system --create-home --shell /usr/sbin/nologin biot
-   ```
+Build the server release first, as [Build the releases](#build-the-releases) describes. Two pieces
+of material are the operator's to create, because both need the control-link authority:
 
-2. **Root.** Create the directories the server owns and the location the release will live in:
+**The control-link certificates.** The authority is created once and never replaced, and its
+private key stays with the operator:
 
-   ```sh
-   sudo install -d -o biot -g biot -m 0750 /opt/biot/server /var/lib/biot /etc/biot
-   ```
+```sh
+mise exec -- mix biot.certs authority DIR
+mise exec -- mix biot.certs server DIR
+mise exec -- mix biot.certs node DIR biot-node-1
+```
 
-   The SQLite database lives under `/var/lib/biot`; the TLS material, SSH host key, and the
-   enrollment file live under `/etc/biot`.
+Copy `ca.pem`, `server-cert.pem`, and `server-key.pem` to the server's certificate directory.
+`ca-key.pem` never leaves `DIR` and never goes to a node. The server's leaf is valid for **395 days
+(about 13 months)** and the authority for 25 years; renewing a leaf reuses its key, so its
+fingerprint does not change and every node pin stays valid.
 
-3. **Root.** Copy the built release into its location and give it to the account:
+**The node enrollment file**, `BIOT_NODE_REGISTRATIONS`. Write it with `mix biot.enroll` instead of
+by hand: the task validates the entry with the same schema the server parses, so it cannot write a
+file the server rejects, and it is safe to run again for the next node.
 
-   ```sh
-   sudo cp -r _build/prod/rel/server/. /opt/biot/server/
-   sudo chown -R biot:biot /opt/biot/server
-   ```
+```sh
+mise exec -- mix biot.enroll --file node-registrations.json \
+  --name biot-node-1 --certs-dir DIR \
+  --registration-id <the node's BIOT_NODE_REGISTRATION_ID> --max-biots 4
+```
 
-4. Produce the control-link certificates. The authority is created once and never replaced:
+`--name` reads `DIR/node-biot-node-1-cert.pem` and computes the fingerprint, or give the value
+`mix biot.certs node` printed with `--fingerprint`. Re-running the task for the same registration
+updates that entry and keeps its `node_id`.
 
-   ```sh
-   mise exec -- mix biot.certs authority /etc/biot/certs
-   mise exec -- mix biot.certs server /etc/biot/certs
-   ```
+Then run the installer as root on the server host:
 
-   **Root** to write under `/etc/biot/certs` (the command creates the directory), or run this in a
-   directory you own and copy `ca.pem` and `server-cert.pem` into `/etc/biot/certs` afterwards.
-   `ca-key.pem` stays with the operator and never goes to a node. The second command prints:
+```sh
+sudo deploy/install-server.sh \
+  --control-host biot.example.com \
+  --publication-domain preview.example.com \
+  --oidc-issuer https://id.example.com \
+  --oidc-client-id biot \
+  --oidc-client-secret-file /root/biot-oidc-secret \
+  --registrations /etc/biot/node-registrations.json
+```
 
-   ```json
-   {
-     "key": "/etc/biot/certs/server-key.pem",
-     "cert": "/etc/biot/certs/server-cert.pem",
-     "fingerprint": "<64 lowercase hex>"
-   }
-   ```
+It reads the OIDC client secret from `--oidc-client-secret-file` or `BIOT_OIDC_CLIENT_SECRET`,
+never from the command line, so it does not reach the process list or the shell history.
 
-   That `fingerprint` is the server's identity. A node pins it as `BIOT_SERVER_FINGERPRINT`, and the
-   `cert` and `key` are the server's `BIOT_CONTROL_CERTFILE` and `BIOT_CONTROL_KEYFILE`.
+Run it with `--check` first; that makes no changes and prints one line per precondition, naming the
+file or command to fix for a failure. A `BLOCK` line stops the install. A `todo` line is work the
+installer will do, such as creating the account or generating the SSH host key, and `--check` exits
+non-zero only when a `BLOCK` remains. `--help` lists every path and override.
 
-   A leaf certificate is valid for **395 days (about 13 months)** from the day you issue it; the
-   authority is valid for 25 years. Renewing a leaf reuses its key, so its fingerprint does not
-   change and every registration and pin that names it stays valid. The clock starts when you run
-   the command above, not when Biot starts.
+The installer writes these, and prints them when it finishes:
 
-5. Generate the SSH host key with any OpenSSH mechanism, for example:
+| What | Default |
+| --- | --- |
+| Release directory | `/opt/biot/server` |
+| Data directory and database | `/var/lib/biot`, database `/var/lib/biot/server.sqlite3` |
+| Certificate directory | `/etc/biot/certs` |
+| SSH host key | `/etc/biot/ssh-host-key`, generated when missing |
+| Release environment | `/etc/biot/server.env`, mode 0600, owned by the service account |
+| Unit file to read and edit | `/etc/biot/biot-server.service` |
+| Installed unit | `/etc/systemd/system/biot-server.service` |
 
-   ```sh
-   sudo ssh-keygen -q -t ed25519 -N "" -f /etc/biot/ssh-host-key
-   sudo chown biot:biot /etc/biot/ssh-host-key /etc/biot/ssh-host-key.pub
-   ```
+A second run is safe: it fills in what is missing and leaves the account, the paths, and the
+existing environment and unit files alone. `--force-env` and `--force-unit` regenerate those two
+files. The installer gives the service account read access to the certificates and the enrollment
+file, and generates the SSH host key when it is missing. Without `--registrations` the server
+accepts no node.
 
-   The file is `BIOT_SSH_HOST_KEY_FILE`. The SSH host-key rotation note below covers replacing it.
-
-   Check the file now, and again once the server is running:
-
-   ```sh
-   sudo ssh-keygen -lf /etc/biot/ssh-host-key
-   ```
-
-   prints `256 SHA256:<fingerprint> <comment> (ED25519)`. The `SHA256:` value is the key's identity;
-   the account page (see **Sign in and create a bearer token**) lists it under `ssh host keys`, and
-   `GET /api/deployment` returns it as `ssh.host_keys[].fingerprint`. The two must be the same
-   value. If the account page shows a different fingerprint, the running daemon is serving a key
-   other than the file you just checked, which means the file changed after the daemon started or
-   the service reads a different path.
-
-6. Create the operator's node enrollment file (section 3, `BIOT_NODE_REGISTRATIONS`). **Root** to
-   write it under `/etc/biot`; keep it readable by the service account and the operator, not by
-   anyone else.
-
-### 2. Choose the listeners and the edge
+### Choose the listeners and the edge
 
 All three server listeners may be above 1024. The HTTP listener is the reverse-proxy target; the
 control listener is for nodes and streams; the SSH listener is reached by SSH clients directly.
@@ -243,8 +245,8 @@ server {
 }
 ```
 
-This check needs the server running (section 4). It proves the certificate, the DNS, and the
-forwarding all work:
+This check needs the server running ([The systemd unit and checks](#the-systemd-unit-and-checks)).
+It proves the certificate, the DNS, and the forwarding all work:
 
 ```sh
 curl -sS -o /dev/null -w '%{http_code}\n' https://biot.example.com/
@@ -259,28 +261,31 @@ a TLS error means the certificate does not cover the name; `NXDOMAIN` means the 
 is missing; `502` means the edge cannot reach the server's `PORT`.
 
 For public ports 443 or 22, either forward those ports from a proxy or load balancer to the
-unprivileged listeners, or grant only `CAP_NET_BIND_SERVICE` to the server service. That capability
-allows low-port binding; it is not a reason to run the server as root.
+unprivileged listeners, or grant only `CAP_NET_BIND_SERVICE` to the server service. The installer
+adds that capability to the unit automatically when a listener is below 1024. It is not a reason to
+run the server as root.
 
-### 3. Set the server release environment
+### The release environment
 
-The release validates these values before it serves requests. `PHX_HOST` and
+The installer writes every required setting into the environment file. Edit that file, or re-run
+with `--force-env` after changing the installer's flags, to set an optional one. The release
+validates these values before it serves requests. `PHX_HOST` and
 `BIOT_SERVER_PUBLICATION_DOMAIN` must be lowercase DNS names, and the control host must not be the
 publication domain or a name below it.
 
 | Variable | What it supplies | Where it comes from |
 | --- | --- | --- |
-| `PHX_HOST` | Control hostname used by the browser login flow | Chosen by the operator; a DNS name you point at the edge |
-| `BIOT_SERVER_PUBLICATION_DOMAIN` | Suffix under which published preview hostnames are created | Chosen by the operator; `PHX_HOST` must not be under it |
-| `SECRET_KEY_BASE` | Phoenix signing and encryption key | `mise exec -- mix phx.gen.secret` |
-| `BIOT_OIDC_ISSUER` | The OIDC provider's HTTPS issuer URL | The provider's app registration |
-| `BIOT_OIDC_CLIENT_ID`, `BIOT_OIDC_CLIENT_SECRET` | The server's OIDC client credentials | The provider's app registration |
-| `BIOT_SERVER_DATABASE` | Absolute path to the SQLite database | Chosen by the operator, for example `/var/lib/biot/server.sqlite3` |
-| `BIOT_SSH_ADVERTISED_HOST` | Hostname or address printed for SSH clients | Chosen by the operator |
-| `BIOT_SSH_PORT` | SSH listener port | Chosen by the operator |
-| `BIOT_SSH_HOST_KEY_FILE` | SSH host-key file | Generated in section 1, step 5 |
-| `BIOT_CONTROL_CERTFILE`, `BIOT_CONTROL_KEYFILE`, `BIOT_CONTROL_CACERTFILE` | Server certificate, private key, and CA for node control TLS | `mix biot.certs server` prints `cert` and `key`; the CA is that directory's `ca.pem` |
-| `BIOT_NODE_REGISTRATIONS` | Operator enrollment file for the nodes this server accepts | Written by the operator; see below |
+| `PHX_HOST` | Control hostname used by the browser login flow | `--control-host`; a DNS name you point at the edge |
+| `BIOT_SERVER_PUBLICATION_DOMAIN` | Suffix under which published preview hostnames are created | `--publication-domain`; `PHX_HOST` must not be under it |
+| `SECRET_KEY_BASE` | Phoenix signing and encryption key | Generated on first install, then reused so sessions survive |
+| `BIOT_OIDC_ISSUER` | The OIDC provider's HTTPS issuer URL | `--oidc-issuer`; the provider's app registration |
+| `BIOT_OIDC_CLIENT_ID`, `BIOT_OIDC_CLIENT_SECRET` | The server's OIDC client credentials | `--oidc-client-id`, and the secret file or env variable |
+| `BIOT_SERVER_DATABASE` | Absolute path to the SQLite database | `--database`, default `/var/lib/biot/server.sqlite3` |
+| `BIOT_SSH_ADVERTISED_HOST` | Hostname or address printed for SSH clients | `--ssh-advertised-host`, default the control host |
+| `BIOT_SSH_PORT` | SSH listener port | `--ssh-port` |
+| `BIOT_SSH_HOST_KEY_FILE` | SSH host-key file | `--ssh-host-key`; generated when missing |
+| `BIOT_CONTROL_CERTFILE`, `BIOT_CONTROL_KEYFILE`, `BIOT_CONTROL_CACERTFILE` | Server certificate, private key, and CA for node control TLS | The certificate material you copied into the certificate directory |
+| `BIOT_NODE_REGISTRATIONS` | Operator enrollment file for the nodes this server accepts | `--registrations` |
 | `BIOT_SESSION_LIFETIME_HOURS` (default `168`) | How long a signed-in browser session stays valid | Optional; 168 hours is 7 days |
 | `BIOT_CREDENTIAL_MAX_LIFETIME_DAYS` (default `90`) | The longest lifetime a person may give a bearer token | Optional; 90 days |
 | `BIOT_AUTH_CHECK_INTERVAL_MS` (default `60000`) | How often the server rechecks every live browser, credential, and SSH proof | Optional; a shorter interval revokes a disabled person sooner, at the cost of more database reads |
@@ -308,8 +313,8 @@ The enrollment file is a JSON list. Each entry is one node:
 `node_id` is how the server assigns Biots to this node and how the node list identifies it.
 `peer_identity` is the lowercase SHA-256 fingerprint of the node certificate's public key, which
 is the `fingerprint` `mix biot.certs node` prints. `status` is `enabled`, `disabled`, `retired`, or
-`abandoned`. The server imports the file at boot; to reimport it on a running server without a
-restart:
+`abandoned`. `mix biot.enroll` writes these entries; the server imports the file at boot, and
+reimports it on a running server without a restart:
 
 ```sh
 /opt/biot/server/bin/server rpc "Biot.Server.Nodes.reload()"
@@ -343,7 +348,7 @@ cat /etc/biot/ssh-host-key-old /etc/biot/ssh-host-key-new > /etc/biot/ssh-host-k
 ```
 
 The daemon decodes the whole file into a list, which is how it sees two keys at all; there is no
-second path setting. Confirm the result before restarting, with the same check as step 5:
+second path setting. Confirm the result before restarting, with the installer's own check:
 
 ```sh
 sudo ssh-keygen -lf /etc/biot/ssh-host-key
@@ -358,10 +363,12 @@ different key type for a planned rotation. Any same-type replacement is delibera
 clients until the operator has investigated and made the new advertisement consistent; an
 unexpected key change has the same safe refusal and is never silently accepted as a rotation.
 
-### 4. Install, start, and check the server service
+### The systemd unit and checks
 
-Save this as `biot-server.service`. **I did not install it on any host**; the paths below are the
-ones from sections 1 and 3, and each line an operator must adjust is called out after it.
+The installer writes the unit to `/etc/biot/biot-server.service` for you to read and edit, installs
+it, reloads systemd, and starts and enables it. It is a system service with `User=biot`, and it
+carries `AmbientCapabilities=CAP_NET_BIND_SERVICE` and `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`
+only when one of the listeners is below 1024. The unit it writes is:
 
 ```ini
 [Unit]
@@ -384,25 +391,8 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Lines to adjust:
-
-- `User=` and `Group=`: the account from section 1.
-- `WorkingDirectory=`, `ExecStart=`, `ExecStop=`: where you copied the release in section 1.
-- `EnvironmentFile=`: the file holding the variables from section 3. Create it mode 0600 and owned
-  by `biot`, because it holds `SECRET_KEY_BASE` and the OIDC client secret.
-- Add `AmbientCapabilities=CAP_NET_BIND_SERVICE` and `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`
-  only when one of the listeners is below 1024.
-
 `bin/server start` runs in the foreground, which is what `Type=simple` expects. `ExecStop` works
 because a release names a local Erlang node by default, which is what `bin/server stop` talks to.
-
-**Root** installs and starts the unit:
-
-```sh
-sudo install -o root -g root -m 0644 biot-server.service /etc/systemd/system/biot-server.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now biot-server
-```
 
 Checks, and the output that means it worked:
 
@@ -434,13 +424,16 @@ A release with a bad setting never reaches this point; it stops with the
 `ERROR! Config provider Config.Reader failed with` block from [Build the releases](#build-the-releases),
 naming the variable.
 
+The image's health endpoint answers the same way on a release: `curl -sS http://127.0.0.1:4000/health`
+prints `{"status":"ok"}` once the database is reachable.
+
 Then check the service from outside: the HTTP endpoint answers through the reverse proxy and the
 OIDC redirect returns to `https://<PHX_HOST>/login/callback`; the control port is reachable from
 each node host; the SSH advertised host and port are reachable by an SSH client.
 
 Start each node only after its entry is in the enrollment file and its certificate is in place. The
-server imports the file at boot, or with the `reload` command in section 3; an unregistered node
-cannot become ready.
+server imports the file at boot, or with the `reload` command above; an unregistered node cannot
+become ready.
 
 ## Sign in and create a bearer token
 
@@ -863,8 +856,10 @@ examples.
   `AmbientCapabilities=CAP_NET_BIND_SERVICE` in that case and an empty value otherwise.
 - **The enrollment file parses.** `journalctl -u biot-server -b | grep -c 'node registrations'`
   prints `0`; an invalid file stops boot with a `node registrations` message instead.
-- **The edge serves both names.** The two `curl` commands in section 2 print `200` and `404`; a TLS
-  error, `NXDOMAIN`, or `502` points at the certificate, the wildcard DNS record, or the upstream.
+- **The edge serves both names.** The two `curl` commands in
+  [Choose the listeners and the edge](#choose-the-listeners-and-the-edge) print `200` and `404`; a
+  TLS error, `NXDOMAIN`, or `502` points at the certificate, the wildcard DNS record, or the
+  upstream.
 - **The CLI is authenticated.** `biot list` prints `No Biots.` or a table; it prints `you are not
   logged in; run biot login` when no token is saved.
 
