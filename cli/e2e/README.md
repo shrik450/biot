@@ -108,7 +108,7 @@ not skip. `BIOT_E2E_BIOT` is the enabled-but-unconnected Biot used for the
 failure-path checks; `BIOT_E2E_NODE` is the connected node used for create,
 lifecycle, and SSH.
 
-## The SSH test and the `ssh` wrapper
+## The SSH test and host-key verification
 
 `TestSSHCommand` registers a generated public key, creates a Biot, and runs
 `biot ssh <biot> --identity KEY -- echo hello`. It proves the output and the
@@ -116,11 +116,9 @@ exit status travel the whole way: the CLI execs the real `ssh` client, the
 server opens a shell stream, and the peer serves it.
 
 The external `ssh` client reads its user config from the passwd home and ignores
-`$HOME`, so a test cannot point it at a temp `known_hosts` by setting `HOME`. It
-would stop on the server's fresh host key. The test puts a wrapper named `ssh`
-on `PATH` that runs the real `ssh` with `StrictHostKeyChecking=no` and
-`UserKnownHostsFile=/dev/null`. The wrapper only relaxes a client policy; it
-does not stand in for any Biot code.
+`$HOME`, but the CLI writes its own temporary `known_hosts` file and passes it to
+the real client explicitly. The test leaves strict host-key verification enabled,
+so it proves the advertised deployment key matches the SSH daemon's key.
 
 ## Not covered
 

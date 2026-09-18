@@ -123,10 +123,13 @@ defmodule BiotWeb.UserMessage do
     kind = if reason in @field_reasons, do: :field, else: :command
     first = String.first(remedy)
 
-    expected =
-      if kind == :field, do: String.downcase(first || ""), else: String.upcase(first || "")
+    starts_with_expected_case? =
+      case kind do
+        :field -> first != nil and Regex.match?(~r/\A\p{Ll}\z/u, first)
+        :command -> first != nil and Regex.match?(~r/\A\p{Lu}\z/u, first)
+      end
 
-    if first == nil or first != expected do
+    if not starts_with_expected_case? do
       raise "BiotWeb.UserMessage has a #{kind} remedy with the wrong capitalization for #{reason}: #{inspect(remedy)}"
     end
   end

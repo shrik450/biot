@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -406,23 +405,6 @@ func TestSSHCommand(t *testing.T) {
 	if add := env.run(t, nil, "ssh-key", "add", keyPath+".pub"); add.exit != 0 {
 		t.Fatalf("ssh-key add exited %d:\n%s", add.exit, add.combined())
 	}
-
-	// ssh reads its user config from the passwd home and ignores $HOME, so the
-	// only place to relax host-key checking for a fresh host key is a wrapper
-	// on PATH. The wrapper only adds client policy; it still runs the real ssh.
-	realSSH, err := exec.LookPath("ssh")
-	if err != nil {
-		t.Fatalf("find ssh: %v", err)
-	}
-	wrapperDir := filepath.Join(env.temp, "bin")
-	if err := os.MkdirAll(wrapperDir, 0o755); err != nil {
-		t.Fatalf("create wrapper dir: %v", err)
-	}
-	wrapper := "#!/bin/sh\nexec " + realSSH + " -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(wrapperDir, "ssh"), []byte(wrapper), 0o755); err != nil {
-		t.Fatalf("write ssh wrapper: %v", err)
-	}
-	env.extra = append(env.extra, "PATH="+wrapperDir+":"+os.Getenv("PATH"))
 
 	name := randomName(t, "ssh-")
 	if result := env.run(t, nil, "create", "--repo", "https://github.com/example/ssh.git", "--name", name, "--node", node); result.exit != 0 {
