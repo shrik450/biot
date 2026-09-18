@@ -43,10 +43,18 @@ defmodule Biot.Server.Application do
          name: Biot.Server.Login.Provider,
          backoff_type: :random_exponential,
          backoff_min: 100,
-         backoff_max: 5_000
+         backoff_max: 5_000,
+         provider_configuration_opts: %{quirks: quirks(issuer)}
        }}
     ]
   end
 
   defp login_provider(nil), do: []
+
+  # `Settings.parse/4` refuses any issuer that is not HTTPS, and a release builds its settings only
+  # through it, so a plain-HTTP issuer can only come from a provider a developer started on
+  # loopback. Reading the scheme keeps that one decision where the scheme is already checked,
+  # instead of adding a setting that could be turned on in production by mistake.
+  defp quirks("http://" <> _rest), do: %{allow_unsafe_http: true}
+  defp quirks(_issuer), do: %{}
 end
