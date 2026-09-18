@@ -17,7 +17,7 @@ The repository includes one launcher that reuses `dev/stack.exs` for the server 
 provider, then starts a real node against the same loopback control listener:
 
 ```sh
-mise exec -- bash dev/local.sh
+nix develop --command bash dev/local.sh
 ```
 
 It creates certificates, enrollment, SQLite state, and node data under `.work/`, removes them after
@@ -60,15 +60,15 @@ Build both releases from a checkout on the machine that runs them, or on a machi
 architecture. This needs the pinned Elixir, OTP, and the project's dependencies; it does not need
 root.
 
-The repository pins its toolchain in `.mise.toml`: **Erlang 28.5** and **Elixir 1.20.4 with OTP
-28**. Install [mise](https://mise.jdx.dev), then run `mise install` in the checkout to fetch both;
-the commands below go through `mise exec --`, which puts those versions on `PATH`:
+The repository pins its toolchain in `flake.nix`: **Erlang 28.5**, **Elixir 1.20.4 with OTP 28**,
+and **Go 1.26**. Install [Nix](https://nixos.org/download/) with flakes enabled, then run the
+commands in the checkout from the flake's development shell. `nix develop` enters it interactively,
+and `nix develop --command` runs one command inside it:
 
 ```sh
-mise install
-mise exec -- mix deps.get
-MIX_ENV=prod mise exec -- mix release server
-MIX_ENV=prod mise exec -- mix release node
+nix develop --command mix deps.get
+MIX_ENV=prod nix develop --command mix release server
+MIX_ENV=prod nix develop --command mix release node
 ```
 
 The server build also compiles and digests the web assets; that is part of the release step, not a
@@ -251,9 +251,9 @@ of material are the operator's to create, because both need the control-link aut
 private key stays with the operator:
 
 ```sh
-mise exec -- mix biot.certs authority DIR
-mise exec -- mix biot.certs server DIR
-mise exec -- mix biot.certs node DIR biot-node-1
+nix develop --command mix biot.certs authority DIR
+nix develop --command mix biot.certs server DIR
+nix develop --command mix biot.certs node DIR biot-node-1
 ```
 
 Copy `ca.pem`, `server-cert.pem`, and `server-key.pem` to the server's certificate directory.
@@ -266,7 +266,7 @@ by hand: the task validates the entry with the same schema the server parses, so
 file the server rejects, and it is safe to run again for the next node.
 
 ```sh
-mise exec -- mix biot.enroll --file node-registrations.json \
+nix develop --command mix biot.enroll --file node-registrations.json \
   --name biot-node-1 --certs-dir DIR \
   --registration-id <the node's BIOT_NODE_REGISTRATION_ID> --max-biots 4
 ```
@@ -636,7 +636,7 @@ private key never goes to a node, so run the command where the authority lives a
 and the node's certificate and key to the node's certificate directory:
 
 ```sh
-mise exec -- mix biot.certs node <authority-directory> biot-node-1
+nix develop --command mix biot.certs node <authority-directory> biot-node-1
 ```
 
 Then run the installer as root on the node host, naming this node and the server it trusts:

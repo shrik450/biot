@@ -27,7 +27,7 @@ services:
       BIOT_OIDC_ISSUER: ${BIOT_OIDC_ISSUER:?set BIOT_OIDC_ISSUER to your provider's HTTPS issuer URL in docker/server/.env}
       BIOT_OIDC_CLIENT_ID: ${BIOT_OIDC_CLIENT_ID:?set BIOT_OIDC_CLIENT_ID in docker/server/.env}
       BIOT_OIDC_CLIENT_SECRET: ${BIOT_OIDC_CLIENT_SECRET:?set BIOT_OIDC_CLIENT_SECRET in docker/server/.env}
-      SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set SECRET_KEY_BASE (mise exec -- mix phx.gen.secret) in docker/server/.env}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:?set SECRET_KEY_BASE (nix develop --command mix phx.gen.secret) in docker/server/.env}
       PHX_HOST: ${PHX_HOST:-localhost}
       BIOT_SERVER_PUBLICATION_DOMAIN: ${BIOT_SERVER_PUBLICATION_DOMAIN:-preview.localhost}
       # Paths inside the container. The database lives on the named volume; the key material is the

@@ -12,39 +12,24 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@v22
 
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: "28.5"
-          elixir-version: "1.20.4-otp-28"
-          version-type: strict
-          install-hex: true
-          install-rebar: true
-
       - uses: actions/cache@v4
         with:
           path: |
             deps
             _build
-            ~/.mix/archives
-          key: ${{ runner.os }}-mix-otp-28.5-elixir-1.20.4-otp-28-${{ hashFiles('mix.lock') }}
+            ~/.mix
+          key: ${{ runner.os }}-mix-${{ hashFiles('flake.lock', 'mix.lock') }}
           restore-keys: |
             ${{ runner.os }}-mix-
 
-      - run: mix deps.get
-      - run: mix check
-      - run: mix test --exclude podman --warnings-as-errors
+      - run: nix develop --command mix deps.get
+      - run: nix develop --command mix check
+      - run: nix develop --command mix test --exclude podman --warnings-as-errors
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.x"
-      - working-directory: cli
-        run: go build ./...
-      - working-directory: cli
-        run: go vet ./...
-      - working-directory: agent
-        run: go vet ./...
-      - working-directory: agent
-        run: go test ./...
+      - run: nix develop --command bash -c 'cd cli && go build ./...'
+      - run: nix develop --command bash -c 'cd cli && go vet ./...'
+      - run: nix develop --command bash -c 'cd agent && go vet ./...'
+      - run: nix develop --command bash -c 'cd agent && go test ./...'
 
   host-tests:
     runs-on: ubuntu-latest

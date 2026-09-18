@@ -1596,14 +1596,15 @@ is not a production deployment.
 networks and uses `usermod` to assign subordinate user and group IDs.
 `/result` and `/result-*` are ignored.
 
-`.mise.toml` pins Erlang 28.5 and Elixir 1.20.4 with OTP 28. The Linux host image includes Go
-1.26.4, and the image tests use that toolchain.
-Run Elixir commands through mise:
+`flake.nix` pins Erlang 28.5, Elixir 1.20.4 with OTP 28, and Go 1.26. The Linux host image also
+includes Go 1.26.4, and the image tests use that toolchain. Run project commands inside the
+development shell, either interactively or with `nix develop --command`:
 
 ```sh
-mise exec -- mix deps.get
-mise exec -- mix check
-mise exec -- mix test
+nix develop
+nix develop --command mix deps.get
+nix develop --command mix check
+nix develop --command mix test
 ```
 
 `mix check` runs format checks, Credo in strict mode, compilation with warnings as errors, and the
@@ -1638,9 +1639,9 @@ go test -tags e2e ./e2e/...
 
 ## CI
 
-`.github/workflows/ci.yml` installs Nix and sets up Erlang 28.5, Elixir 1.20.4, and Go 1.26.x.
-The checks job runs `mix check`, the non-Podman Mix suite with warnings as errors, and the CLI and
-agent Go checks. The host-tests job runs the full Mix suite in the privileged Linux host image.
+`.github/workflows/ci.yml` runs the checks job through the flake's development shell: it runs
+`mix check`, the non-Podman Mix suite with warnings as errors, and the CLI and agent Go checks. The
+host-tests job runs the full Mix suite in the privileged Linux host image.
 
 ## Configuration
 

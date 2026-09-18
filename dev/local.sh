@@ -101,12 +101,12 @@ trap 'stop_requested=1; exit 0' INT TERM
 
 (
   cd "$repo_directory"
-  BIOT_RUN_DIRECTORY="$run_directory" BIOT_DATA_DIRECTORY="$data_directory" MIX_ENV=dev mise exec -- mix run --no-start dev/local_bootstrap.exs
+  BIOT_RUN_DIRECTORY="$run_directory" BIOT_DATA_DIRECTORY="$data_directory" MIX_ENV=dev mix run --no-start dev/local_bootstrap.exs
 ) >"$run_directory/bootstrap.log" 2>&1
 source "$run_directory/environment"
 
 setsid --wait bash -c 'cd "$1"; shift; exec "$@"' _ "$repo_directory" \
-  mise exec -- mix run --no-start dev/stack.exs >"$run_directory/server.log" 2>&1 &
+  mix run --no-start dev/stack.exs >"$run_directory/server.log" 2>&1 &
 server_pid=$!
 
 wait_for_file() {
@@ -133,7 +133,7 @@ wait_for_file() {
 wait_for_file "$BIOT_DEV_READY_FILE.server"
 
 setsid --wait bash -c 'cd "$1"; shift; exec "$@"' _ "$repo_directory" \
-  env MIX_ENV=dev mise exec -- mix run --no-start dev/node.exs >"$run_directory/node.log" 2>&1 &
+  env MIX_ENV=dev mix run --no-start dev/node.exs >"$run_directory/node.log" 2>&1 &
 node_pid=$!
 
 ready_timeout=1230

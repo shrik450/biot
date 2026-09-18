@@ -25,11 +25,6 @@
 # Go
 cli/biot
 
-# mise local state
-.mise/
-.mise.local.toml
-.mise.local.*
-
 # Nix build outputs
 /result
 /result-*

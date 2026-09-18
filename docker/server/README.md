@@ -58,8 +58,8 @@ directory of its own. Only the server's material goes into the mounted directory
 private key (`ca-key.pem`) never does.
 
 ```sh
-mise exec -- mix biot.certs authority ~/biot-authority
-mise exec -- mix biot.certs server ~/biot-authority
+nix develop --command mix biot.certs authority ~/biot-authority
+nix develop --command mix biot.certs server ~/biot-authority
 mkdir -p docker/server/etc
 cp ~/biot-authority/ca.pem ~/biot-authority/server-cert.pem ~/biot-authority/server-key.pem docker/server/etc/
 ```
@@ -128,7 +128,7 @@ The compose file supplies the last four paths itself and takes the rest from `.e
 | --- | --- |
 | `PHX_HOST` | The control hostname, a lowercase DNS name. |
 | `BIOT_SERVER_PUBLICATION_DOMAIN` | The suffix under which preview hostnames are created. `PHX_HOST` must not be the domain or a name below it. |
-| `SECRET_KEY_BASE` | Phoenix's signing and encryption key. Generate with `mise exec -- mix phx.gen.secret`. |
+| `SECRET_KEY_BASE` | Phoenix's signing and encryption key. Generate with `nix develop --command mix phx.gen.secret`. |
 | `BIOT_OIDC_ISSUER` | The OIDC provider's HTTPS issuer URL. |
 | `BIOT_OIDC_CLIENT_ID` | The server's OIDC client id. |
 | `BIOT_OIDC_CLIENT_SECRET` | The server's OIDC client secret. |
