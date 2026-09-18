@@ -30,6 +30,16 @@ RUN mix release server
 
 FROM debian:trixie-slim AS runtime
 
+# The image describes itself. A base image's own labels would otherwise be
+# inherited and name Debian, so an operator reading `podman image inspect`
+# could not tell which commit is running.
+ARG BIOT_VERSION
+ARG BIOT_REVISION
+LABEL org.opencontainers.image.title="biot-server" \
+      org.opencontainers.image.version="${BIOT_VERSION}" \
+      org.opencontainers.image.revision="${BIOT_REVISION}" \
+      org.opencontainers.image.source="https://github.com/shrik450/biot"
+
 # libssl3t64 and libstdc++6 and libtinfo6 and zlib1g are what the release's BEAM and NIFs link
 # against; ca-certificates is for the server's outbound HTTPS calls; curl is for the health check.
 RUN apt-get update \

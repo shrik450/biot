@@ -12,6 +12,20 @@ step.
 podman build --format docker -t biot-server -f docker/server/Dockerfile .
 ```
 
+The image labels itself with `org.opencontainers.image.version` and
+`org.opencontainers.image.revision`. Both are empty unless the build supplies them,
+so pass the version you are tagging and the commit it was built from:
+
+```sh
+podman build --format docker \
+  --build-arg BIOT_VERSION=0.1.0 \
+  --build-arg BIOT_REVISION="$(git rev-parse HEAD)" \
+  -t biot-server:0.1.0 -f docker/server/Dockerfile .
+```
+
+`podman image inspect biot-server:0.1.0 --format '{{ index .Labels "org.opencontainers.image.revision" }}'`
+then names the commit that is running.
+
 Docker builds the Docker image format by default, which is what carries the `HEALTHCHECK`. Podman
 defaults to the OCI image format, which has no healthcheck field and silently drops it, so pass
 `--format docker` (or set `BUILDAH_FORMAT=docker`).
