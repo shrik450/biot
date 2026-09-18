@@ -26,6 +26,34 @@ full host path, including the rootless Podman/Nix worker. Node startup gets twen
 Nix worker is capped at twenty minutes; a timeout preserves the run directory and its diagnostics
 instead of retrying indefinitely.
 
+## Overview
+
+The path from an empty host to a first Biot, in the order to do it. `deploy/install-server.sh` and
+`deploy/install-node.sh` perform the two host setups and are safe to run again.
+
+1. **Before you start**, have a server host and a node host (they may be the same machine), the
+   control hostname and publication domain you will serve, a TLS certificate and DNS records
+   covering both, and an OIDC provider you control. [Choose the listeners and the
+   edge](#choose-the-listeners-and-the-edge) gives the certificate and DNS requirements.
+2. **Register Biot with your OIDC provider** and note its issuer URL, client ID, and client
+   secret. See [Register Biot with your OIDC provider](#register-biot-with-your-oidc-provider).
+3. **Build the releases** from a checkout with the pinned toolchain. See
+   [Build the releases](#build-the-releases).
+4. **Create the control-link authority and issue the certificates**: the authority, the server
+   certificate, and one certificate per node. See [Server](#server).
+5. **Write the node enrollment file** with `mix biot.enroll`, which records each node's certificate
+   fingerprint and capacity. See [Server](#server).
+6. **Run the server**, with `deploy/install-server.sh` or the compose file in
+   [docker/server/README.md](../docker/server/README.md), which builds its own image. See
+   [Server](#server).
+7. **Run the node** with `deploy/install-node.sh`. See [Node](#node).
+8. **Sign in and create a bearer token** for the CLI. See
+   [Sign in and create a bearer token](#sign-in-and-create-a-bearer-token).
+9. **Create your first Biot** and watch it build. See [Check the node](#check-the-node).
+
+[Local one-host smoke run](#local-one-host-smoke-run) is a development shortcut that runs the same
+host path on one machine with a local OIDC provider.
+
 ## Build the releases
 
 Build both releases from a checkout on the machine that runs them, or on a machine with the same
@@ -84,6 +112,119 @@ ERROR! Config provider Config.Reader failed with:
 ```
 
 That is a configuration failure, not an application crash; fix the setting and start again.
+
+## Register Biot with your OIDC provider
+
+Biot is an OIDC client and not an identity provider: a person exists only as the `(issuer, subject)`
+pair the provider hands it. Register one client with your provider and give the server its settings;
+nothing else in Biot is an identity source.
+
+### What to register
+
+| Setting | Value |
+| --- | --- |
+| Issuer | The provider's HTTPS issuer URL, the base of its `/.well-known/openid-configuration` |
+| Redirect URI (callback URL) | `https://<PHX_HOST>/login/callback`, exactly, with no trailing slash |
+| Scopes | `openid email profile` |
+| Client type | Confidential; the server requires a client secret |
+| Token-endpoint authentication | A client-secret method; see below |
+
+The redirect URI comes from `Login.Settings.parse/4`, which builds
+`https://<control_host>/login/callback` from `PHX_HOST`. The server sends exactly that value in the
+authorization request, so the provider must have it registered verbatim.
+
+The server asks for `openid`, `email`, and `profile` and no other scope, and it uses neither the
+userinfo endpoint nor a refresh token. `openid` is what asks for the ID token; `email` and `profile`
+are what carry the `email` and `name` claims.
+
+The grant is the authorization code grant with PKCE. The server sends a `code_challenge` and
+`require_pkce`, using S256 when the provider advertises it and `plain` otherwise, and sends the
+verifier on the token request. The provider's discovery document must advertise
+`code_challenge_methods_supported`, or the server cannot start a login at all.
+
+The client is confidential: `Login.Settings.parse/4` requires a non-empty client secret, and the
+server sends the client id and secret to the token endpoint. Biot does not choose the
+authentication method; `oidcc` picks the first method the provider advertises from its own
+preference order (`private_key_jwt`, `tls_client_auth`, `client_secret_jwt`, `client_secret_post`,
+`client_secret_basic`, `none`) and falls through when it cannot perform one. Biot supplies no JWKS
+and no client certificate, so register the client with a secret and let the provider offer
+`client_secret_post`, `client_secret_basic`, or `client_secret_jwt`; a provider that advertises
+only `private_key_jwt` or `tls_client_auth` has nothing Biot can authenticate with.
+
+### What Biot does with the claims
+
+Biot reads the ID token's claims and does not call userinfo. `Login.identity_claims/1` takes four:
+
+| Claim | Required | What Biot does with it |
+| --- | --- | --- |
+| `iss` | yes | Half of the principal's identity. |
+| `sub` | yes | Half of the principal's identity. |
+| `email` | no | Stored as the principal's last-seen email. `biot share --to EMAIL` resolves a person by it, and sign-in prints it first. |
+| `name` | no | Stored as the principal's last-seen name. Sign-in prints it when there is no email, and the account page shows it. |
+
+`Principals.identify/3` finds the principal by `(iss, sub)` and inserts one on first sign-in, with
+the email and name it was given. Every later sign-in overwrites both, so they are "last seen" and
+not authoritative. A different `sub` from the same issuer is a different person, and principals are
+never deleted, so a person's row and its ID outlive the provider's records.
+
+Omitting `email` or `name` is allowed; omitting `iss` or `sub` is not:
+
+- An absent `email` or `name` becomes `nil`. Sign-in still succeeds; the CLI falls back from the
+  email to the name and then to the principal's ID, and no one can be resolved by an absent email.
+- A missing, non-string, or otherwise unparseable `iss` or `sub` fails the login with
+  `:invalid_claims`, and the browser gets the generic unauthenticated response.
+- A present but non-string `email` or `name` fails the same way.
+
+`biot share --to EMAIL` resolves only a unique match on the last-seen email, so two principals that
+last signed in with the same address resolve to neither.
+
+Biot never calls userinfo, so `email` and `name` have to be claims of the **ID token**. A provider
+that exposes them only at the userinfo endpoint still signs a person in, but Biot stores no email
+or name for them.
+
+### What the server refuses at boot
+
+`config/releases/server.exs` reads the settings before the server serves anything, and
+`Login.Settings.parse/4` refuses:
+
+- A missing `BIOT_OIDC_ISSUER`, `BIOT_OIDC_CLIENT_ID`, or `BIOT_OIDC_CLIENT_SECRET`, which stops the
+  release with `environment variable ... is missing`.
+- An issuer that is not HTTPS (`:insecure_issuer`), reported as `BIOT_OIDC_ISSUER must be an https
+  URL`. A provider you are testing over plain HTTP, including one on loopback, is refused; the
+  release has no plain-HTTP mode.
+- An issuer that is not a URL with a host (`:invalid_issuer`).
+- An empty client id or secret (`:empty_client_credentials`).
+
+The same file parses `PHX_HOST` and `BIOT_SERVER_PUBLICATION_DOMAIN`: both must be lowercase DNS
+names, and the control host must not be the publication domain or a name under it.
+
+### Worked example: PocketID
+
+[PocketID](https://pocket-id.org/) is the self-hostable provider the project's README recommends. In
+its admin UI (or by its API; the field names are PocketID's, not Biot's), create an OIDC client and
+set:
+
+- The callback or redirect URL to `https://biot.example.com/login/callback`, with your `PHX_HOST`.
+- The scopes to include `openid`, `email`, and `profile`.
+- A client secret, so the client is confidential rather than public.
+
+Then give the server the three values it reads:
+
+```sh
+BIOT_OIDC_ISSUER=https://id.example.com
+BIOT_OIDC_CLIENT_ID=<the client ID PocketID shows>
+BIOT_OIDC_CLIENT_SECRET=<the client secret PocketID shows>
+```
+
+The installer takes the issuer and client id as `--oidc-issuer` and `--oidc-client-id`, and the
+secret through `--oidc-client-secret-file` or `BIOT_OIDC_CLIENT_SECRET`. The first successful login
+creates the principal; there is no administrator account and no registration flow.
+
+### Facts the provider decides, not Biot
+
+Which token-endpoint authentication method is used, and whether `email` and `name` appear in the ID
+token rather than only at userinfo, are the provider's behavior. Biot's side is fixed and small: one
+redirect URI built from `PHX_HOST`, three scopes, and four claims.
 
 ## Server
 
