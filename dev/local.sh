@@ -142,7 +142,7 @@ done
 
 printf 'server and node are ready\n'
 printf 'server log: %s\nnode log: %s\n' "$run_directory/server.log" "$run_directory/node.log"
-printf 'HTTP: http://127.0.0.1:%s\n' "$PORT"
+printf 'HTTP: http://localhost:%s\n' "$PORT"
 printf 'node: %s\n' "$BIOT_DEV_NODE_ID"
 printf 'Stop with Ctrl-C.\n'
 
