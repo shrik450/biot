@@ -18,8 +18,7 @@ mkdir -p "$repo_directory/.work"
 run_directory=$(mktemp -d "$repo_directory/.work/node-host.XXXXXX")
 cache_directory=${XDG_CACHE_HOME:-$HOME/.cache}
 mkdir -p "$cache_directory"
-data_directory=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/biot-dev.XXXXXX")
-export BIOT_DATA_DIRECTORY="$data_directory"
+data_directory=$(mktemp -d "$cache_directory/biot-dev.XXXXXX")
 server_pid=
 node_pid=
 stop_requested=0
