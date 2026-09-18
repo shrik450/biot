@@ -292,6 +292,10 @@ defmodule Biot.Node.HostPureTest do
     refute Paths.environments(config, biot) in Paths.allocation_owned_directories(config, biot)
 
     assert Paths.marker(config, biot) == "/var/lib/biot/biots/#{biot}/marker"
+    assert Paths.agent_socket(config, biot) == "/var/lib/biot/biots/#{biot}/run/agent.sock"
+
+    assert Paths.agent_socket_path_length("/var/lib/biot") ==
+             byte_size(Paths.agent_socket(config, biot))
 
     refute Paths.marker(config, biot) in Enum.map(
              Paths.runtime_mounts(config, biot),

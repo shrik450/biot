@@ -639,7 +639,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
     refute File.exists?(Path.join(Paths.biot(host.config, biot_id), "rootfs"))
 
-    socket_path = Path.join(Paths.run(host.config, biot_id), "agent.sock")
+    socket_path = Paths.agent_socket(host.config, biot_id)
 
     # A Unix socket path is capped at 108 bytes including its terminating NUL, and an over-long one
     # fails as an opaque sockaddr tuple rather than saying so.
