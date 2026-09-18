@@ -10,6 +10,8 @@
 - `cli` contains the Go command-line client and its vendored `golang.org/x/term` and `golang.org/x/sys`.
 - `config` contains shared Mix and runtime configuration.
 - `docker/linux-host` contains the Linux host image for node host tests.
+- `docker/server` holds the `server` release image and the compose file that runs it.
+- `deploy/` holds the server and node host installers, `install-server.sh` and `install-node.sh`.
 - `agent/` contains the Go agent and its vendored dependencies.
 - `docs/` holds `model.md` (the implementation contract), `design.md`, this map, and `deployment.md` (the operator runbook).
 
@@ -58,7 +60,9 @@ This app owns shared parsed values and wire codecs.
 - `PeerIdentity` computes certificate public-key fingerprints.
 - `Certificates` and `mix biot.certs` manage deployment certificates. `authority` creates and
   preserves the CA certificate and mode-0600 private key; `server` and `node` issue or renew leaves
-  from that authority without changing their keys or fingerprints.
+  from that authority without changing their keys or fingerprints. `fingerprint/1` reads one
+  certificate PEM file and returns the same peer identity, so `mix biot.enroll` can take a node's
+  name and certificate instead of a copied fingerprint.
 - `OrphanedAllocation` represents node allocations absent from server intent.
 - `Limits` owns the versioned spec bound and shared component limits. Version 1 allows a 256 KiB
   spec, a 64 KiB secret or authorization value, a 2,048-byte repository URL, a 256-byte source ref,
@@ -164,6 +168,8 @@ last-seen email lookup.
 `Principals.reload/0` applies the operator's disabled identity set.
 `OperatorFile` owns reading an optional operator-managed JSON list.
 `Principals.DisabledIdentities` and `Nodes.RegistrationLoader` parse their respective list entries.
+`Nodes.Enrollment` builds what `Nodes.RegistrationLoader` reads: `find/2`, `upsert/2`, and `validate/1`, and `validate/1` uses `Nodes.Registration` so an entry it accepts is one the server accepts.
+`Mix.Tasks.Biot.Enroll` (`mix biot.enroll`) writes one node into that file from the node's certificate name or fingerprint, its registration ID, and its capacity, and keeps the `node_id` it first gave a registration when the same registration is written again.
 `Principals.Startup` runs `reload/0` before the control listener and fails boot with a readable message on invalid configuration.
 `Nodes.reload/0` is the one enrollment entry point.
 `Nodes.Startup` calls it at boot and fails boot with a readable message on rejection.
@@ -1546,6 +1552,20 @@ Build them with `MIX_ENV=prod mix release server` and `MIX_ENV=prod mix release 
 `docs/deployment.md` is the operator runbook for those releases: it builds them, installs the server
 and the node as service units, marks the steps that need root, and ends with a checklist.
 `README.md` links it.
+
+`deploy/` installs those releases on a host. `deploy/install-server.sh` creates the server's service
+account and paths, generates the SSH host key, copies the release, gives the service account read
+access to the control-link certificates and to any enrollment file it is given, writes the release
+environment, and installs and starts the systemd unit. `deploy/install-node.sh` does the same for
+the node, reading the subordinate UID/GID range the host assigned from `/etc/subuid` instead of
+taking one, and pulling the pinned builder image. Both check the host before changing anything, are
+safe to run again, and take `--check`, which reports what is missing and changes nothing. Each
+writes its systemd unit to a file the operator can read and edit before installing it.
+
+`docker/server/Dockerfile` builds the `server` release into an unprivileged runtime image, and
+`docker/server/compose.yaml` runs it with `docker/server/.env.example` as the settings template.
+That is the compose alternative to the systemd install, documented in `docker/server/README.md`; it
+is not a production deployment.
 
 ## Tooling
 
