@@ -1,5 +1,10 @@
 defmodule Biot.Protocol.CertificatesTest do
-  use ExUnit.Case, async: true
+  # Not async: the operator-flow test below runs a Mix task, and running one inside an umbrella
+  # moves the working directory and pushes Mix's project stack, both of which belong to the whole
+  # VM. ExUnit starts an async case as soon as its own file loads, while the parallel compiler is
+  # still requiring the rest by relative path, so this case running concurrently left whichever
+  # file was loading at that moment to fail with `{:error, :enoent}`.
+  use ExUnit.Case, async: false
 
   alias Biot.Protocol.Certificates
   alias Biot.Protocol.PeerIdentity
