@@ -487,109 +487,62 @@ a token is saved, every other `biot` command stops with `you are not logged in; 
 
 ## Node
 
-The node has a one-time host setup, normally performed with root-equivalent package and account
-administration. After that setup, start the node release as the dedicated service user. Every build
-worker is a rootless Podman container with its own subordinate UID/GID range.
+The node runs rootless Podman as an ordinary service account. `deploy/install-node.sh` performs the
+whole one-time host setup in one idempotent command: it checks the host, creates the service
+account and its paths, reads the subordinate UID/GID range the host assigned, copies the node
+release, pulls the pinned builder image, writes the release environment, and installs and starts
+the systemd unit. What follows is the reference for the values you supply and the choices the
+installer makes.
 
-### 1. Create the service account and persistent paths
+### Run the installer
 
-Each step that needs root is marked **Root.**; the rest run as yourself. If the server and node
-share a host, this is the same account from the server section.
-
-1. **Root.** Create the service account:
-
-   ```sh
-   sudo useradd --system --create-home --shell /usr/sbin/nologin biot
-   ```
-
-2. **Root.** Create the node's data root and the location for its release and certificate material:
-
-   ```sh
-   sudo install -d -o biot -g biot -m 0750 /opt/biot/node /var/lib/biot/node /etc/biot/certs
-   ```
-
-   `BIOT_NODE_DATA_ROOT` is `/var/lib/biot/node`; the node certificate, key, and CA go under
-   `/etc/biot/certs`.
-
-3. **Root.** Copy the built node release and give it to the account:
-
-   ```sh
-   sudo cp -r _build/prod/rel/node/. /opt/biot/node/
-   sudo chown -R biot:biot /opt/biot/node
-   ```
-
-4. Issue this node's certificate from the same authority the server uses:
-
-   ```sh
-   mise exec -- mix biot.certs node /etc/biot/certs biot-node-1
-   ```
-
-   **Root** to write under `/etc/biot/certs`, or run it in a directory you own and copy the files.
-   The name is a lowercase DNS label and only names the files,
-   `/etc/biot/certs/node-biot-node-1-cert.pem` and `...-key.pem`. The command prints the same JSON
-   shape as the server's; its `fingerprint` is the `peer_identity` the server's enrollment file
-   must carry for this node. Each node name is distinct, and `ca.pem` is its
-   `BIOT_NODE_CACERTFILE`.
-
-5. Obtain the builder image the release pins, as the service account, so it lands in that account's
-   rootless store:
-
-   ```sh
-   sudo -u biot podman pull docker.io/nixos/nix@sha256:29fc5fe207f159ceb0143c25c19c774062fee02ce5eda118f3067547b3054894
-   ```
-
-   **Root** for `sudo -u`, or log in as the account and run `podman pull`. The digest is the
-   release's pinned builder image in `config/config.exs`; section 5 sets `BIOT_NODE_BUILDER_IMAGE`
-   to it.
-
-### 2. Give the service account a large enough subordinate range
-
-The node gives each Biot a slice of the service account's subordinate UID/GID range and passes that
-slice to Podman. **The node's range is the host's range**: the numbers the node is configured with
-are host subordinate IDs, so the node's base has to be the start the host assigned. Add matching
-subordinate UID and GID entries for the service account in `/etc/subuid` and `/etc/subgid` (or with
-the host's equivalent account-management tools).
-
-**Root.** Add the entries with the host's account tooling. For example, this gives `biot` 65536
-subordinate IDs starting at 524288:
+Build the node release first, as [Build the releases](#build-the-releases) describes. Then issue
+the node's control-link certificate from the same authority the server uses. The authority's
+private key never goes to a node, so run the command where the authority lives and copy `ca.pem`
+and the node's certificate and key to the node's certificate directory:
 
 ```sh
-usermod --add-subuids 524288-589823 \
-  --add-subgids 524288-589823 biot
+mise exec -- mix biot.certs node <authority-directory> biot-node-1
 ```
 
-Read back what the host assigned, because the node must be configured with the same start:
+Then run the installer as root on the node host, naming this node and the server it trusts:
 
 ```sh
-awk -F: '$1=="biot"{print $2, $3}' /etc/subuid /etc/subgid
+sudo deploy/install-node.sh \
+  --node-name biot-node-1 \
+  --server-host biot.example.com \
+  --server-fingerprint <the fingerprint mix biot.certs server printed> \
+  --registration-id <this node's registration_id from the server enrollment file>
 ```
 
-Each line prints `<start> <count>`. The two rules are:
+Run it with `--check` first; that makes no changes and prints one line per precondition, naming the
+command or file to fix for a failure. A `BLOCK` line stops the install. A `todo` line is work the
+installer itself will do, such as creating the account or its subordinate range, and `--check`
+exits non-zero only when a `BLOCK` remains. `--help` lists every path and override.
 
-```text
-BIOT_NODE_UID_RANGE_BASE == the host's subuid start
-subordinate count        >= BIOT_NODE_UID_RANGE_LIMIT - BIOT_NODE_UID_RANGE_BASE
-```
+The installer writes these, and prints them when it finishes:
 
-`BIOT_NODE_UID_RANGE_BASE` is **not** a free logical origin: it must equal the first subordinate ID
-the host assigned to the service account. The node maps each Biot's slice onto the host range
-through that base, and it checks the agent connection's peer UID against the same numbers, so a
-mismatched base fails every ownership check and every stream with `agent_unreachable` — at stream
-time, not at boot. The release default is `100000`, which matches the project's container image; a
-host that assigns a different start (Fedora starts at `524288`) must set the base to it.
-
-| Setting | Meaning |
+| What | Default |
 | --- | --- |
-| `BIOT_NODE_UID_RANGE_BASE` (default `100000`) | The host's subordinate start; must match `/etc/subuid` |
-| `BIOT_NODE_UID_RANGE_COUNT` (default `1024`) | IDs reserved by each Biot |
-| `BIOT_NODE_UID_RANGE_LIMIT` (default `BASE + 65536`) | Exclusive end of the node's span; must not exceed `BASE + <host count>` |
+| Release directory | `/opt/biot/node` |
+| Data root | `/var/lib/biot/node` |
+| Certificate directory | `/etc/biot/certs` |
+| Release environment | `/etc/biot/node.env`, mode 0600, owned by the service account |
+| Unit file to read and edit | `/etc/biot/biot-node.service` |
+| Installed unit | `/etc/systemd/system/biot-node.service` |
 
-If `LIMIT - BASE` is larger than the host's subordinate count, allocation or worker startup fails
-with an insufficient-UID error; increase the host range or reduce the node's span.
+A second run is safe: it fills in what is missing and leaves the account, the paths, the range, and
+the existing environment and unit files alone. `--force-env` and `--force-unit` regenerate those
+two files after you change the values, so the unit an operator edited is never replaced by
+surprise.
 
-### 3. Install the rootless container prerequisites
+The installer assumes the node's certificate, key, and the CA are already in the certificate
+directory, and gives the service account read access to them. It never issues them itself.
 
-**Root.** Install these with the host package manager for the node service account and host kernel:
+### Host prerequisites
+
+The installer checks these before it changes anything, and a failed check names the missing package
+or command. Install them with the host package manager first.
 
 | Requirement | Why it is needed |
 | --- | --- |
@@ -598,46 +551,76 @@ with an insufficient-UID error; increase the host range or reduce the node's spa
 | `fuse-overlayfs` or an in-kernel overlay driver | Gives rootless Podman a writable container storage driver |
 | `slirp4netns` or `pasta` | Provides rootless container networking where needed |
 | Enabled user namespaces | Lets Podman create the rootless and per-Biot mappings |
-| cgroup v2 with usable delegation | Lets the service account manage its containers; use Podman's `cgroupfs` manager if systemd delegation is unsuitable |
+| cgroup v2 with usable delegation | Lets the service account manage its containers |
 
-### 4. Choose how the node service starts
+### The subordinate UID/GID range
 
-1. **Root.** For a systemd **user** service, enable lingering for the service account so its user
-   manager can start the node without an interactive login:
+The node gives each Biot a slice of the service account's subordinate UID/GID range and passes that
+slice to Podman. **The node's range is the host's range**: the numbers the node is configured with
+are host subordinate IDs, so the node's base has to be the start the host assigned.
 
-   ```sh
-   loginctl enable-linger biot
-   ```
+The installer reads the start from the service account's `/etc/subuid` entry and writes it as
+`BIOT_NODE_UID_RANGE_BASE`. There is no flag to set the base, because a base that disagrees with
+the host is the failure this exists to prevent: the node boots, and then every ownership check and
+every stream fails with `agent_unreachable` at stream time, not at boot. When the account has no
+entry, the installer adds one and reads back what the host assigned.
 
-2. For a system service with `User=biot`, lingering is not required. The service still needs a
-   usable cgroup v2 delegation; configure Podman with `--cgroup-manager=cgroupfs` when the system
-   service cannot receive the delegation it needs.
+The two rules are:
 
-### 5. Configure the node release
+```text
+BIOT_NODE_UID_RANGE_BASE == the host's subuid start
+subordinate count        >= BIOT_NODE_UID_RANGE_LIMIT - BIOT_NODE_UID_RANGE_BASE
+```
 
-The node must have a matching registration and mutually authenticated control credentials. These
-values are read by `config/releases/node.exs`; every one is required except `BIOT_LOG_LEVEL`,
-which is optional:
+| Setting | Meaning |
+| --- | --- |
+| `BIOT_NODE_UID_RANGE_BASE` (default `100000`) | The host's subordinate start; must match `/etc/subuid` |
+| `BIOT_NODE_UID_RANGE_COUNT` (default `1024`) | IDs reserved by each Biot |
+| `BIOT_NODE_UID_RANGE_LIMIT` (default `BASE + 65536`) | Exclusive end of the node's span; must not exceed `BASE + <host count>` |
+
+If `LIMIT - BASE` is larger than the host's subordinate count, allocation or worker startup fails
+with an insufficient-UID error; increase the host range or reduce the node's span. The node maps
+its UID and GID through the one base, so `/etc/subuid` and `/etc/subgid` must give the service
+account the same start; the installer refuses to continue when they do not.
+
+### The release environment
+
+The installer writes every required setting into the environment file. Edit that file, or re-run
+with `--force-env` after changing the installer's flags, to set an optional one.
 
 | Variable | What it supplies | Where it comes from |
 | --- | --- | --- |
-| `BIOT_NODE_REGISTRATION_ID` | Stable registration ID present in the server enrollment file | Chosen by the operator; the `registration_id` of this node's entry in the server's enrollment file |
+| `BIOT_NODE_REGISTRATION_ID` | Stable registration ID present in the server enrollment file | The `registration_id` of this node's entry in the server's enrollment file |
 | `BIOT_SERVER_FINGERPRINT` | Lowercase SHA-256 fingerprint of the trusted server identity | The `fingerprint` `mix biot.certs server` printed in the server section |
 | `BIOT_SERVER_HOST` | Host the node dials for control | The server's control host |
 | `BIOT_SERVER_PORT` (default `4443`) | Server control port; match `BIOT_CONTROL_PORT` | The server's `BIOT_CONTROL_PORT` |
-| `BIOT_NODE_DATA_ROOT` | Absolute canonical root for node state and allocations | Chosen by the operator; created in step 1 |
-| `BIOT_NODE_BUILDER_IMAGE` | Pinned builder image digest | Required; set it to the digest pinned in `config/config.exs` |
-| `BIOT_NODE_BINARY_CACHE_URLS`, `BIOT_NODE_BINARY_CACHE_KEYS` | Whitespace-separated Nix cache endpoints and trusted keys | Required; the release has **no default** and refuses to start without both. Use `https://cache.nixos.org` and `cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=`, or the substituters you trust |
-| `BIOT_NODE_CERTFILE`, `BIOT_NODE_KEYFILE`, `BIOT_NODE_CACERTFILE` | Node certificate, private key, and trusted CA | The `cert` and `key` from step 4, and that directory's `ca.pem` |
+| `BIOT_NODE_DATA_ROOT` | Absolute canonical root for node state and allocations | The installer's data root |
+| `BIOT_NODE_BUILDER_IMAGE` | Pinned builder image digest | The installer reads the digest pinned in `config/config.exs` |
+| `BIOT_NODE_BINARY_CACHE_URLS`, `BIOT_NODE_BINARY_CACHE_KEYS` | Whitespace-separated Nix cache endpoints and trusted keys | The release has **no default** and refuses to start without both; the installer reads `config/config.exs` and the documented `https://cache.nixos.org` values |
+| `BIOT_NODE_CERTFILE`, `BIOT_NODE_KEYFILE`, `BIOT_NODE_CACERTFILE` | Node certificate, private key, and trusted CA | The node certificate you copied, and that directory's `ca.pem` |
 | `BIOT_LOG_LEVEL` (default `info`) | Release log level | Optional; one of `debug`, `info`, `notice`, `warning`, `error`, `critical`, `alert`, or `emergency`. Any other value stops the release, and its message lists the accepted levels |
 
-These values go in the service's `EnvironmentFile`, named in section 8. Set the UID range values
-from step 2 in the same file. `BIOT_NODE_FETCH_CA_BUNDLE` is optional; if used, it replaces the
-fetch phase's trust store, so it must contain public roots as well as any private authority the Git
-host needs. The node uses the default Nixpkgs repository and reference unless you deliberately set
+`BIOT_NODE_FETCH_CA_BUNDLE` is optional; if used, it replaces the fetch phase's trust store, so it
+must contain public roots as well as any private authority the Git host needs. The node uses the
+default Nixpkgs repository and reference unless you deliberately set
 `BIOT_NODE_NIXPKGS_REPOSITORY` and `BIOT_NODE_NIXPKGS_REF`.
 
-### 6. SELinux, when the host enforces it
+### How the service runs
+
+The installer writes a systemd **system** service with `User=biot` and `Delegate=yes`. The
+delegation is what lets the service account manage the cgroups its rootless containers need; without
+it a system service cannot, and the first build fails. It installs the unit it wrote, reloads
+systemd, and starts and enables it.
+
+For a systemd **user** service instead, drop `User=` and `Group=`, install the unit under
+`~/.config/systemd/user/`, and use `systemctl --user`. A user service needs lingering so its
+manager can start it without an interactive login:
+
+```sh
+loginctl enable-linger biot
+```
+
+### SELinux, when the host enforces it
 
 The node sets the build worker's SELinux label itself. An operator does nothing: every worker and
 the startup sandbox probe run with `--security-opt label=type:container_engine_t`, set in
@@ -703,7 +686,7 @@ the label where it previously failed, and the ten host integration tests that ga
 Other distributions ship their own `container-selinux` policy; check the host's version for the
 `container_engine_t` grants above before treating it as covered.
 
-### 7. Understand the worker boundary
+### The worker boundary
 
 The worker has `SYS_ADMIN` because Nix's sandbox needs to mount a fresh `/proc`. That does not make
 the node host root:
@@ -724,50 +707,7 @@ The node stages build support from its own `priv/build_support`, and a release c
 `nix/` and `agent/` directories, so a packaging path that copies the app's `priv` without following
 symbolic links would leave the node unable to stage it.
 
-### 8. Install, start, and check the node service
-
-Save this as `biot-node.service`. **I did not install it on any host**; the paths below are the
-ones from sections 1 and 5, and each line an operator must adjust is called out after it.
-
-```ini
-[Unit]
-Description=Biot node
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=biot
-Group=biot
-WorkingDirectory=/opt/biot/node
-EnvironmentFile=/etc/biot/node.env
-ExecStart=/opt/biot/node/bin/node start
-ExecStop=/opt/biot/node/bin/node stop
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Lines to adjust:
-
-- `User=` and `Group=`: the account from section 1.
-- `WorkingDirectory=`, `ExecStart=`, `ExecStop=`: where you copied the release in section 1.
-- `EnvironmentFile=`: the file holding the variables from section 5. Create it mode 0600 and owned
-  by `biot`, because it holds the node private key path and the control secrets.
-
-For a systemd **user** service instead, drop `User=` and `Group=`, install the unit under
-`~/.config/systemd/user/`, use `systemctl --user`, and enable lingering (section 4). Rootless
-Podman needs a cgroup it can manage; see the cgroup note in section 4 either way.
-
-**Root** installs and starts the unit:
-
-```sh
-sudo install -o root -g root -m 0644 biot-node.service /etc/systemd/system/biot-node.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now biot-node
-```
+### Check the node
 
 Checks, and the output that means it worked:
 
@@ -876,7 +816,7 @@ Work through this in order; each step says which layer to look at next.
 
    holds the node's capture faults, its startup sandbox probe, and each retry with its attempt
    count. A node whose log ends at `build_sandboxing_unsupported` will never build anything; that is
-   the sandbox case in section 6.
+   the sandbox case under [SELinux, when the host enforces it](#selinux-when-the-host-enforces-it).
 
 4. **If the node is not ready, no Biot on it can be.** `biot nodes` prints one row per node, and its
    `CONNECTION` column must read `ready`. Anything else is a control-link problem rather than a Biot
@@ -949,7 +889,8 @@ examples.
 - **The worker sandbox works.** `journalctl -u biot-node -b | grep -c build_sandboxing_unsupported`
   prints `0` after the node starts.
 - **The node is connected and ready.** On the server, `biot nodes` prints a row whose `CONNECTION`
-  column reads `ready`, or the readiness check in section 8 prints `{:ok, #PID<...>}`.
+  column reads `ready`, or the readiness check in [Check the node](#check-the-node) prints
+  `{:ok, #PID<...>}`.
 - **The registration and certificates agree.** The readiness check above only succeeds when the
   node's `peer_identity` matches its certificate and `BIOT_SERVER_FINGERPRINT` matches the server's.
   A mismatch is visible in either log as the connection retrying, never as a ready node.
