@@ -163,9 +163,19 @@ run_as_user() {
   shift
   if [[ $current_user == "$user" ]]; then
     "$@"
-  else
-    runuser -u "$user" -- "$@"
+    return
   fi
+
+  # runuser -u runs the command as the account but does not reset the
+  # environment, so it would inherit root's HOME and Podman would look for its
+  # storage under /root. The systemd unit runs with User= and gets the
+  # account's own HOME from passwd and no XDG_RUNTIME_DIR at all. A check that
+  # runs in a different environment from the service proves nothing about the
+  # service, so give it the same one.
+  local home
+  home=$(getent passwd "$user" | cut -d: -f6)
+  [[ -n $home ]] || die "$user has no home directory in passwd"
+  runuser -u "$user" -- env -u XDG_RUNTIME_DIR "HOME=$home" "USER=$user" "LOGNAME=$user" "$@"
 }
 
 subid_start() { awk -F: -v u="$1" '$1 == u { print $2; exit }' "$2" 2>/dev/null || true; }
@@ -310,7 +320,7 @@ check_inputs() {
 check_account() {
   if ! user_exists "$service_user"; then
     todo "the $service_user service account does not exist" \
-      "useradd --system --create-home --shell /usr/sbin/nologin $service_user"
+      "useradd --system --add-subids-for-system --create-home --shell /usr/sbin/nologin $service_user is what the installer runs"
     todo "no /etc/subuid or /etc/subgid entry for $service_user" \
       "useradd --system --add-subids-for-system --create-home --shell /usr/sbin/nologin $service_user allocates one from /etc/login.defs"
     return
@@ -440,13 +450,20 @@ install_release() {
 }
 
 verify_service_podman() {
-  local rootless
-  if rootless=$(run_as_user "$service_user" podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null) &&
-    [[ $rootless == true ]]; then
+  local rootless output
+  # Keep Podman's own words. Saying only that it failed leaves an operator with
+  # nothing to act on, and this is the step most likely to stop a first install.
+  output=$(run_as_user "$service_user" podman info --format '{{.Host.Security.Rootless}}' 2>&1) || true
+  rootless=$(printf '%s\n' "$output" | tail -n 1)
+
+  if [[ $rootless == true ]]; then
     say "rootless Podman works for $service_user"
-  else
-    die "rootless Podman failed for $service_user; fix it (see the node section of docs/deployment.md) before starting the node"
+    return
   fi
+
+  say "rootless Podman failed for $service_user; podman said:"
+  printf '%s\n' "$output" | sed 's/^/    /' >&2
+  die "fix rootless Podman for $service_user (see the node section of docs/deployment.md) before starting the node"
 }
 
 pull_builder_image() {
