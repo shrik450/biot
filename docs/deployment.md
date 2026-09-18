@@ -11,6 +11,21 @@ the control link. The operator enrollment and certificate commands are described
 [deployment contract](model.md#deployment-contract). Day-two operations are out of scope, except
 for the procedure that starts a Biot which will not run; the last section names the rest.
 
+## Local one-host smoke run
+
+The repository includes one launcher that reuses `dev/stack.exs` for the server and its local OIDC
+provider, then starts a real node against the same loopback control listener:
+
+```sh
+mise exec -- bash dev/local.sh
+```
+
+It creates certificates, enrollment, SQLite state, and node data under `.work/`, removes them after
+a clean stop, and preserves the run directory and logs after a failed start. The launcher runs the
+full host path, including the rootless Podman/Nix worker. Node startup gets twenty minutes and each
+Nix worker is capped at twenty minutes; a timeout preserves the run directory and its diagnostics
+instead of retrying indefinitely.
+
 ## Build the releases
 
 Build both releases from a checkout on the machine that runs them, or on a machine with the same
