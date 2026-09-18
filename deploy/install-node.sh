@@ -42,7 +42,6 @@ registration_id=
 builder_image=
 binary_cache_urls=
 binary_cache_keys=
-subordinate_count=65536
 # The node's whole subordinate span; the release default is BASE + 65536.
 uid_span=65536
 uid_range_count=1024
@@ -80,7 +79,6 @@ Options:
   --builder-image IMAGE    Pinned builder image; default read from config/config.exs.
   --binary-cache-urls URLS Whitespace-separated Nix cache endpoints.
   --binary-cache-keys KEYS Whitespace-separated trusted Nix cache public keys.
-  --subordinates COUNT     Subordinate IDs to request when the account has none (default: 65536).
   --force-env              Regenerate --env-file even if it exists.
   --force-unit             Regenerate --unit-output even if it exists.
   -h, --help               Show this help.
@@ -122,7 +120,6 @@ while [[ $# -gt 0 ]]; do
     --builder-image) need_value "$@"; builder_image=$2; shift 2 ;;
     --binary-cache-urls) need_value "$@"; binary_cache_urls=$2; shift 2 ;;
     --binary-cache-keys) need_value "$@"; binary_cache_keys=$2; shift 2 ;;
-    --subordinates) need_value "$@"; subordinate_count=$2; shift 2 ;;
     --force-env) force_env=1; shift ;;
     --force-unit) force_unit=1; shift ;;
     -h | --help) usage; exit 0 ;;
@@ -309,7 +306,7 @@ check_account() {
     todo "the $service_user service account does not exist" \
       "useradd --system --create-home --shell /usr/sbin/nologin $service_user"
     todo "no /etc/subuid or /etc/subgid entry for $service_user" \
-      "usermod --add-subuids $subordinate_count --add-subgids $subordinate_count $service_user"
+      "useradd --system --add-subids-for-system --create-home --shell /usr/sbin/nologin $service_user allocates one from /etc/login.defs"
     return
   fi
 
@@ -331,8 +328,8 @@ check_subid() {
   start=$(subid_start "$service_user" "$database")
   count=$(subid_count "$service_user" "$database")
   if [[ -z $start ]]; then
-    todo "no $label range for $service_user in $database" \
-      "usermod --add-subuids $subordinate_count --add-subgids $subordinate_count $service_user"
+    block "no $label range for $service_user in $database" \
+      "the account was created without one; remove it and let the installer recreate it ($recreate), or add an explicit range with usermod --add-subuids FIRST-LAST"
   elif ((count < uid_span)); then
     block "$database gives $service_user $count $label IDs starting at $start, but the node needs $uid_span" \
       "add more with usermod, or lower BIOT_NODE_UID_RANGE_LIMIT"
@@ -380,8 +377,14 @@ install_account() {
     say "service account $service_user already exists"
     return
   fi
-  useradd --system --create-home --shell /usr/sbin/nologin "$service_user"
-  say "created service account $service_user"
+  # -F is what makes shadow-utils allocate a subordinate range for a system
+  # account; without it useradd --system creates none. Allocation stays with
+  # shadow-utils, which reads SUB_UID_MIN, SUB_UID_MAX, and SUB_UID_COUNT from
+  # /etc/login.defs and will not hand out a range that overlaps another
+  # account's. Choosing a start here would be this script guessing at a number
+  # the host already owns.
+  useradd --system --add-subids-for-system --create-home --shell /usr/sbin/nologin "$service_user"
+  say "created service account $service_user with a subordinate range"
 }
 
 install_directories() {
@@ -404,22 +407,13 @@ install_cert_permissions() {
   say "gave $service_user read access to the node certificate material"
 }
 
-ensure_subordinate_range() {
+read_subordinate_range() {
   local uid_count gid_start
-  if [[ -z $(subid_start "$service_user" /etc/subuid) ]]; then
-    usermod --add-subuids "$subordinate_count" "$service_user"
-    say "added up to $subordinate_count subordinate UIDs to $service_user"
-  fi
-  if [[ -z $(subid_start "$service_user" /etc/subgid) ]]; then
-    usermod --add-subgids "$subordinate_count" "$service_user"
-    say "added up to $subordinate_count subordinate GIDs to $service_user"
-  fi
-
   uid_base=$(subid_start "$service_user" /etc/subuid)
   gid_start=$(subid_start "$service_user" /etc/subgid)
   uid_count=$(subid_count "$service_user" /etc/subuid)
   [[ -n $uid_base && -n $uid_count ]] ||
-    die "could not read $service_user's subordinate UID range from /etc/subuid"
+    die "$service_user has no subordinate UID range in /etc/subuid; the account was created without one, so remove it and run this again (useradd --system --add-subids-for-system --create-home --shell /usr/sbin/nologin $service_user is what the installer does)"
   [[ $uid_base == "$gid_start" ]] ||
     die "/etc/subuid starts at $uid_base but /etc/subgid starts at $gid_start; the node needs one base"
   ((uid_count >= uid_span)) ||
@@ -556,7 +550,7 @@ run_install() {
   install_account
   install_directories
   install_cert_permissions
-  ensure_subordinate_range
+  read_subordinate_range
   install_release
   verify_service_podman
   pull_builder_image
