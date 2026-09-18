@@ -339,7 +339,7 @@ Republish activates the same row and URL without restoring grants. See
 [Stable URLs are allocated once](#stable-urls-are-allocated-once).
 
 `NodePrivatePath` is a parsed path under the configured node data root and never
-comes from an API caller. `ContainerState` is `running | exited(exit_status)`.
+comes from an API caller. `ContainerState` is `starting | running | exited(exit_status)`.
 `Digest` is SHA-256 over a named canonical encoding. `Timestamp` is UTC time
 recorded by the owning boundary. Revisions, not timestamps, order desired changes.
 

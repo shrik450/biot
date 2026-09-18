@@ -95,7 +95,7 @@ defmodule Biot.Node.ReconcileGenerators do
   end
 
   def container_state do
-    one_of([constant(:running), map(integer(0..255), &{:exited, &1})])
+    one_of([constant(:starting), constant(:running), map(integer(0..255), &{:exited, &1})])
   end
 
   def container do

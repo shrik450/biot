@@ -120,7 +120,7 @@ defmodule Biot.Protocol.TestGenerators do
   end
 
   def container_state do
-    one_of([constant(:running), map(non_negative_integer(), &{:exited, &1})])
+    one_of([constant(:starting), constant(:running), map(non_negative_integer(), &{:exited, &1})])
   end
 
   @spec failure_stages() :: [atom()]

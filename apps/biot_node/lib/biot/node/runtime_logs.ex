@@ -32,12 +32,20 @@ defmodule Biot.Node.RuntimeLogs do
     Supervisor.init(children, strategy: :rest_for_one)
   end
 
-  @doc "Keeps a capture attached when inspection finds a running container."
+  @doc "Keeps a capture attached while inspection finds a present, non-exited container."
   @spec attach(Config.t(), BiotId.t(), NodeState.resource(NodeState.container())) :: :ok
+  def attach(
+        %Config{},
+        %BiotId{},
+        {:present, %{state: {:exited, _status}}}
+      ) do
+    :ok
+  end
+
   def attach(
         %Config{} = config,
         %BiotId{} = biot_id,
-        {:present, %{incarnation_id: %IncarnationId{} = incarnation_id, state: :running}}
+        {:present, %{incarnation_id: %IncarnationId{} = incarnation_id}}
       ) do
     case ensure_capture(config, biot_id, incarnation_id) do
       :ok -> :ok
@@ -47,7 +55,6 @@ defmodule Biot.Node.RuntimeLogs do
 
   def attach(%Config{}, %BiotId{}, :absent), do: :ok
   def attach(%Config{}, %BiotId{}, {:unknown, _failure}), do: :ok
-  def attach(%Config{}, %BiotId{}, {:present, %{state: {:exited, _status}}}), do: :ok
 
   @doc "Stops capture and removes runtime output after a snapshot omits the Biot."
   @spec forget(BiotId.t()) :: :ok

@@ -3,13 +3,18 @@ defmodule Biot.Protocol.ContainerState do
 
   alias Biot.Protocol.StrictMap
 
-  @type t :: :running | {:exited, non_neg_integer()}
+  @type t :: :starting | :running | {:exited, non_neg_integer()}
 
   @spec encode(t()) :: map()
+  def encode(:starting), do: %{"state" => "starting"}
   def encode(:running), do: %{"state" => "running"}
   def encode({:exited, status}), do: %{"state" => "exited", "status" => status}
 
   @spec parse(term()) :: {:ok, t()} | {:error, atom()}
+  def parse(%{"state" => "starting"} = value) do
+    with {:ok, _value} <- StrictMap.fetch_exact(value, ["state"]), do: {:ok, :starting}
+  end
+
   def parse(%{"state" => "running"} = value) do
     with {:ok, _value} <- StrictMap.fetch_exact(value, ["state"]), do: {:ok, :running}
   end

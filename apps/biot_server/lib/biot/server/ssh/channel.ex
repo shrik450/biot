@@ -11,6 +11,8 @@ defmodule Biot.Server.Ssh.Channel do
 
   @behaviour :ssh_server_channel
 
+  require Logger
+
   alias Biot.Protocol.{BiotId, ShellRequest}
   alias Biot.Server.Access
   alias Biot.Server.Authentication
@@ -141,12 +143,14 @@ defmodule Biot.Server.Ssh.Channel do
             :ssh_connection.reply_request(connection, want_reply, :success, channel)
             {:ok, %{state | stream: stream, channel: channel, connection: connection}}
 
-          {:error, _reason} ->
+          {:error, reason} ->
             _ = Access.close(stream)
+            log_open_failure(state, reason)
             reject(connection, channel, want_reply, state)
         end
 
-      {:error, _reason} ->
+      {:error, reason} ->
+        log_open_failure(state, reason)
         reject(connection, channel, want_reply, state)
     end
   end
@@ -230,6 +234,12 @@ defmodule Biot.Server.Ssh.Channel do
     :ssh_connection.exit_status(connection, channel, @lost_status)
     :ssh_connection.send_eof(connection, channel)
     {:stop, channel, state}
+  end
+
+  defp log_open_failure(state, reason) do
+    Logger.warning(
+      "SSH shell refused: biot_id=#{BiotId.to_string(state.biot_id)} reason=#{inspect(reason)}"
+    )
   end
 
   defp user_biot(user) do

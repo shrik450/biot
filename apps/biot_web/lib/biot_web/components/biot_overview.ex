@@ -247,6 +247,7 @@ defmodule BiotWeb.Components.BiotOverview do
 
   defp container_state(:unknown), do: "unknown"
   defp container_state(:absent), do: "absent"
+  defp container_state({:present, _incarnation, :starting}), do: "present · starting"
   defp container_state({:present, _incarnation, :running}), do: "present · running"
 
   defp container_state({:present, _incarnation, {:exited, status}}),
