@@ -252,22 +252,33 @@ check_podman() {
   check_podman_for "$operator" "$service_user is created with the same host support"
 }
 
+# Asks Podman, as one account, whether it is rootless. Sets podman_rootless to
+# its last line and podman_output to everything it said, because what Podman
+# says when it fails is the only useful thing anyone has to go on.
+podman_rootless=""
+podman_output=""
+probe_rootless_podman() {
+  local target=$1
+  podman_output=$(run_as_user "$target" podman info --format '{{.Host.Security.Rootless}}' 2>&1) || true
+  podman_rootless=$(printf '%s\n' "$podman_output" | tail -n 1)
+  [[ $podman_rootless == true ]]
+}
+
 check_podman_for() {
-  local target=$1 note=$2 rootless
+  local target=$1 note=$2
   if [[ $target != "$current_user" && $EUID -ne 0 ]]; then
     todo "rootless Podman for $target cannot be measured from here" \
       "only root may run a command as $target; the install verifies it, or rerun --check with sudo"
     return
   fi
 
-  rootless=$(run_as_user "$target" podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)
-
-  if [[ $rootless == true ]]; then
+  if probe_rootless_podman "$target"; then
     good "rootless Podman works for $target${note:+; $note}"
-  else
-    block "Podman is not rootless for $target (reported '${rootless:-nothing}')" \
-      "install and configure rootless Podman for $target"
+    return
   fi
+
+  block "Podman is not rootless for $target; it said: $(printf '%s' "$podman_output" | tr '\n' ' ')" \
+    "install and configure rootless Podman for $target"
 }
 
 check_install_commands() {
@@ -450,19 +461,13 @@ install_release() {
 }
 
 verify_service_podman() {
-  local rootless output
-  # Keep Podman's own words. Saying only that it failed leaves an operator with
-  # nothing to act on, and this is the step most likely to stop a first install.
-  output=$(run_as_user "$service_user" podman info --format '{{.Host.Security.Rootless}}' 2>&1) || true
-  rootless=$(printf '%s\n' "$output" | tail -n 1)
-
-  if [[ $rootless == true ]]; then
+  if probe_rootless_podman "$service_user"; then
     say "rootless Podman works for $service_user"
     return
   fi
 
   say "rootless Podman failed for $service_user; podman said:"
-  printf '%s\n' "$output" | sed 's/^/    /' >&2
+  printf '%s\n' "$podman_output" | sed 's/^/    /' >&2
   die "fix rootless Podman for $service_user (see the node section of docs/deployment.md) before starting the node"
 }
 
