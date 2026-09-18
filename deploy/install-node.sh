@@ -166,16 +166,20 @@ run_as_user() {
     return
   fi
 
-  # runuser -u runs the command as the account but does not reset the
-  # environment, so it would inherit root's HOME and Podman would look for its
-  # storage under /root. The systemd unit runs with User= and gets the
-  # account's own HOME from passwd and no XDG_RUNTIME_DIR at all. A check that
-  # runs in a different environment from the service proves nothing about the
-  # service, so give it the same one.
+  # runuser -u runs the command as the account but changes nothing else: the
+  # command keeps the caller's environment and the caller's working directory.
+  # Both are wrong here. Podman would look for its storage under root's HOME,
+  # and it cannot even start from a directory the account may not enter, which
+  # is any directory an operator is likely to run an installer from.
+  #
+  # The systemd unit runs with User= and gets HOME, USER, and LOGNAME from
+  # passwd, no XDG_RUNTIME_DIR, and a WorkingDirectory of its own. A check that
+  # runs somewhere the service never runs proves nothing about the service.
   local home
   home=$(getent passwd "$user" | cut -d: -f6)
   [[ -n $home ]] || die "$user has no home directory in passwd"
-  runuser -u "$user" -- env -u XDG_RUNTIME_DIR "HOME=$home" "USER=$user" "LOGNAME=$user" "$@"
+  [[ -d $home ]] || die "$user's home directory $home does not exist"
+  (cd "$home" && runuser -u "$user" -- env -u XDG_RUNTIME_DIR "HOME=$home" "USER=$user" "LOGNAME=$user" "$@")
 }
 
 subid_start() { awk -F: -v u="$1" '$1 == u { print $2; exit }' "$2" 2>/dev/null || true; }
