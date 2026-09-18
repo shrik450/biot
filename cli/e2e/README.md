@@ -82,7 +82,7 @@ dispatcher answers anything else with the preview 404 page.
 
 ```sh
 cd cli
-# $log is the file Stand up the server redirected to.
+# $log is the server log file from the previous section.
 export BIOT_E2E_SERVER="$(grep '^SERVER_URL=' "$log" | cut -d= -f2)"
 export BIOT_E2E_TOKEN="$(grep '^TOKEN=' "$log" | cut -d= -f2)"
 export BIOT_E2E_SECOND_TOKEN="$(grep '^SECOND_TOKEN=' "$log" | cut -d= -f2)"

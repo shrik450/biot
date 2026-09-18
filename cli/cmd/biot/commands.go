@@ -22,6 +22,12 @@ import (
 
 const secretExposureWarning = "may contain supplied secrets. This is a historical marker; it does not show whether a secret is present now."
 
+// The SECRETS column is one word wide. The heading names the subject, and the full sentence belongs
+// to `show` and the browser, which have room for it.
+const secretExposureMarker = "maybe"
+
+const listHeader = "NAME\tID\tDESIRED\tACTUAL\tNODE\tWAITING FOR\tSECRETS"
+
 func init() {
 	rootCommand.Children = append(rootCommand.Children, []*command.Command{
 		{
@@ -182,15 +188,19 @@ func runList(commandContext command.Context, arguments []string) error {
 		fmt.Fprintln(commandContext.Stdout, "No Biots.")
 		return nil
 	}
-	fmt.Fprintln(commandContext.Stdout, "NAME\tID\tDESIRED\tACTUAL\tNODE\tWAITING FOR\tSECRETS")
+	fmt.Fprintln(commandContext.Stdout, listHeader)
 	for _, biot := range biots {
-		secretMarker := ""
-		if biot.DirectSecretExposurePossible {
-			secretMarker = secretExposureWarning
-		}
-		fmt.Fprintf(commandContext.Stdout, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", biot.Name, biot.ID, biot.Desired.State, actualContainerLabel(biot), biot.Node, waitingForLabel(biot.Actual.WaitingFor), secretMarker)
+		fmt.Fprintln(commandContext.Stdout, listRow(biot))
 	}
 	return nil
+}
+
+func listRow(biot api.Biot) string {
+	secretMarker := ""
+	if biot.DirectSecretExposurePossible {
+		secretMarker = secretExposureMarker
+	}
+	return fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%s", biot.Name, biot.ID, biot.Desired.State, actualContainerLabel(biot), biot.Node, waitingForLabel(biot.Actual.WaitingFor), secretMarker)
 }
 
 func runShow(commandContext command.Context, arguments []string) error {
