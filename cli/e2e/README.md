@@ -15,15 +15,20 @@ stream for `biot ssh`. Nothing here reaches Nix; a node that would build an
 environment is past the boundary the CLI can see. No `Biot.Server.*` module is
 stubbed.
 
-Run it from the repository root:
+Two runs can stand up at once: each creates its own run directory, database, and
+token, and the HTTP endpoint takes whatever port the operating system gives it.
+
+Run it from the repository root, giving each run its own log file:
 
 ```sh
-MIX_ENV=dev nohup mix run --no-start cli/e2e/e2e_server.exs > /tmp/biot-e2e-server.log 2>&1 &
+log=$(mktemp /tmp/biot-e2e-server.XXXXXX)
+MIX_ENV=dev nohup mix run --no-start cli/e2e/e2e_server.exs > "$log" 2>&1 &
 ```
 
 It holds until killed. Once the log contains `READY`, it has printed:
 
 ```text
+RUN_DIRECTORY=/tmp/biot-e2e.XXXXXX
 SERVER_URL=http://localhost:...
 TOKEN=...
 SECOND_TOKEN=...
@@ -32,8 +37,21 @@ SHARE_EMAIL=teammate@example.test
 NODE_ID=...
 BIOT_NAME=offline-...
 SSH_PORT=...
+TOKEN_FILE=...
 READY
 ```
+
+`SERVER_URL` carries the port the operating system gave the HTTP endpoint: the script binds port 0
+and prints what it got, so two runs cannot collide on it. `RUN_DIRECTORY` is the one directory this
+run owns, holding the database, the certificates, the SSH host key, `TOKEN_FILE`, and
+`server.pid`. Stop the run with:
+
+```sh
+kill "$(cat "$(grep '^RUN_DIRECTORY=' "$log" | cut -d= -f2)/server.pid")"
+```
+
+On a clean stop or `SIGTERM` the script removes `RUN_DIRECTORY`; if setup fails it keeps the
+directory and prints it, so whatever it got as far as is still there to read.
 
 What the script seeds, all through the server's own paths:
 
@@ -52,9 +70,9 @@ What the script seeds, all through the server's own paths:
   into `:biot_server` before startup so the SSH daemon runs. The dev config
   leaves both unset, exactly as it leaves the control listener unset.
 
-The script keeps its certificates, host key, and database under one temp
-directory, so a run never seeds a developer's own dev data and nothing needs to
-exist beforehand.
+The script keeps its database, certificates, host key, and token under one
+directory it creates per run and prints as `RUN_DIRECTORY`, so a run never
+seeds a developer's own dev data and nothing needs to exist beforehand.
 
 The HTTP endpoint listens on `localhost`, on the port the log prints. Use
 `localhost`, not `127.0.0.1`: the control host is `localhost` and the host
@@ -64,7 +82,7 @@ dispatcher answers anything else with the preview 404 page.
 
 ```sh
 cd cli
-log=/tmp/biot-e2e-server.log
+# $log is the file Stand up the server redirected to.
 export BIOT_E2E_SERVER="$(grep '^SERVER_URL=' "$log" | cut -d= -f2)"
 export BIOT_E2E_TOKEN="$(grep '^TOKEN=' "$log" | cut -d= -f2)"
 export BIOT_E2E_SECOND_TOKEN="$(grep '^SECOND_TOKEN=' "$log" | cut -d= -f2)"
@@ -74,6 +92,9 @@ export BIOT_E2E_BIOT="$(grep '^BIOT_NAME=' "$log" | cut -d= -f2)"
 export BIOT_E2E_NODE="$(grep '^NODE_ID=' "$log" | cut -d= -f2)"
 GOCACHE=/tmp/biot-go-cache go test -tags=e2e -count=1 -v ./e2e/
 ```
+
+Every value above is required: the tests read `BIOT_E2E_SERVER` and never fall back to a fixed
+`http://localhost:4000`.
 
 A run consumes part of what the server seeds: `TestTokenListAndRevoke` revokes
 the second credential, so a second run against the same server fails at

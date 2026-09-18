@@ -9,8 +9,11 @@
 # here reaches Nix; a node that would build an environment is past the boundary
 # the CLI can see.
 #
-# It prints SERVER_URL, TOKEN, NODE_ID, and the rest, then READY, and keeps
-# answering until killed.
+# It prints RUN_DIRECTORY, SERVER_URL, TOKEN, TOKEN_FILE, NODE_ID, and the rest, then READY, and
+# keeps answering until killed. Everything it writes lives under RUN_DIRECTORY: the database, the
+# certificates, the SSH host key, and the token. It prints the port the operating system gave the
+# HTTP endpoint, so two runs never share one. It removes RUN_DIRECTORY on a clean stop or SIGTERM,
+# and keeps it and prints its path when setup fails.
 
 # The fixtures name their scratch files with `BiotTest.Temp`, which only the test environment
 # compiles, so this dev-environment script loads it the same way it loads them, first because they
@@ -40,13 +43,23 @@ defmodule E2EServer do
   @ready_context 1
 
   def main do
-    port = free_port()
+    directory = create_run_directory()
+    IO.puts("RUN_DIRECTORY=#{directory}")
+    File.write!(Path.join(directory, "server.pid"), System.pid())
+    System.at_exit(fn _status -> cleanup() end)
+    _ = System.trap_signal(:sigterm, :e2e_cleanup, &cleanup/0)
 
-    directory =
-      Path.join(System.tmp_dir!(), "biot-e2e-#{System.system_time(:microsecond)}-#{System.pid()}")
+    try do
+      run(directory)
+    rescue
+      error ->
+        keep_directory()
+        IO.puts("e2e server failed; keeping #{directory}")
+        reraise error, __STACKTRACE__
+    end
+  end
 
-    File.rm_rf!(directory)
-    File.mkdir_p!(directory)
+  defp run(directory) do
     {:ok, certificates} = TestFixtures.certificates(directory, 2)
     host_key = generate_host_key(directory)
 
@@ -73,7 +86,10 @@ defmodule E2EServer do
       Keyword.put(repo, :database, Path.join(directory, "e2e.sqlite3"))
     )
 
-    Application.put_env(:biot_server, :control_port, port)
+    # Port 0 makes the operating system pick a free port, which is what keeps two runs apart. The
+    # HTTP endpoint and the control listener report the port they were actually given; the SSH
+    # daemon rejects 0, so it gets a port found first.
+    Application.put_env(:biot_server, :control_port, 0)
 
     Application.put_env(:biot_server, :control_tls,
       certfile: certificates.server.cert,
@@ -88,19 +104,19 @@ defmodule E2EServer do
     Application.put_env(:biot_server, :ssh_port, ssh_port)
 
     endpoint = Application.fetch_env!(:biot_web, BiotWeb.Endpoint)
-    # The dev config leaves the endpoint's port unset, so without this the script would announce
-    # Phoenix's 4000 whatever else is running there.
-    http_port = free_port()
 
     endpoint =
       endpoint
       |> Keyword.put(:code_reloader, false)
       |> Keyword.put(:server, true)
       |> Keyword.put(:watchers, [])
-      |> Keyword.update!(:http, &Keyword.put(&1, :port, http_port))
+      |> Keyword.update!(:http, &Keyword.put(&1, :port, 0))
 
     Application.put_env(:biot_web, BiotWeb.Endpoint, endpoint)
     {:ok, _} = Application.ensure_all_started(:biot_web)
+
+    http_port = http_listener_port()
+    control_port = control_listener_port()
 
     principal = enabled_principal(9100)
     {_session, authentication} = AccessHarness.control(principal)
@@ -110,7 +126,7 @@ defmodule E2EServer do
     _teammate = enabled_principal(9101, "teammate@example.test")
 
     node = Repo.get!(Node, node_id)
-    peer = AccessHarness.ready_peer(port, certificates, node, 0)
+    peer = AccessHarness.ready_peer(control_port, certificates, node, 0)
 
     # A second enabled node with no peer: it accepts a Biot but every delivery
     # to it fails, which is the failure path the secret tests exercise.
@@ -130,6 +146,10 @@ defmodule E2EServer do
         }
       )
 
+    token_path = Path.join(directory, "token")
+    File.write!(token_path, created.token)
+    File.chmod!(token_path, 0o600)
+
     IO.puts("SERVER_URL=http://localhost:#{http_port}")
     IO.puts("TOKEN=#{created.token}")
     IO.puts("SECOND_TOKEN=#{second.token}")
@@ -138,10 +158,60 @@ defmodule E2EServer do
     IO.puts("NODE_ID=#{node.id}")
     IO.puts("BIOT_NAME=#{offline_name}")
     IO.puts("SSH_PORT=#{ssh_port}")
+    IO.puts("TOKEN_FILE=#{token_path}")
     IO.puts("READY")
     IO.puts("")
 
     serve(peer, peer.socket, @ready_context)
+  end
+
+  defp create_run_directory do
+    directory =
+      case System.cmd("mktemp", ["-d", Path.join(System.tmp_dir!(), "biot-e2e.XXXXXX")],
+             stderr_to_stdout: true
+           ) do
+        {output, 0} -> String.trim(output)
+        {output, status} -> raise "mktemp failed (#{status}): #{output}"
+      end
+
+    :persistent_term.put({__MODULE__, :run}, {directory, false})
+    directory
+  end
+
+  defp keep_directory do
+    case :persistent_term.get({__MODULE__, :run}, nil) do
+      {directory, _keep} -> :persistent_term.put({__MODULE__, :run}, {directory, true})
+      nil -> :ok
+    end
+  end
+
+  defp cleanup do
+    case :persistent_term.get({__MODULE__, :run}, nil) do
+      {directory, false} -> File.rm_rf(directory)
+      _keep -> :ok
+    end
+  end
+
+  defp http_listener_port do
+    case BiotWeb.Endpoint.server_info(:http) do
+      {:ok, {_address, port}} -> port
+      other -> raise "the HTTP endpoint did not report its port: #{inspect(other)}"
+    end
+  end
+
+  defp control_listener_port do
+    listener =
+      Enum.find_value(Supervisor.which_children(Biot.Server.Supervisor), fn
+        {Biot.Server.Control.Listener, pid, _type, _modules} when is_pid(pid) -> pid
+        _child -> nil
+      end)
+
+    with true <- is_pid(listener),
+         {:ok, {_address, port}} <- ThousandIsland.listener_info(listener) do
+      port
+    else
+      other -> raise "the control listener did not report its port: #{inspect(other)}"
+    end
   end
 
   # The node's side of the control protocol: answer heartbeats, report a healthy

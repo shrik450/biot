@@ -65,10 +65,7 @@ func requireEnv(t *testing.T, key string) string {
 
 func serverURL(t *testing.T) string {
 	t.Helper()
-	if value := os.Getenv("BIOT_E2E_SERVER"); value != "" {
-		return value
-	}
-	return "http://localhost:4000"
+	return requireEnv(t, "BIOT_E2E_SERVER")
 }
 
 func requireNode(t *testing.T) string {
