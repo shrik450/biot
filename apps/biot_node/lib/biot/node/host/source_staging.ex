@@ -63,6 +63,10 @@ defmodule Biot.Node.Host.SourceStaging do
         environment_id,
         selection
       ) do
+    # Read before the worker runs: a credential delivered after this fetch started cannot explain a
+    # failure this fetch reports.
+    held = FetchCredentials.held_sources(config, allocation, sources(config, selection))
+
     with :ok <- stage_build_support(config, biot_id),
          :ok <- FetchCredentials.write_include(config, allocation),
          :ok <- ensure_environment_directory(config, allocation, environment_id),
@@ -73,7 +77,7 @@ defmodule Biot.Node.Host.SourceStaging do
              {:fetch, environment_id},
              arguments(config, environment_id, selection)
            ),
-         :ok <- succeeded(result, config, selection) do
+         :ok <- succeeded(result, config, selection, held) do
       read(config, biot_id, environment_id)
     end
   end
@@ -188,15 +192,25 @@ defmodule Biot.Node.Host.SourceStaging do
     %{"url" => RepositorySource.to_string(repository), "ref" => ref}
   end
 
-  defp succeeded(%Command.Result{status: 0}, _config, _selection), do: :ok
+  defp succeeded(%Command.Result{status: 0}, _config, _selection, _held), do: :ok
 
   # The worker prints one stream for the whole phase, so which source stopped it is only in the
   # message. `Host.Git` owns reading that; a message about no source this selection named is an
-  # ordinary resolution failure.
-  defp succeeded(%Command.Result{} = result, config, selection) do
+  # ordinary resolution failure. A source that refused a credential the node held is not a wait: the
+  # node asked, was handed one, and it did not work, so waiting again would tell the person who just
+  # delivered it to deliver it while nothing else is coming. It becomes an invalid source they can
+  # see and act on, and a corrected credential still resolves it.
+  defp succeeded(%Command.Result{} = result, config, selection, held) do
     case Git.authentication_failure(result.stdout <> result.stderr, sources(config, selection)) do
-      {:credential_required, source} -> {:waiting_for, source}
-      :none -> {:error, Outcome.from_command(:resolution_failed, result)}
+      {:credential_required, source} ->
+        if source in held do
+          {:error, Outcome.credential_refused(source, result)}
+        else
+          {:waiting_for, source}
+        end
+
+      :none ->
+        {:error, Outcome.from_command(:resolution_failed, result)}
     end
   end
 

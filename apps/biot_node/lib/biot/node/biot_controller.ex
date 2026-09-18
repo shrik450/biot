@@ -624,21 +624,33 @@ defmodule Biot.Node.BiotController do
     delivered({state, woken}, request.operation, outcome)
   end
 
-  # Delivering the credential a fetch stopped for is the one request that changes what this biot
-  # can do next. Another source's credential changes nothing, so the wait stands and the fetch is
-  # not run again for nothing.
+  # A person delivering a credential is the change a blocked source waits for. Delivering the
+  # source this biot is waiting for ends that wait, and delivering any credential clears a
+  # recorded failure, because that delivery is the change an after-change failure waits for.
+  # Attempts stay: they are what bounds how often this can happen.
   defp delivered({%State{} = state, woken}, {:deliver_fetch_credential, source, _value}, :ok) do
-    if state.retry.waiting_for == {:fetch_credential, source} do
-      case Journal.clear_waiting_for(state.biot_id, revision(state.spec)) do
-        {:ok, retry} -> {%{state | retry: retry}, :woken}
-        :superseded -> {state, woken}
-      end
-    else
-      {state, woken}
+    revision = revision(state.spec)
+
+    cond do
+      state.retry.waiting_for == {:fetch_credential, source} ->
+        put_delivery(state, woken, Journal.clear_waiting_for(state.biot_id, revision))
+
+      state.retry.failure != nil ->
+        put_delivery(state, woken, Journal.clear_failure(state.biot_id, revision))
+
+      true ->
+        {state, woken}
     end
   end
 
   defp delivered({%State{} = state, woken}, _operation, _outcome), do: {state, woken}
+
+  defp put_delivery(%State{} = state, woken, write) do
+    case write do
+      {:ok, retry} -> {%{state | retry: retry}, :woken}
+      :superseded -> {state, woken}
+    end
+  end
 
   defp cancel_wake({_tag, %Wake{} = wake}), do: Process.cancel_timer(wake.timer)
   defp cancel_wake({_tag, _detail, %Wake{} = wake}), do: Process.cancel_timer(wake.timer)

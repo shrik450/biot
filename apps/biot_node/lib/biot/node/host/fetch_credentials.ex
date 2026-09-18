@@ -93,6 +93,26 @@ defmodule Biot.Node.Host.FetchCredentials do
     {:credentials, Path.join(Paths.fetch_credentials(config, biot_id), @include_name)}
   end
 
+  @doc """
+  Which of `sources` this biot already holds a credential for.
+
+  The stored fragment is the node's record of a delivery: one file per source, named for the digest
+  of its URL, so a delivered credential is held for every later revision without any other durable
+  state. Reading the directory once answers the whole set, which is what lets a caller ask before
+  it runs Git whether the failure it has not seen yet would be a first wait or a refusal.
+  """
+  @spec held_sources(Config.t(), Allocation.t(), [RepositorySource.t()]) :: [RepositorySource.t()]
+  def held_sources(config, %Allocation{} = allocation, sources) do
+    directory = Paths.fetch_credentials(config, allocation.biot_id)
+
+    case fragment_names(directory) do
+      {:ok, names} -> Enum.filter(sources, &(fragment_name(&1) in names))
+      # A directory the node cannot list holds nothing the node can offer, and the include file
+      # written from the same directory fails before Git runs on it.
+      {:error, _reason} -> []
+    end
+  end
+
   @doc "The include file's own name, which is the same inside a worker as it is on the node."
   @spec include_name() :: String.t()
   def include_name, do: @include_name

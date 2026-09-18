@@ -13,6 +13,7 @@ defmodule Biot.Node.RetryTest do
   @outcomes [
     {"host unavailable", :host_unavailable, :resource_unavailable, :automatic},
     {"container exited", {:container_exited, 137}, :container_failed, :automatic},
+    {"credential refused", {:credential_refused, repository()}, :invalid_source, :after_change},
     {"host error term", {:error, :enospc}, :resource_unavailable, :automatic},
     {"host task exit", {:exit, :killed}, :resource_unavailable, :automatic},
     {"invalid source", :invalid_source, :invalid_source, :after_change},

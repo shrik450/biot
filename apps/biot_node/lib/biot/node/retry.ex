@@ -7,6 +7,7 @@ defmodule Biot.Node.Retry do
 
   alias Biot.Node.Action
   alias Biot.Protocol.Failure
+  alias Biot.Protocol.RepositorySource
 
   @reasons ~w(host_unavailable invalid_source resolution_failed build_failed invalid_configuration lost_data ownership_mismatch)a
 
@@ -14,6 +15,7 @@ defmodule Biot.Node.Retry do
   @type reason ::
           :host_unavailable
           | {:container_exited, non_neg_integer()}
+          | {:credential_refused, RepositorySource.t()}
           | :invalid_source
           | :resolution_failed
           | :build_failed
@@ -67,10 +69,15 @@ defmodule Biot.Node.Retry do
   defp reason({:error, _term}), do: :host_unavailable
   defp reason({:exit, _term}), do: :host_unavailable
   defp reason({:container_exited, status}), do: {:container_exited, status}
+
+  defp reason({:credential_refused, %RepositorySource{} = source}),
+    do: {:credential_refused, source}
+
   defp reason(reason) when reason in @reasons, do: reason
 
   defp code(:host_unavailable), do: :resource_unavailable
   defp code({:container_exited, _status}), do: :container_failed
+  defp code({:credential_refused, _source}), do: :invalid_source
   defp code(:invalid_source), do: :invalid_source
   defp code(:resolution_failed), do: :resolution_failed
   defp code(:build_failed), do: :preparation_failed
@@ -82,6 +89,7 @@ defmodule Biot.Node.Retry do
   # data and a resource this biot does not own need a person.
   defp policy(:host_unavailable), do: :automatic
   defp policy({:container_exited, _status}), do: :automatic
+  defp policy({:credential_refused, _source}), do: :after_change
   defp policy(:invalid_source), do: :after_change
   defp policy(:resolution_failed), do: :after_change
   defp policy(:build_failed), do: :after_change
@@ -95,6 +103,11 @@ defmodule Biot.Node.Retry do
   defp message({:error, term}), do: "the host reported an error: " <> describe(term)
   defp message({:exit, term}), do: "the host task exited: " <> describe(term)
   defp message({:container_exited, status}), do: "the container exited with status #{status}"
+
+  defp message({:credential_refused, _source}),
+    do:
+      "the delivered credential was refused; the source URL may be wrong or the repository may not exist."
+
   defp message(:host_unavailable), do: "the host could not complete this work"
   defp message(:invalid_source), do: "a selected source could not be used"
   defp message(:resolution_failed), do: "the environment could not be resolved"

@@ -230,16 +230,19 @@ defmodule Biot.Node.Host.Allocation do
   # the same credentials the fetch phase gets, read from the same file it writes for that phase.
   defp clone_checkout(config, allocation, repository, checkout) do
     staging = Paths.checkout_staging(config, allocation.biot_id)
+    # Read before Git runs: a credential delivered after this clone started cannot explain a
+    # failure this clone reports.
+    held = FetchCredentials.held_sources(config, allocation, [repository])
 
     with :ok <- FetchCredentials.write_include(config, allocation),
          {:ok, _removed} <- remove_tree(staging),
-         {:ok, _cloned} <- clone(config, allocation, repository, staging),
+         {:ok, _cloned} <- clone(config, allocation, repository, staging, held),
          {:ok, _promoted} <- promote_checkout(staging, checkout) do
       {:ok, :checkout}
     end
   end
 
-  defp clone(config, allocation, repository, staging) do
+  defp clone(config, allocation, repository, staging, held) do
     result =
       command(
         config,
@@ -254,7 +257,7 @@ defmodule Biot.Node.Host.Allocation do
 
       {:ok, %Command.Result{} = command_result} ->
         FileSystem.remove_tree(staging)
-        clone_failure(command_result, repository)
+        clone_failure(command_result, repository, held)
 
       {:error, reason} ->
         FileSystem.remove_tree(staging)
@@ -264,10 +267,21 @@ defmodule Biot.Node.Host.Allocation do
 
   # A checkout the node cannot read without a credential is the same wait a private layer produces,
   # so it ends the action the same way instead of spending the budget on a clone that cannot work.
-  defp clone_failure(%Command.Result{} = result, repository) do
+  # A source that refused a credential the node held is not that wait: the node asked, was handed
+  # one, and it did not work, so waiting again would tell the person who just delivered it to
+  # deliver it while nothing else is coming. It becomes an invalid source they can see and act on,
+  # and a corrected credential still resolves it.
+  defp clone_failure(%Command.Result{} = result, repository, held) do
     case Git.authentication_failure(result.stdout <> result.stderr, [repository]) do
-      {:credential_required, source} -> {:waiting_for, source}
-      :none -> {:error, Outcome.from_command(:invalid_source, result)}
+      {:credential_required, source} ->
+        if source in held do
+          {:error, Outcome.credential_refused(source, result)}
+        else
+          {:waiting_for, source}
+        end
+
+      :none ->
+        {:error, Outcome.from_command(:invalid_source, result)}
     end
   end
 

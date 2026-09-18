@@ -10,11 +10,13 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
   alias Biot.Node.DataRootLock
   alias Biot.Node.Host
   alias Biot.Node.Host.FetchCredentials
+  alias Biot.Node.Host.Outcome
   alias Biot.Node.Host.Paths
   alias Biot.Node.Host.Setup
   alias Biot.Node.Journal
   alias Biot.Node.Journal.Migrator
   alias Biot.Node.Repo
+  alias Biot.Node.RetryState
   alias Biot.Node.SecretRequest
   alias Biot.Node.TestHostRange
   alias Biot.Protocol.AuthorizationValue
@@ -24,6 +26,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.EnvironmentSelection
   alias Biot.Protocol.ExecutionSpec
+  alias Biot.Protocol.Failure
   alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.SecretName
   alias Biot.Protocol.SecretValue
@@ -217,6 +220,28 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
              {:waiting_for, private}
   end
 
+  test "a source that refuses a delivered credential is an invalid source, not a wait", context do
+    {biot_id, host} = allocated(1_810)
+    allocation = Journal.allocation(biot_id)
+    private = context.private
+
+    # With no credential held, the node has nothing to offer this source, so it waits for one.
+    assert Host.run({:initialize, allocation, private}, host) == {:waiting_for, private}
+
+    # The source refuses the credential that was delivered. The node asked for one, got it, and it
+    # did not work, so a wait would tell the person who just delivered it to deliver it again with
+    # nothing else coming. It is an invalid source instead, and the diagnostic names the source the
+    # bounded failure message cannot.
+    assert Host.serve({:deliver_fetch_credential, private, authorization("Bearer refused")}, host) ==
+             :ok
+
+    assert {:error, %Outcome{outcome: {:credential_refused, ^private}, diagnostic: diagnostic}} =
+             Host.run({:initialize, allocation, private}, host)
+
+    {text, _truncated} = diagnostic
+    assert text =~ RepositorySource.to_string(private)
+  end
+
   test "a credential delivered while the clone that needs it runs ends in one wake", context do
     start_supervised!(Controllers)
     biot_id = id(BiotId, 1_807)
@@ -258,6 +283,67 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
     # The waiting clone gave its attempt back, so the only attempt this stage holds is the clone
     # that ran after the credential arrived.
     assert retry.attempts[:initialize] == 1
+
+    stop_supervised!(Controllers)
+  end
+
+  test "a second delivery clears a refused credential's failure and lets the biot converge",
+       context do
+    start_supervised!(Controllers)
+    biot_id = id(BiotId, 1_811)
+    private = context.private
+
+    assert {:ok, _intent} =
+             Journal.put_intent(%BiotSpec{
+               execution: execution(biot_id, private),
+               access_revision: 1
+             })
+
+    assert :ok = Controllers.intent_changed(biot_id)
+
+    # The clone has no credential, so the biot waits for one and spends nothing on the wait.
+    assert eventually(fn ->
+             match?(
+               %RetryState{waiting_for: {:fetch_credential, ^private}},
+               Journal.retry_state(biot_id)
+             )
+           end)
+
+    assert RetryState.attempts(Journal.retry_state(biot_id), :initialize) == 0
+
+    # A credential is delivered and the source refuses it. That is a failure a person has to
+    # answer, not a wait, and it spends the attempt the wait gave back.
+    assert :ok = deliver(biot_id, "refused", private, authorization("Bearer refused"))
+
+    assert eventually(fn ->
+             match?(
+               %RetryState{waiting_for: nil, failure: %Failure{code: :invalid_source}},
+               Journal.retry_state(biot_id)
+             )
+           end)
+
+    refused = Journal.retry_state(biot_id)
+    assert refused.failure.retry == :after_change
+    # The refusal spends the attempt the wait gave back, which is what bounds repetition: a wait
+    # returns the attempt and a refusal does not.
+    assert RetryState.attempts(refused, :initialize) >= 1
+
+    # The wait is gone, so delivering a credential is now the only thing that can clear the
+    # failure. Without that, the biot stays failed until its spec changes.
+    assert :ok = deliver(biot_id, "accepted", private, authorization(@token))
+
+    {:ok, host} = Host.context(biot_id)
+
+    assert eventually(fn ->
+             File.exists?(Path.join(Paths.checkout(host.config, biot_id), "README.md"))
+           end)
+
+    converged = Journal.retry_state(biot_id)
+    assert converged.failure == nil
+    # Clearing the failure does not clear the attempts, so the work the accepted credential ran is
+    # counted against the budget too.
+    assert RetryState.attempts(converged, :initialize) >
+             RetryState.attempts(refused, :initialize)
 
     stop_supervised!(Controllers)
   end
@@ -337,6 +423,15 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
   defp authorization(value \\ "Bearer abc") do
     {:ok, parsed} = AuthorizationValue.parse(value, 1)
     parsed
+  end
+
+  defp deliver(biot_id, request_id, source, value) do
+    request =
+      SecretRequest.new(request_id, {:deliver_fetch_credential, source, value}, 60_000, self())
+
+    assert Controllers.secret_request(biot_id, request) == :ok
+    assert_receive {:secret_result, ^request_id, :fetch_credential, :ok}, 30_000
+    :ok
   end
 
   defp source do
