@@ -22,7 +22,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-mix-
 
-      - run: nix develop --command mix deps.get
+      - run: nix develop --command mix setup
       - run: nix develop --command mix check
       - run: nix develop --command mix test --exclude podman --warnings-as-errors
 

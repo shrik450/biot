@@ -26,6 +26,10 @@
               beam.hex
               beam.rebar3
               pkgs.go_1_26
+              # The browser suite drives these two. They are here so the suite finds a matched
+              # pair by itself instead of borrowing whatever the host happens to have installed.
+              pkgs.chromium
+              pkgs.chromedriver
             ];
 
             shellHook = ''

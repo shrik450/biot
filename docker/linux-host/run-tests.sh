@@ -25,7 +25,7 @@ if docker run --privileged --rm \
   -v "$source_archive":/source.tar:ro \
   -e MIX_ENV=test \
   biot-linux-host \
-  -c 'set -e; mkdir "$HOME/work" && tar -xf /source.tar -C "$HOME/work" && cd "$HOME/work" && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && mix deps.get >/dev/null && mix test --max-cases 1 --seed 0' \
+  -c 'set -e; mkdir "$HOME/work" && tar -xf /source.tar -C "$HOME/work" && cd "$HOME/work" && mix local.hex --force >/dev/null && mix local.rebar --force >/dev/null && mix setup >/dev/null && mix test --max-cases 1 --seed 0' \
   >"$log_file" 2>&1; then
   status=0
 else

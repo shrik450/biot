@@ -25,6 +25,13 @@ defmodule Biot.MixProject do
 
   defp aliases do
     [
+      # What a developer and CI both run to get a working tree. The browser suite drives real
+      # pages, so built assets are part of "working" rather than a release-time concern.
+      setup: [
+        "deps.get",
+        "do --app biot_web assets.setup",
+        "do --app biot_web assets.build"
+      ],
       "ecto.setup": ["ecto.create", "ecto.migrate"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
       # The server migrates its database at boot, so a dropped database is a fresh one.

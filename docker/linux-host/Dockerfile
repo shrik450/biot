@@ -7,7 +7,7 @@ ARG GO_AMD64_SHA256=1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733
 ARG GO_ARM64_SHA256=ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes ca-certificates curl fuse-overlayfs git nftables podman slirp4netns uidmap xz-utils \
+    && apt-get install --no-install-recommends --yes ca-certificates chromium chromium-driver curl fuse-overlayfs git nftables podman slirp4netns uidmap xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /bin/bash biot \
     && usermod --add-subuids 100000-165535 --add-subgids 100000-165535 biot \

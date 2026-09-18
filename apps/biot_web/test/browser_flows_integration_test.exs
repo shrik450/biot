@@ -20,10 +20,9 @@ defmodule BiotWeb.BrowserFlowsIntegrationTest do
   setup_all do
     capabilities = Application.fetch_env!(:wallaby, :chromedriver)[:capabilities]
 
-    assert "--host-resolver-rules=MAP *.env.test 127.0.0.1" in get_in(capabilities, [
-             :chromeOptions,
-             :args
-           ])
+    assert BiotWeb.Browser.host_resolver_rule() in get_in(capabilities, [:chromeOptions, :args])
+
+    assert_built_assets!()
 
     # BiotTest.Temp keeps a directory an aborted run left behind from colliding with this one.
     directory = BiotTest.Temp.directory("biot-browser")
@@ -362,5 +361,16 @@ defmodule BiotWeb.BrowserFlowsIntegrationTest do
     assert response["status"] == 0
 
     session
+  end
+
+  # Every test here drives a connected LiveView, and a LiveView connects only once the browser has
+  # run app.js. Without the build each page stops at its disconnected render and the failure reads
+  # as a missing element rather than a missing asset, which is how this cost a CI afternoon.
+  defp assert_built_assets! do
+    script = Application.app_dir(:biot_web, "priv/static/assets/js/app.js")
+
+    if not File.regular?(script) do
+      raise "the browser tests need #{script}. Run `mix assets.build` in apps/biot_web."
+    end
   end
 end
