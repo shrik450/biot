@@ -27,6 +27,7 @@ defmodule Biot.Node.HostJournalIntegrationTest do
     data_root = temporary_directory("biot-node-journal")
     previous = Application.get_env(:biot_node, :data_root)
     Application.put_env(:biot_node, :data_root, data_root)
+    Application.put_env(:biot_node, :runtime_root, runtime_directory())
 
     start_supervised!(Repo)
     Migrator.migrate(log: false)
@@ -278,6 +279,7 @@ defmodule Biot.Node.HostJournalIntegrationTest do
 
     struct!(Config,
       data_root: data_root,
+      runtime_root: "/run/biot",
       fetch_ca_bundle: nil,
       uid_range_base: 100_000,
       uid_range_count: 1_024,
@@ -316,6 +318,15 @@ defmodule Biot.Node.HostJournalIntegrationTest do
 
     {:ok, parsed} = module.parse(value)
     parsed
+  end
+
+  # A node's runtime root, kept short and out of the temp root because the agent socket lives in it
+  # and a Unix socket path has 108 bytes to spend.
+  defp runtime_directory do
+    path = BiotTest.Temp.node_root("biot-rt")
+    File.mkdir_p!(path)
+    ExUnit.Callbacks.on_exit(fn -> File.rm_rf(path) end)
+    path
   end
 
   defp temporary_directory(prefix) do

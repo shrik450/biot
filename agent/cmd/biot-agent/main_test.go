@@ -33,7 +33,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestAgentReplacesStaleSocketAndServesPortTargets(t *testing.T) {
-	directory := shortTempDir(t)
+	directory := socketDir(t)
 	socket := filepath.Join(directory, "agent.sock")
 	if err := os.WriteFile(socket, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
@@ -106,7 +106,7 @@ func TestAgentReplacesStaleSocketAndServesPortTargets(t *testing.T) {
 }
 
 func TestAgentRejectsMalformedAndOversizedRequests(t *testing.T) {
-	socket := filepath.Join(shortTempDir(t), "agent.sock")
+	socket := filepath.Join(socketDir(t), "agent.sock")
 	command := startAgent(t, socket)
 	defer stopAgent(command)
 
@@ -136,7 +136,7 @@ func TestAgentRejectsMalformedAndOversizedRequests(t *testing.T) {
 func TestAgentRequiresSocketAndShellEntrypoint(t *testing.T) {
 	tests := [][]string{
 		{},
-		{"--socket", filepath.Join(shortTempDir(t), "agent.sock")},
+		{"--socket", filepath.Join(socketDir(t), "agent.sock")},
 		{"--shell-entrypoint", "/bin/sh"},
 	}
 	for _, arguments := range tests {
@@ -203,7 +203,12 @@ func reserveClosedPort(t *testing.T) int {
 	return port
 }
 
-func shortTempDir(t *testing.T) string {
+// socketDir returns a directory to bind an agent socket in, relative to the package directory
+// rather than under TMPDIR. Linux caps a Unix socket path at 108 bytes including its terminating
+// NUL, and t.TempDir() builds on TMPDIR, which is not a known length: `nix develop` sets it to a
+// per-shell path long enough on its own to push the socket over the limit. A relative path is the
+// shortest thing that is always available.
+func socketDir(t *testing.T) string {
 	t.Helper()
 	directory, err := os.MkdirTemp(".", ".biot-agent-")
 	if err != nil {

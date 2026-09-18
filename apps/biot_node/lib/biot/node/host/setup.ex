@@ -1,7 +1,10 @@
 defmodule Biot.Node.Host.Setup do
   @moduledoc """
-  Creates the node-wide host layout after the data-root lock is held, and refuses to start a node
-  whose host cannot give a build worker a working Nix sandbox.
+  Creates the node-wide host layout under both roots after the data-root lock is held, and refuses
+  to start a node whose host cannot give a build worker a working Nix sandbox.
+
+  The runtime root is created here because a reboot clears it, so a node that starts has to assume
+  it is not there rather than that an installer left it behind.
 
   The sandbox check is a real build in a real worker, not a capability test, because Nix falls
   back to building without a sandbox when it can and reports success either way. The worker
@@ -35,6 +38,7 @@ defmodule Biot.Node.Host.Setup do
     with {:ok, config} <- Config.load(),
          :ok <-
            FileSystem.ensure_directories([
+             config.runtime_root,
              Paths.biots(config),
              Paths.diagnostics(config),
              Paths.runtime_logs(config),

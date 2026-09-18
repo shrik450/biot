@@ -8,6 +8,7 @@ defmodule Dev.LocalBootstrap do
   def main do
     run_directory = fetch_env!("BIOT_RUN_DIRECTORY")
     node_data_root = fetch_env!("BIOT_DATA_DIRECTORY")
+    node_runtime_root = fetch_env!("BIOT_RUNTIME_DIRECTORY")
     certificate_directory = Path.join(run_directory, "certificates")
     uid_range = subordinate_range!()
 
@@ -35,7 +36,8 @@ defmodule Dev.LocalBootstrap do
       registration_file,
       ports,
       uid_range,
-      node_data_root
+      node_data_root,
+      node_runtime_root
     )
 
     IO.puts("local bootstrap ready: #{run_directory}")
@@ -66,7 +68,8 @@ defmodule Dev.LocalBootstrap do
          registration_file,
          ports,
          uid_range,
-         node_data_root
+         node_data_root,
+         node_runtime_root
        ) do
     environment = %{
       "BIOT_CONTROL_CACERTFILE" => Path.join(certificate_directory, "ca.pem"),
@@ -84,6 +87,7 @@ defmodule Dev.LocalBootstrap do
       "BIOT_NODE_CACERTFILE" => Path.join(certificate_directory, "ca.pem"),
       "BIOT_NODE_CERTFILE" => node.cert,
       "BIOT_NODE_DATA_ROOT" => node_data_root,
+      "BIOT_NODE_RUNTIME_ROOT" => node_runtime_root,
       "BIOT_NODE_KEYFILE" => node.key,
       "BIOT_NODE_REGISTRATION_ID" => registration_id,
       "BIOT_NODE_UID_RANGE_BASE" => uid_range.base,

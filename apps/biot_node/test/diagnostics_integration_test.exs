@@ -20,13 +20,15 @@ defmodule Biot.Node.DiagnosticsIntegrationTest do
 
   setup_all do
     data_root = temporary_directory("biot-diagnostics")
-    previous = configure(data_root)
+    runtime_root = runtime_directory()
+    previous = configure(data_root, runtime_root)
     start_supervised!(Repo)
     Migrator.migrate(log: false)
 
     on_exit(fn ->
       restore(previous)
       File.rm_rf!(data_root)
+      File.rm_rf!(runtime_root)
     end)
 
     {:ok, data_root: data_root}
@@ -137,9 +139,10 @@ defmodule Biot.Node.DiagnosticsIntegrationTest do
     diagnostic_id
   end
 
-  defp configure(data_root) do
+  defp configure(data_root, runtime_root) do
     settings = [
       data_root: data_root,
+      runtime_root: runtime_root,
       uid_range_base: 100_000,
       uid_range_count: 1_024,
       uid_range_limit: 165_536,
@@ -187,6 +190,7 @@ defmodule Biot.Node.DiagnosticsIntegrationTest do
 
     struct!(Config,
       data_root: data_root,
+      runtime_root: "/run/biot",
       fetch_ca_bundle: nil,
       uid_range_base: 100_000,
       uid_range_count: 1_024,
@@ -217,6 +221,12 @@ defmodule Biot.Node.DiagnosticsIntegrationTest do
   defp id do
     {:ok, id} = BiotId.parse(Ecto.UUID.generate())
     id
+  end
+
+  defp runtime_directory do
+    path = BiotTest.Temp.node_root("biot-rt")
+    File.mkdir_p!(path)
+    path
   end
 
   defp temporary_directory(prefix) do

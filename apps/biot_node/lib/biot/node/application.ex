@@ -8,7 +8,7 @@ defmodule Biot.Node.Application do
   alias Biot.Protocol.Wire
 
   @control_connection_keys [:server_host, :server_port, :registration_id, :tls]
-  @host_keys [:data_root, :uid_range_base, :uid_range_count, :uid_range_limit]
+  @host_keys [:data_root, :runtime_root, :uid_range_base, :uid_range_count, :uid_range_limit]
 
   @impl true
   def start(_type, _args) do
@@ -20,8 +20,8 @@ defmodule Biot.Node.Application do
     Supervisor.start_link(children, opts)
   end
 
-  # A node without a data root owns no biots. It has nowhere to keep the intent the server would
-  # send it, so it holds no control link either.
+  # A node without the host settings owns no biots. It has nowhere to keep the intent the server
+  # would send it, so it holds no control link either.
   defp host_children do
     if configured?(@host_keys) do
       [
@@ -36,7 +36,7 @@ defmodule Biot.Node.Application do
         {Biot.Node.Streams.Supervisor, stream_children()}
       ]
     else
-      Logger.info("node host disabled because the data root is not configured")
+      Logger.info("node host disabled because its roots and UID range are not configured")
       []
     end
   end

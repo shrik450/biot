@@ -42,10 +42,13 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
   setup_all do
     project_root = Path.expand("../../..", __DIR__)
-    data_root = temporary_directory("biot-host-linux")
-    repository_root = temporary_directory("biot-host-git")
+    data_root = node_directory("biot-host-linux")
+    # The fetch CA bundle lives in here and the node bind-mounts it into a worker, so this is a
+    # path a container has to be able to reach.
+    repository_root = node_directory("biot-host-git")
     authority = certificate_authority(repository_root)
-    settings = host_settings(data_root, authority.bundle)
+    runtime_root = node_directory("biot-rt")
+    settings = host_settings(data_root, runtime_root, authority.bundle)
 
     previous =
       Map.new(settings, fn {key, _value} -> {key, Application.get_env(:biot_node, key)} end)
@@ -82,10 +85,13 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
       :persistent_term.erase(Config)
       remove_all_test_containers(settings)
       File.chmod(data_root, 0o700)
-      System.cmd("podman", ["unshare", "chown", "-R", "0:0", data_root], stderr_to_stdout: true)
-      System.cmd("podman", ["unshare", "chmod", "-R", "u+rwX", data_root], stderr_to_stdout: true)
 
-      File.rm_rf!(data_root)
+      for root <- [data_root, runtime_root] do
+        System.cmd("podman", ["unshare", "chown", "-R", "0:0", root], stderr_to_stdout: true)
+        System.cmd("podman", ["unshare", "chmod", "-R", "u+rwX", root], stderr_to_stdout: true)
+        File.rm_rf!(root)
+      end
+
       File.rm_rf!(repository_root)
 
       if old_ssl,
@@ -928,7 +934,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
                stderr_to_stdout: true
              )
 
-    image = Keyword.fetch!(host_settings("/unused", nil), :builder_image)
+    image = Keyword.fetch!(host_settings("/unused", "/run/biot", nil), :builder_image)
 
     {roots, 0} =
       System.cmd(
@@ -997,11 +1003,12 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     Enum.any?(Controllers.running(), fn {running_id, _pid} -> running_id == biot_id end)
   end
 
-  defp host_settings(data_root, fetch_ca_bundle) do
+  defp host_settings(data_root, runtime_root, fetch_ca_bundle) do
     {uid_start, uid_count} = TestHostRange.subordinate_ids()
 
     [
       data_root: data_root,
+      runtime_root: runtime_root,
       fetch_ca_bundle: fetch_ca_bundle,
       uid_range_base: uid_start,
       uid_range_count: 1_024,
@@ -1048,8 +1055,10 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     end
   end
 
-  defp temporary_directory(prefix) do
-    path = BiotTest.Temp.directory(prefix)
+  # Both of a node's roots have to be somewhere its containers can reach, and its runtime root has
+  # to be short as well. `BiotTest.Temp.node_root/1` says why the system temp root is neither.
+  defp node_directory(prefix) do
+    path = BiotTest.Temp.node_root(prefix)
     File.mkdir_p!(path)
     path
   end

@@ -1,6 +1,13 @@
 defmodule Biot.Node.Host.Paths do
   @moduledoc """
-  Owns the node-private layout below the configured data root.
+  Owns the node-private layout below the configured data and runtime roots.
+
+  Two roots, because they answer to different masters. The data root holds everything that has to
+  survive a restart, and is free to be long and to live wherever the disk is. The runtime root
+  holds one directory per Biot containing the agent socket, and has to be short: Linux caps a Unix
+  socket path at 108 bytes including its terminating NUL, and a path that overruns it cannot be
+  connected to at all. Deriving the socket from the data root put a kernel address limit on a
+  storage setting, so a deep checkout directory or a nested temporary directory broke the node.
 
   Each Biot has writable checkout, home, service data, and run mounts. Its secrets mount is read
   only in the container. The completion marker and container identity sit beside these mounts.
@@ -85,19 +92,27 @@ defmodule Biot.Node.Host.Paths do
   @spec service_data(Config.t(), BiotId.t()) :: String.t()
   def service_data(config, biot_id), do: Path.join(biot(config, biot_id), "service-data")
 
+  @doc """
+  The Biot's runtime directory, mounted at `/biot/run`, holding its agent socket.
+
+  It is under the runtime root rather than beside the Biot's data because its one job is to hold a
+  socket address, and an address has to stay inside the kernel's path limit.
+  """
   @spec run(Config.t(), BiotId.t()) :: String.t()
-  def run(config, biot_id), do: Path.join(biot(config, biot_id), "run")
+  def run(%Config{runtime_root: runtime_root}, biot_id) do
+    Path.join(runtime_root, BiotId.to_string(biot_id))
+  end
 
   @doc "The Unix socket the runtime agent listens on for this Biot."
   @spec agent_socket(Config.t(), BiotId.t()) :: String.t()
-  def agent_socket(%Config{data_root: data_root}, biot_id) do
-    build_agent_socket(data_root, BiotId.to_string(biot_id))
+  def agent_socket(%Config{runtime_root: runtime_root}, biot_id) do
+    build_agent_socket(runtime_root, BiotId.to_string(biot_id))
   end
 
-  @doc "The byte length of the longest possible agent socket path below a data root."
+  @doc "The byte length of the longest possible agent socket path below a runtime root."
   @spec agent_socket_path_length(String.t()) :: non_neg_integer()
-  def agent_socket_path_length(data_root) do
-    data_root
+  def agent_socket_path_length(runtime_root) do
+    runtime_root
     |> build_agent_socket(String.duplicate("0", 36))
     |> byte_size()
   end
@@ -106,9 +121,9 @@ defmodule Biot.Node.Host.Paths do
   @spec agent_socket_path_limit() :: pos_integer()
   def agent_socket_path_limit, do: @agent_socket_path_limit
 
-  @doc "The longest data-root byte length that always fits the agent socket path limit."
-  @spec max_agent_socket_data_root_length() :: non_neg_integer()
-  def max_agent_socket_data_root_length do
+  @doc "The longest runtime-root byte length that always fits the agent socket path limit."
+  @spec max_agent_socket_runtime_root_length() :: non_neg_integer()
+  def max_agent_socket_runtime_root_length do
     @agent_socket_path_limit - byte_size(agent_socket_suffix())
   end
 
@@ -183,26 +198,32 @@ defmodule Biot.Node.Host.Paths do
   end
 
   @typedoc """
-  One directory `allocate` establishes: where it is, whose it is, and where the runtime mounts it.
+  One directory `allocate` establishes: where it is, whose it is, where the runtime mounts it, and
+  whether losing it loses data.
 
   A directory the container may write is the allocation's to own; one it may only read stays the
   node's, so the node can publish into it and the container can only read what it finds. The store
   is the exception that rule needs stated: the runtime reads it, but the build worker writes it.
+
+  `durable?` is false for exactly the directories under the runtime root, which a reboot clears by
+  design. Establishing them is still allocation's job; missing them just means the Biot is not
+  running, not that anything it owned is gone.
   """
   @type directory :: %{
           path: String.t(),
           owner: :node | :allocation,
-          mount: nil | {String.t(), mount_mode()}
+          mount: nil | {String.t(), mount_mode()},
+          durable?: boolean()
         }
 
   @doc """
-  Every directory `allocate` establishes, with who owns it and where it is mounted.
+  Every directory `allocate` establishes, with who owns it, where it is mounted, and whether it
+  holds data.
 
-  One list answers the three questions that used to be answered separately and could disagree:
-  what creation makes, what is handed to the allocation's user, and what has to be present for the
-  data to be. A directory listed here that goes missing therefore makes the data lost, whatever it
-  holds, which is what keeps an allocation from being called healthy while an API it owns is
-  permanently unavailable.
+  One list answers the questions that used to be answered separately and could disagree: what
+  creation makes, what is handed to the allocation's user, what the runtime mounts, and what has to
+  be present for the data to be. That last one reads `durable?` rather than the whole list, which
+  is what keeps a cleared runtime root from being reported as every Biot's data destroyed.
 
   The checkout is not here: a present checkout directory is what marks the clone done, so creating
   it would make every biot initialize with an empty one.
@@ -210,19 +231,46 @@ defmodule Biot.Node.Host.Paths do
   @spec allocation_directories(Config.t(), BiotId.t()) :: [directory()]
   def allocation_directories(config, biot_id) do
     [
-      %{path: home(config, biot_id), owner: :allocation, mount: {"/biot/home", :rw}},
+      %{
+        path: home(config, biot_id),
+        owner: :allocation,
+        mount: {"/biot/home", :rw},
+        durable?: true
+      },
       %{
         path: service_data(config, biot_id),
         owner: :allocation,
-        mount: {"/biot/service-data", :rw}
+        mount: {"/biot/service-data", :rw},
+        durable?: true
       },
-      %{path: run(config, biot_id), owner: :allocation, mount: {"/biot/run", :rw}},
-      %{path: secrets(config, biot_id), owner: :node, mount: {"/biot/secrets", :ro}},
-      %{path: fetch_credentials(config, biot_id), owner: :node, mount: nil},
-      %{path: store_root(config, biot_id), owner: :allocation, mount: nil},
-      %{path: store(config, biot_id), owner: :allocation, mount: {"/nix/store", :ro}},
-      %{path: scratch(config, biot_id), owner: :allocation, mount: nil}
+      %{
+        path: run(config, biot_id),
+        owner: :allocation,
+        mount: {"/biot/run", :rw},
+        durable?: false
+      },
+      %{
+        path: secrets(config, biot_id),
+        owner: :node,
+        mount: {"/biot/secrets", :ro},
+        durable?: true
+      },
+      %{path: fetch_credentials(config, biot_id), owner: :node, mount: nil, durable?: true},
+      %{path: store_root(config, biot_id), owner: :allocation, mount: nil, durable?: true},
+      %{
+        path: store(config, biot_id),
+        owner: :allocation,
+        mount: {"/nix/store", :ro},
+        durable?: true
+      },
+      %{path: scratch(config, biot_id), owner: :allocation, mount: nil, durable?: true}
     ]
+  end
+
+  @doc "The directories whose absence means the allocation's data are gone."
+  @spec durable_directories(Config.t(), BiotId.t()) :: [String.t()]
+  def durable_directories(config, biot_id) do
+    for %{path: path, durable?: true} <- allocation_directories(config, biot_id), do: path
   end
 
   @doc "Every directory `allocate` creates, whoever owns it."
@@ -251,7 +299,7 @@ defmodule Biot.Node.Host.Paths do
     "/" <> build_agent_socket("", String.duplicate("0", 36))
   end
 
-  defp build_agent_socket(data_root, biot_id) do
-    Path.join([data_root, "biots", biot_id, "run", @agent_socket_name])
+  defp build_agent_socket(runtime_root, biot_id) do
+    Path.join([runtime_root, biot_id, @agent_socket_name])
   end
 end

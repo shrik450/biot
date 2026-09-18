@@ -660,6 +660,7 @@ The installer writes these, and prints them when it finishes:
 | --- | --- |
 | Release directory | `/opt/biot/node` |
 | Data root | `/var/lib/biot/node` |
+| Runtime root | `/run/biot-node`, created by the unit's `RuntimeDirectory=` and cleared on stop |
 | Certificate directory | `/etc/biot/certs` |
 | Release environment | `/etc/biot/node.env`, mode 0600, owned by the service account |
 | Unit file to read and edit | `/etc/biot/biot-node.service` |
@@ -672,6 +673,12 @@ surprise.
 
 The installer assumes the node's certificate, key, and the CA are already in the certificate
 directory, and gives the service account read access to them. It never issues them itself.
+
+The runtime root is separate from the data root, and short, because it holds one Unix socket per
+running Biot and Linux caps a socket path at 108 bytes including its terminating NUL. Put the data
+root wherever the disk is, however deep; keep `--runtime-root` under `/run` so systemd creates and
+clears it. The installer refuses a runtime root too long to hold a socket path, and so does the
+node at boot.
 
 ### Host prerequisites
 
@@ -729,6 +736,7 @@ with `--force-env` after changing the installer's flags, to set an optional one.
 | `BIOT_SERVER_HOST` | Host the node dials for control | The server's control host |
 | `BIOT_SERVER_PORT` (default `4443`) | Server control port; match `BIOT_CONTROL_PORT` | The server's `BIOT_CONTROL_PORT` |
 | `BIOT_NODE_DATA_ROOT` | Absolute canonical root for node state and allocations | The installer's data root |
+| `BIOT_NODE_RUNTIME_ROOT` | Absolute canonical root for per-Biot agent sockets, cleared on reboot | The installer's runtime root, `/run/biot-node` by default, created by the unit's `RuntimeDirectory=` |
 | `BIOT_NODE_BUILDER_IMAGE` | Pinned builder image digest | The installer reads the digest pinned in `config/config.exs` |
 | `BIOT_NODE_BINARY_CACHE_URLS`, `BIOT_NODE_BINARY_CACHE_KEYS` | Whitespace-separated Nix cache endpoints and trusted keys | The release has **no default** and refuses to start without both; the installer reads `config/config.exs` and the documented `https://cache.nixos.org` values |
 | `BIOT_NODE_CERTFILE`, `BIOT_NODE_KEYFILE`, `BIOT_NODE_CACERTFILE` | Node certificate, private key, and trusted CA | The node certificate you copied, and that directory's `ca.pem` |

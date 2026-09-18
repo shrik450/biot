@@ -29,6 +29,9 @@ service_user=biot
 release_dir=/opt/biot/node
 source_release="$repo_dir/_build/prod/rel/node"
 data_root=/var/lib/biot/node
+# Short on purpose: it holds each Biot's agent socket, and Linux caps a Unix socket path at 108
+# bytes. Biot.Node.Host.Paths owns the exact budget and the node refuses a root that blows it.
+runtime_root=/run/biot-node
 certs_dir=/etc/biot/certs
 env_file=/etc/biot/node.env
 unit_output=/etc/biot/biot-node.service
@@ -109,6 +112,7 @@ while [[ $# -gt 0 ]]; do
     --release-dir) need_value "$@"; release_dir=$2; shift 2 ;;
     --source-release) need_value "$@"; source_release=$2; shift 2 ;;
     --data-root) need_value "$@"; data_root=$2; shift 2 ;;
+    --runtime-root) need_value "$@"; runtime_root=$2; shift 2 ;;
     --certs-dir) need_value "$@"; certs_dir=$2; shift 2 ;;
     --env-file) need_value "$@"; env_file=$2; shift 2 ;;
     --unit-output) need_value "$@"; unit_output=$2; shift 2 ;;
@@ -333,11 +337,22 @@ check_inputs() {
   else
     good "binary caches are $binary_cache_urls"
   fi
-  for path in "$release_dir" "$data_root" "$certs_dir" "$env_file" "$unit_output"; do
+  for path in "$release_dir" "$data_root" "$runtime_root" "$certs_dir" "$env_file" "$unit_output"; do
     [[ $path == /* ]] || block "path '$path' is not absolute" "pass an absolute path"
   done
   canonical_path "$data_root" ||
     block "data root '$data_root' is not a canonical path" "remove trailing slashes or dot segments"
+  canonical_path "$runtime_root" ||
+    block "runtime root '$runtime_root' is not a canonical path" \
+      "remove trailing slashes or dot segments"
+  # The node makes the same check at boot from the real budget; this one turns a failure to start
+  # into a failure to install, which is the cheaper place to find out.
+  if (( ${#runtime_root} > 59 )); then
+    block "runtime root '$runtime_root' is ${#runtime_root} bytes, over the 59-byte limit" \
+      "pass a shorter --runtime-root; it holds a Unix socket path Linux caps at 108 bytes"
+  else
+    good "runtime root fits the agent socket path limit"
+  fi
 }
 
 check_account() {
@@ -426,8 +441,21 @@ install_account() {
   say "created service account $service_user with a subordinate range"
 }
 
+# The name systemd should manage under /run, or empty when the runtime root is somewhere else.
+# A service user cannot create a directory in /run itself, so RuntimeDirectory= is what makes the
+# default work at all, and it clears the directory on stop for free.
+runtime_directory_name() {
+  local name=${runtime_root#/run/}
+  [[ $runtime_root == /run/* && $name != */* && -n $name ]] && printf '%s' "$name"
+}
+
 install_directories() {
   install -d -o "$service_user" -g "$service_user" -m 0750 "$release_dir" "$data_root" "$certs_dir"
+
+  if [[ -z $(runtime_directory_name) ]]; then
+    install -d -o "$service_user" -g "$service_user" -m 0750 "$runtime_root"
+    say "ensured $runtime_root; it is outside /run, so nothing clears it on reboot for you"
+  fi
 
   local env_dir unit_dir
   env_dir=$(dirname -- "$env_file")
@@ -503,6 +531,7 @@ write_env_file() {
     say "BIOT_SERVER_HOST=$server_host"
     say "BIOT_SERVER_PORT=$server_port"
     say "BIOT_NODE_DATA_ROOT=$data_root"
+    say "BIOT_NODE_RUNTIME_ROOT=$runtime_root"
     say "BIOT_NODE_CERTFILE=$node_cert"
     say "BIOT_NODE_KEYFILE=$node_key"
     say "BIOT_NODE_CACERTFILE=$node_ca"
@@ -536,6 +565,12 @@ write_unit_file() {
     say "User=$service_user"
     say "Group=$service_user"
     say "WorkingDirectory=$release_dir"
+    local runtime_name
+    runtime_name=$(runtime_directory_name)
+    if [[ -n $runtime_name ]]; then
+      say "RuntimeDirectory=$runtime_name"
+      say "RuntimeDirectoryMode=0750"
+    fi
     say "EnvironmentFile=$env_file"
     say "ExecStart=$release_dir/bin/node start"
     say "ExecStop=$release_dir/bin/node stop"
@@ -574,6 +609,7 @@ report() {
   say "  service user:   $service_user"
   say "  release:        $release_dir"
   say "  data root:      $data_root"
+  say "  runtime root:   $runtime_root"
   say "  certificates:   $certs_dir"
   say "  environment:    $env_file"
   say "  unit file:      $unit_output"

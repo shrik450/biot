@@ -48,9 +48,14 @@ defmodule Biot.Server.StreamsIntegrationTest do
 
   setup_all do
     data_root = StreamsFixture.temporary_directory("biot-server-streams")
+    # Short and outside the temp root: each Biot's agent socket sits below it, and Linux caps a
+    # Unix socket path at 108 bytes.
+    runtime_root = BiotTest.Temp.node_root("biot-rt")
+    File.mkdir_p!(runtime_root)
 
     host_settings = [
       data_root: data_root,
+      runtime_root: runtime_root,
       uid_range_base: StreamsFixture.host_uid(),
       uid_range_count: 1,
       uid_range_limit: 65_536
@@ -80,6 +85,7 @@ defmodule Biot.Server.StreamsIntegrationTest do
     # starts real host actions in tests that expect none.
     on_exit(fn ->
       File.rm_rf!(data_root)
+      File.rm_rf!(runtime_root)
       :persistent_term.erase(NodeConfig)
 
       Enum.each(previous_settings, fn

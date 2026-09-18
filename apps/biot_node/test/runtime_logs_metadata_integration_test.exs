@@ -43,6 +43,7 @@ defmodule Biot.Node.RuntimeLogs.MetadataIntegrationTest do
 
     struct!(Config,
       data_root: root,
+      runtime_root: "/run/biot",
       fetch_ca_bundle: nil,
       uid_range_base: 100_000,
       uid_range_count: 1_024,

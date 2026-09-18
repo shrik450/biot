@@ -255,7 +255,7 @@ defmodule Biot.Node.HostPureTest do
              {"/var/lib/biot/biots/#{biot}/checkout", "/biot/checkout", :rw},
              {"/var/lib/biot/biots/#{biot}/home", "/biot/home", :rw},
              {"/var/lib/biot/biots/#{biot}/service-data", "/biot/service-data", :rw},
-             {"/var/lib/biot/biots/#{biot}/run", "/biot/run", :rw},
+             {"/run/biot/#{biot}", "/biot/run", :rw},
              {"/var/lib/biot/biots/#{biot}/secrets", "/biot/secrets", :ro},
              {"/var/lib/biot/biots/#{biot}/store/nix/store", "/nix/store", :ro}
            ]
@@ -292,10 +292,15 @@ defmodule Biot.Node.HostPureTest do
     refute Paths.environments(config, biot) in Paths.allocation_owned_directories(config, biot)
 
     assert Paths.marker(config, biot) == "/var/lib/biot/biots/#{biot}/marker"
-    assert Paths.agent_socket(config, biot) == "/var/lib/biot/biots/#{biot}/run/agent.sock"
+    assert Paths.agent_socket(config, biot) == "/run/biot/#{biot}/agent.sock"
 
-    assert Paths.agent_socket_path_length("/var/lib/biot") ==
+    assert Paths.agent_socket_path_length("/run/biot") ==
              byte_size(Paths.agent_socket(config, biot))
+
+    # The runtime directory is the one thing allocation establishes that a reboot is allowed to
+    # take, so it is the one thing whose absence must not read as lost data.
+    assert Paths.run(config, biot) not in Paths.durable_directories(config, biot)
+    assert Paths.run(config, biot) in Paths.required_directories(config, biot)
 
     refute Paths.marker(config, biot) in Enum.map(
              Paths.runtime_mounts(config, biot),
@@ -575,6 +580,7 @@ defmodule Biot.Node.HostPureTest do
 
     struct!(Config,
       data_root: data_root,
+      runtime_root: "/run/biot",
       fetch_ca_bundle: nil,
       uid_range_base: 100_000,
       uid_range_count: 1_024,

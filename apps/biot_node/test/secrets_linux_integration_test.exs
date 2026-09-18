@@ -43,9 +43,10 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
   @unauthorized_delay_ms 6_000
 
   setup_all do
-    data_root = temporary_directory("biot-secrets-linux")
+    data_root = node_directory("biot-secrets-linux")
     repository_root = temporary_directory("biot-secrets-git")
-    settings = host_settings(data_root)
+    runtime_root = node_directory("biot-rt")
+    settings = host_settings(data_root, runtime_root)
 
     previous =
       Map.new(settings, fn {key, _value} -> {key, Application.get_env(:biot_node, key)} end)
@@ -66,9 +67,12 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
     on_exit(fn ->
       :persistent_term.erase(Biot.Node.Host.Config)
 
-      System.cmd("podman", ["unshare", "chown", "-R", "0:0", data_root], stderr_to_stdout: true)
-      System.cmd("podman", ["unshare", "chmod", "-R", "u+rwX", data_root], stderr_to_stdout: true)
-      File.rm_rf!(data_root)
+      for root <- [data_root, runtime_root] do
+        System.cmd("podman", ["unshare", "chown", "-R", "0:0", root], stderr_to_stdout: true)
+        System.cmd("podman", ["unshare", "chmod", "-R", "u+rwX", root], stderr_to_stdout: true)
+        File.rm_rf!(root)
+      end
+
       File.rm_rf!(repository_root)
 
       if old_ssl,
@@ -513,17 +517,26 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
 
   defp eventually(_fun, 0), do: false
 
+  # Both of a node's roots have to be somewhere its containers can reach, and its runtime root has
+  # to be short as well. `BiotTest.Temp.node_root/1` says why the system temp root is neither.
+  defp node_directory(prefix) do
+    path = BiotTest.Temp.node_root(prefix)
+    File.mkdir_p!(path)
+    path
+  end
+
   defp temporary_directory(prefix) do
     path = BiotTest.Temp.directory(prefix)
     File.mkdir_p!(path)
     path
   end
 
-  defp host_settings(data_root) do
+  defp host_settings(data_root, runtime_root) do
     {uid_start, uid_count} = TestHostRange.subordinate_ids()
 
     [
       data_root: data_root,
+      runtime_root: runtime_root,
       uid_range_base: uid_start,
       uid_range_count: 1_024,
       uid_range_limit: uid_start + uid_count,

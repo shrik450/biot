@@ -1031,7 +1031,7 @@ Allocation
 ├── UID/GID range
 ├── network
 ├── checkout, home, and service data
-├── run (agent socket), runtime secrets, and private fetch credentials
+├── runtime directory (agent socket), runtime secrets, and private fetch credentials
 ├── private Nix store, database, roots, and build scratch
 ├── disposable build worker
 └── Installation ───────────────┐
@@ -1194,19 +1194,24 @@ environment implementation.
 
 ### Private directories and the container
 
-Each allocation's private root holds its runtime data and private build storage:
+Each allocation's private root holds its runtime data and private build storage. One directory is
+the exception and sits under the node's runtime root instead, because it holds a socket address
+rather than data, and Linux caps a Unix socket path at 108 bytes including its terminating NUL: a
+deep data root would make the address unusable, so the address does not depend on the data root.
 
 | Host directory | Mount | Mode | Purpose |
 | --- | --- | --- | --- |
 | `checkout`, `home`, `service-data` | `/biot/checkout`, `/biot/home`, `/biot/service-data` | rw | Working data |
-| `run` | `/biot/run` | rw | The agent's Unix socket `agent.sock` |
+| `<runtime root>/<biot id>` | `/biot/run` | rw | The agent's Unix socket `agent.sock` |
 | `secrets` | `/biot/secrets` | ro | One file per delivered secret |
 | Private `nix/store` | `/nix/store` | ro | Only this biot's software |
 | Private Nix database, roots, and build scratch | Not mounted in runtime | — | Build and retention state |
 | Fetch credentials | Not mounted in runtime or user build workers | — | Scoped credentials for trusted fetching |
 
-`allocate` creates these directories; `remove_data` removes them after all
-runtime and build workers are inspected absent. The runtime never mounts a Nix
+`allocate` creates these directories; `remove_data` removes them, under both roots, after all
+runtime and build workers are inspected absent. Only the durable ones answer for whether the data
+are present: a reboot clears the runtime root by design, and a Biot that is merely not running has
+lost nothing. The runtime never mounts a Nix
 daemon socket or `/nix/var`. It mounts only its own store at `/nix/store`.
 
 The container's private network is created with cross-network isolation
@@ -1215,13 +1220,13 @@ would otherwise route to each other.
 
 #### Agent connection
 
-The node connects through `run/agent.sock` under the allocation's root. Before
+The node connects through `agent.sock` in the allocation's runtime directory. Before
 sending any target, it reads `SO_PEERCRED` from the connected Unix socket and
 requires the peer's host UID to lie in that allocation's mapped UID range.
 The path alone proves nothing: a collaborator can replace it with a symlink.
 The kernel's connected-peer credentials avoid a path-check race and reject
 neighboring agents or unrelated host sockets. A mismatch closes the socket and
-returns `agent_unreachable`. No other runtime or builder mounts that `run`
+returns `agent_unreachable`. No other runtime or builder mounts that runtime
 directory.
 
 Agent reachability, streams, and secret files are not part of `NodeState`.

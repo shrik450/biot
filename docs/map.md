@@ -1199,10 +1199,14 @@ Support modules provide the smaller boundaries:
   `runtime_mounts`, and `allocation_owned_directories`. `Paths.allocation_directories/2` is the one
   owner of required allocation directories, their owner, and their mount: secrets are node-owned and
   mounted read-only, while fetch credentials are node-owned and unmounted. It also owns
-  `worker_nix_config` and `git_template`. `Paths.agent_socket/2` is the one builder of the runtime
-  agent's Unix socket path under a Biot's `run` directory; `agent_socket_path_length/1`,
-  `agent_socket_path_limit/0`, and `max_agent_socket_data_root_length/0` expose the 107-byte Linux
-  limit and the longest data root that fits it. `Host.PrivateStore` maps the logical store into the
+  `worker_nix_config` and `git_template`. Directories also carry `durable?`, which is false only for
+  the runtime directory, so a cleared runtime root does not read as every Biot's data destroyed;
+  `Paths.durable_directories/2` is what the data-present check reads. `Paths.agent_socket/2` is the
+  one builder of the runtime agent's Unix socket path, under the **runtime** root rather than the
+  data root, because a socket address has a kernel length limit and a storage root does not;
+  `agent_socket_path_length/1`, `agent_socket_path_limit/0`, and
+  `max_agent_socket_runtime_root_length/0` expose the 107-byte Linux limit and the longest runtime
+  root that fits it. `Host.PrivateStore` maps the logical store into the
   physical one. The old zero-arity `Git.environment/0` and `Layout.variables/0`, plus
   `Paths.mounts_created_at_allocation/2` and `Paths.node_owned_directories/2`, were replaced by
   the scoped and phase-aware APIs.
@@ -1373,9 +1377,9 @@ connection. `config/releases/node.exs` reads data-root, UID/GID range, executabl
 heartbeat, reconnect, Podman, TLS, and build settings for the node release. The node release carries
 the exact `nix/` and `agent/` sources it was built with under `biot_node/priv/build_support`; that
 path is not an operator setting. Builder images must include a digest. Numeric `BIOT_NODE_*`
-overrides must meet the bounds in release configuration. `Host.Config.load/0` refuses a data root
-whose agent socket path would exceed the 107-byte Linux limit, naming the path length and the
-longest root that fits. `Host.Setup` loads that complete host configuration before any effect reads
+overrides must meet the bounds in release configuration. `Host.Config.load/0` refuses a runtime
+root whose agent socket path would exceed the 107-byte Linux limit, naming the path length and the
+longest root that fits; the data root has no length constraint. `Host.Setup` loads that complete host configuration before any effect reads
 it.
 
 ### Stream boundary
@@ -1613,9 +1617,10 @@ CLI error-vocabulary drift check (`mix biot.check_cli_error_vocabulary`).
 The root and `apps/biot_server` `test` aliases load `mix/test_env.exs`. Its `Biot.Mix.TestEnv.require_test_env!/1` refuses to run unless `Mix.env()` is `:test`, and it runs before `ecto.drop`, so `MIX_ENV=dev mix test` cannot drop the dev database.
 
 `dev/local.sh` runs one server and one real node on this machine for development. It keeps the run
-directory under `.work/` and the node data root under `$XDG_CACHE_HOME` (or `$HOME/.cache`), because
-the data root holds the private Nix store. It removes both on a clean stop; `--keep` keeps them and
-prints their paths.
+directory under `.work/`, the node data root under `$XDG_CACHE_HOME` (or `$HOME/.cache`) because
+that root holds the private Nix store, and the node runtime root under `$XDG_RUNTIME_DIR` (or
+`/tmp`) because that one holds agent sockets and has to stay short. It removes all three on a clean
+stop; `--keep` keeps them and prints their paths.
 
 Build and vet the CLI, and vet and test the agent, with:
 

@@ -13,7 +13,7 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
 
   setup_all do
     project_root = Path.expand("../../..", __DIR__)
-    root = temporary_directory("biot-step7-nix")
+    root = BiotTest.Temp.node_root("biot-nix")
     File.mkdir_p!(root)
     on_exit(fn -> File.rm_rf!(root) end)
 
@@ -575,9 +575,5 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
       Process.sleep(200)
       eventually(check, attempts - 1)
     end
-  end
-
-  defp temporary_directory(prefix) do
-    BiotTest.Temp.directory(prefix)
   end
 end

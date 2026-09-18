@@ -1907,17 +1907,24 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
 
   # The missing UID range keeps these protocol tests from starting unrelated host actions.
   defp start_node_journal do
-    data_root =
-      BiotTest.Temp.directory("biot-node-journal")
+    data_root = BiotTest.Temp.directory("biot-node-journal")
+    # Short and outside the temp root: each Biot's agent socket sits below it, and Linux caps a
+    # Unix socket path at 108 bytes.
+    runtime_root = BiotTest.Temp.node_root("biot-rt")
 
     File.mkdir_p!(data_root)
+    File.mkdir_p!(runtime_root)
 
-    previous = Application.get_env(:biot_node, :data_root)
+    previous_data_root = Application.get_env(:biot_node, :data_root)
+    previous_runtime_root = Application.get_env(:biot_node, :runtime_root)
     Application.put_env(:biot_node, :data_root, data_root)
+    Application.put_env(:biot_node, :runtime_root, runtime_root)
 
     on_exit(fn ->
-      restore_node_env(:data_root, previous)
+      restore_node_env(:data_root, previous_data_root)
+      restore_node_env(:runtime_root, previous_runtime_root)
       File.rm_rf(data_root)
+      File.rm_rf(runtime_root)
     end)
 
     start_supervised!(Biot.Node.Repo)
@@ -1935,7 +1942,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
   end
 
   # Loads the node settings the way boot does, so it follows `start_node_journal/0`, which sets the
-  # data root those settings need.
+  # roots those settings need.
   defp configure_node_host do
     previous = put_node_host_config()
     {:ok, _config} = NodeConfig.load()

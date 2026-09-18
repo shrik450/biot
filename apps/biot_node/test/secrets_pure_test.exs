@@ -471,13 +471,15 @@ defmodule Biot.Node.SecretsPureTest do
       assert secrets == %{
                path: Paths.secrets(config, biot),
                owner: :node,
-               mount: {"/biot/secrets", :ro}
+               mount: {"/biot/secrets", :ro},
+               durable?: true
              }
 
       assert credentials == %{
                path: Paths.fetch_credentials(config, biot),
                owner: :node,
-               mount: nil
+               mount: nil,
+               durable?: true
              }
     end
 
@@ -527,6 +529,7 @@ defmodule Biot.Node.SecretsPureTest do
 
     struct!(Config,
       data_root: data_root,
+      runtime_root: "/run/biot",
       fetch_ca_bundle: fetch_ca_bundle,
       uid_range_base: 100_000,
       uid_range_count: 1_024,

@@ -18,7 +18,12 @@ mkdir -p "$repo_directory/.work"
 run_directory=$(mktemp -d "$repo_directory/.work/node-host.XXXXXX")
 cache_directory=${XDG_CACHE_HOME:-$HOME/.cache}
 mkdir -p "$cache_directory"
+# The data root holds the private Nix store, so it stays out of the repository and off the run
+# directory's disk budget. Its depth no longer matters.
 data_directory=$(mktemp -d "$cache_directory/biot-dev.XXXXXX")
+# The agent sockets live here instead, and a Unix socket path has 108 bytes to spend, so this one
+# has to stay short.
+runtime_directory=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/biot-dev.XXXXXX")
 server_pid=
 node_pid=
 stop_requested=0
@@ -51,7 +56,7 @@ cleanup_containers() {
     [[ -n "$container_id" ]] || continue
     mounts=$(podman inspect "$container_id" --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' 2>/dev/null)
     case "$mounts" in
-      *"$data_directory"*)
+      *"$data_directory"* | *"$runtime_directory"*)
         podman --module "$module_file" rm -f "$container_id" >/dev/null 2>&1 || podman rm -f "$container_id" >/dev/null 2>&1
         ;;
     esac
@@ -87,10 +92,11 @@ cleanup() {
   cleanup_networks
 
   if [[ "$keep_run_directory" -eq 0 && ("$stop_requested" -eq 1 || "$status" -eq 0) ]]; then
-    podman unshare rm -rf -- "$run_directory" "$data_directory"
+    podman unshare rm -rf -- "$run_directory" "$data_directory" "$runtime_directory"
   else
     printf 'run directory preserved: %s\n' "$run_directory" >&2
     printf 'data root preserved: %s\n' "$data_directory" >&2
+    printf 'runtime root preserved: %s\n' "$runtime_directory" >&2
   fi
 
   exit "$status"
@@ -101,7 +107,9 @@ trap 'stop_requested=1; exit 0' INT TERM
 
 (
   cd "$repo_directory"
-  BIOT_RUN_DIRECTORY="$run_directory" BIOT_DATA_DIRECTORY="$data_directory" MIX_ENV=dev mix run --no-start dev/local_bootstrap.exs
+  BIOT_RUN_DIRECTORY="$run_directory" BIOT_DATA_DIRECTORY="$data_directory" \
+    BIOT_RUNTIME_DIRECTORY="$runtime_directory" \
+    MIX_ENV=dev mix run --no-start dev/local_bootstrap.exs
 ) >"$run_directory/bootstrap.log" 2>&1
 source "$run_directory/environment"
 
@@ -156,8 +164,9 @@ while [[ ! -f "$BIOT_DEV_READY_FILE.node" ]]; do
 done
 
 printf 'server and node are ready\n'
-printf 'server log: %s\nnode log: %s\nrun directory: %s\ndata root: %s\n' \
-  "$run_directory/server.log" "$run_directory/node.log" "$run_directory" "$data_directory"
+printf 'server log: %s\nnode log: %s\nrun directory: %s\ndata root: %s\nruntime root: %s\n' \
+  "$run_directory/server.log" "$run_directory/node.log" "$run_directory" "$data_directory" \
+  "$runtime_directory"
 printf 'HTTP: http://localhost:%s\n' "$PORT"
 printf 'node: %s\n' "$BIOT_DEV_NODE_ID"
 printf 'Stop with Ctrl-C.\n'

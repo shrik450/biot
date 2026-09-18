@@ -33,6 +33,7 @@ config :biot_server,
 
 config :biot_node,
   data_root: nil,
+  runtime_root: nil,
   uid_range_base: nil,
   uid_range_count: nil,
   uid_range_limit: nil,

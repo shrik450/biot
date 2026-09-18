@@ -9,11 +9,12 @@ defmodule Biot.Node.TestSandboxGate do
   # sandboxed build then fails to remount /proc.
   @spec supported?() :: :ok | {:error, term()}
   def supported? do
-    data_root =
-      BiotTest.Temp.directory("biot-sandbox-gate")
+    data_root = BiotTest.Temp.directory("biot-sandbox-gate")
+    runtime_root = BiotTest.Temp.node_root("biot-gate")
 
     settings = [
       data_root: data_root,
+      runtime_root: runtime_root,
       uid_range_base: 100_000,
       uid_range_count: 1_024,
       uid_range_limit: 165_536
@@ -33,6 +34,7 @@ defmodule Biot.Node.TestSandboxGate do
       :persistent_term.erase(Config)
       Enum.each(previous, fn {key, value} -> Application.put_env(:biot_node, key, value) end)
       File.rm_rf(data_root)
+      File.rm_rf(runtime_root)
     end
   end
 

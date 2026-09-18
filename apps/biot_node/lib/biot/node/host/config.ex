@@ -28,6 +28,18 @@ defmodule Biot.Node.Host.Config do
 
   Required, and must name a digest rather than a tag. "The current release's pinned image" is a
   trust statement, and a tag is not a pin.
+
+  ## `BIOT_NODE_RUNTIME_ROOT`
+
+  Required, and short. It holds one directory per running Biot, and in it the Unix socket the
+  node uses to reach that Biot's agent. Nothing under it outlives a reboot, so `/run/biot` is the
+  usual answer and a systemd `RuntimeDirectory=biot` produces it.
+
+  It is separate from `BIOT_NODE_DATA_ROOT` because a socket address is not data. Linux caps a
+  Unix socket path at 108 bytes including its terminating NUL, so every byte of the directory
+  holding one is a correctness concern, while the data root wants to be wherever the disk is and
+  is free to be long. Keeping both jobs in one setting made the data root's length break the
+  node, which is why they are two.
   """
 
   alias Biot.Node.Host.Command
@@ -37,6 +49,7 @@ defmodule Biot.Node.Host.Config do
 
   @enforce_keys [
     :data_root,
+    :runtime_root,
     :uid_range_base,
     :uid_range_count,
     :uid_range_limit,
@@ -66,6 +79,7 @@ defmodule Biot.Node.Host.Config do
 
   @type t :: %__MODULE__{
           data_root: String.t(),
+          runtime_root: String.t(),
           uid_range_base: non_neg_integer(),
           uid_range_count: pos_integer(),
           uid_range_limit: pos_integer(),
@@ -124,7 +138,8 @@ defmodule Biot.Node.Host.Config do
   defp parse_application do
     with {:ok, platform} <- Platform.current(),
          {:ok, data_root} <- absolute_path(:data_root),
-         :ok <- agent_socket_path(data_root),
+         {:ok, runtime_root} <- absolute_path(:runtime_root),
+         :ok <- agent_socket_path(runtime_root),
          {:ok, uid_range_base} <- non_negative_integer(:uid_range_base),
          {:ok, uid_range_count} <- positive_integer(:uid_range_count),
          {:ok, uid_range_limit} <- positive_integer(:uid_range_limit),
@@ -148,6 +163,7 @@ defmodule Biot.Node.Host.Config do
       {:ok,
        %__MODULE__{
          data_root: data_root,
+         runtime_root: runtime_root,
          uid_range_base: uid_range_base,
          uid_range_count: uid_range_count,
          uid_range_limit: uid_range_limit,
@@ -225,8 +241,8 @@ defmodule Biot.Node.Host.Config do
     if base + count <= limit, do: :ok, else: {:error, {:invalid_config, :uid_range_limit}}
   end
 
-  defp agent_socket_path(data_root) do
-    length = Paths.agent_socket_path_length(data_root)
+  defp agent_socket_path(runtime_root) do
+    length = Paths.agent_socket_path_length(runtime_root)
     limit = Paths.agent_socket_path_limit()
 
     if length <= limit do
@@ -234,9 +250,9 @@ defmodule Biot.Node.Host.Config do
     else
       {:error,
        {:invalid_config,
-        "BIOT_NODE_DATA_ROOT #{inspect(data_root)} produces a #{length}-byte agent socket " <>
-          "path; the limit is #{limit} bytes, and the longest data root that fits is " <>
-          "#{Paths.max_agent_socket_data_root_length()} bytes"}}
+        "BIOT_NODE_RUNTIME_ROOT #{inspect(runtime_root)} produces a #{length}-byte agent " <>
+          "socket path; the limit is #{limit} bytes, and the longest runtime root that fits " <>
+          "is #{Paths.max_agent_socket_runtime_root_length()} bytes"}}
     end
   end
 

@@ -32,15 +32,26 @@ defmodule Biot.Node.StreamsFixture do
     path
   end
 
+  # Both of a node's roots have to be somewhere its containers can reach, which the system temp
+  # root is not under `nix develop`. `BiotTest.Temp.node_root/1` says why.
+  defp node_directory(prefix) do
+    path = BiotTest.Temp.node_root(prefix)
+    :ok = File.mkdir_p(path)
+    ExUnit.Callbacks.on_exit(fn -> File.rm_rf(path) end)
+    path
+  end
+
   @doc """
-  Points the host config at a fresh data root and a one-UID range that covers the test process.
-  Restores every changed setting and removes the data root when the calling test module exits.
+  Points the host config at a fresh pair of roots and a one-UID range that covers the test process.
+  Restores every changed setting and removes both roots when the calling test module exits.
   """
   def put_host_config(prefix) do
-    data_root = temporary_directory(prefix)
+    data_root = node_directory(prefix)
+    runtime_root = node_directory("biot-rt")
 
     settings = [
       data_root: data_root,
+      runtime_root: runtime_root,
       uid_range_base: host_uid(),
       uid_range_count: 1,
       uid_range_limit: 65_536
@@ -54,6 +65,7 @@ defmodule Biot.Node.StreamsFixture do
 
     ExUnit.Callbacks.on_exit(fn ->
       File.rm_rf!(data_root)
+      File.rm_rf!(runtime_root)
       :persistent_term.erase(Config)
 
       Enum.each(previous, fn

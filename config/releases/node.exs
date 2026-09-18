@@ -51,10 +51,17 @@ unless Path.type(data_root) == :absolute and Path.expand(data_root) == data_root
   raise "BIOT_NODE_DATA_ROOT must be an absolute canonical path"
 end
 
+runtime_root = required.("BIOT_NODE_RUNTIME_ROOT")
+
+unless Path.type(runtime_root) == :absolute and Path.expand(runtime_root) == runtime_root do
+  raise "BIOT_NODE_RUNTIME_ROOT must be an absolute canonical path"
+end
+
 uid_range_base = integer.("BIOT_NODE_UID_RANGE_BASE", 100_000, 0)
 
 config :biot_node,
   data_root: data_root,
+  runtime_root: runtime_root,
   uid_range_base: uid_range_base,
   uid_range_count: integer.("BIOT_NODE_UID_RANGE_COUNT", 1_024, 1),
   uid_range_limit: integer.("BIOT_NODE_UID_RANGE_LIMIT", uid_range_base + 65_536, 1),

@@ -57,6 +57,13 @@ defmodule Biot.Node.Host.Allocation do
     end
   end
 
+  @doc """
+  Removes everything the allocation established, under both roots.
+
+  The runtime directory is a second tree rather than part of the first because it lives under the
+  runtime root. A reboot would have cleared it anyway; removing it here is what keeps a destroyed
+  Biot from leaving a socket directory behind on a node that stays up.
+  """
   @spec remove_data(Context.t(), Allocation.t()) :: :ok | {:error, Outcome.t()}
   def remove_data(
         %Context{biot_id: biot_id, config: config},
@@ -65,6 +72,8 @@ defmodule Biot.Node.Host.Allocation do
     with :ok <- Worker.cancel(config, biot_id),
          :ok <- Podman.reclaim(config, Paths.biot(config, biot_id)),
          {:ok, _removed} <- remove_tree(Paths.biot(config, biot_id)),
+         :ok <- Podman.reclaim(config, Paths.run(config, biot_id)),
+         {:ok, _removed} <- remove_tree(Paths.run(config, biot_id)),
          {:ok, _record} <- reset_initialization(allocation) do
       :ok
     end
@@ -200,13 +209,15 @@ defmodule Biot.Node.Host.Allocation do
 
   defp mount_facts(_config, %Allocation{initialization: :uninitialized}), do: []
 
-  # Data are present only when everything the allocation established is still there, whoever owns it
-  # and whether or not the runtime mounts it. A credential directory that vanished would otherwise
-  # leave inspection calling the data healthy while every later delivery answered `no_allocation`.
+  # Data are present only when everything durable the allocation established is still there, whoever
+  # owns it and whether or not the runtime mounts it. A credential directory that vanished would
+  # otherwise leave inspection calling the data healthy while every later delivery answered
+  # `no_allocation`. The runtime directory is excluded because a reboot clears the runtime root by
+  # design, and a Biot that is merely not running has lost nothing.
   defp mount_facts(config, allocation) do
     biot_id = allocation.biot_id
 
-    [Paths.checkout(config, biot_id) | Paths.required_directories(config, biot_id)]
+    [Paths.checkout(config, biot_id) | Paths.durable_directories(config, biot_id)]
     |> Enum.map(&FileSystem.directory/1)
   end
 
