@@ -63,6 +63,14 @@ defmodule Biot.Node.Reconcile.Execution do
        ),
        do: :ready
 
+  # A running container whose agent is still starting is retained until the next observation.
+  defp present(
+         %{biot_id: biot_id, state: :starting, environment_id: environment_id},
+         %ExecutionSpec{biot_id: biot_id, desired: %Desired{environment_id: environment_id}},
+         %NodeState{installation: {:present, %Installation{environment_id: environment_id}}}
+       ),
+       do: :ready
+
   # Any other container this biot owns has to go: it exited, it runs another environment, or the
   # installation behind it is gone. `Reconcile.Environment` installs once absence is observed.
   defp present(

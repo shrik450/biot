@@ -79,18 +79,40 @@ defmodule Biot.Node.Host.Container do
   # again.
   defp inspect_present(config, name) do
     case Podman.run(config, ["container", "inspect", name]) do
-      {:ok, %Command.Result{status: 0, stdout: stdout}} -> parse_inspection(stdout)
+      {:ok, %Command.Result{status: 0, stdout: stdout}} -> parse_inspection(stdout, config)
       {:ok, %Command.Result{} = result} -> unknown_from(result)
       {:error, reason} -> unreachable(reason)
     end
   end
 
-  defp parse_inspection(stdout) do
+  defp parse_inspection(stdout, config) do
     with {:ok, [value]} <- Jason.decode(stdout),
          {:ok, container} <- ContainerInspection.parse(value) do
-      {:present, container}
+      present_or_starting(config, container)
     else
-      _error -> unknown(:unreadable, Diagnostic.text("Podman returned invalid container JSON"))
+      _error ->
+        unknown(:unreadable, Diagnostic.text("Podman returned invalid container JSON"))
+    end
+  end
+
+  defp present_or_starting(config, %{state: :running} = container) do
+    state = if agent_reachable?(config, container.biot_id), do: :running, else: :starting
+    {:present, %{container | state: state}}
+  end
+
+  defp present_or_starting(_config, container), do: {:present, container}
+
+  defp agent_reachable?(config, biot_id) do
+    path = Paths.agent_socket(config, biot_id)
+
+    case :socket.open(:local, :stream, :default) do
+      {:ok, socket} ->
+        reachable = :socket.connect(socket, %{family: :local, path: path}) == :ok
+        _ = :socket.close(socket)
+        reachable
+
+      {:error, _reason} ->
+        false
     end
   end
 

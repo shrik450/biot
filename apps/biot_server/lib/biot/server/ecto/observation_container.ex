@@ -19,6 +19,9 @@ defmodule Biot.Server.Ecto.ObservationContainer do
   def cast({:present, %IncarnationId{}, :running} = value),
     do: {:ok, value}
 
+  def cast({:present, %IncarnationId{}, :starting} = value),
+    do: {:ok, value}
+
   def cast({:present, %IncarnationId{}, {:exited, status}} = value)
       when is_integer(status) and status >= 0,
       do: {:ok, value}

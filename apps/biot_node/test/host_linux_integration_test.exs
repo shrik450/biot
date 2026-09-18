@@ -170,6 +170,8 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     assert decision(running, host) == :settled
     assert {:present, first_container} = settled.container
 
+    assert_agent_socket_gates_running(host, biot_id, allocation, first_container)
+
     assert_container_runtime_contract(
       host,
       biot_id,
@@ -659,6 +661,42 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
     assert uid in allocation.uid_range.start..(allocation.uid_range.start +
                                                  allocation.uid_range.count - 1)
+  end
+
+  defp assert_agent_socket_gates_running(host, biot_id, allocation, container) do
+    socket_path = Paths.agent_socket(host.config, biot_id)
+    run_path = Paths.run(host.config, biot_id)
+    incarnation_id = container.incarnation_id
+
+    assert {:ok, %Command.Result{status: 0}} =
+             Podman.run(host.config, ["unshare", "rm", "-f", "--", socket_path])
+
+    assert {:present, %{incarnation_id: ^incarnation_id, state: :starting}} =
+             Host.inspect_state(biot_id, host).container
+
+    assert {:ok, %Command.Result{status: 0}} =
+             Podman.run(host.config, ["unshare", "chown", "-R", "0:0", run_path])
+
+    assert {:ok, listener} = :socket.open(:local, :stream, %{})
+    assert :ok = :socket.bind(listener, %{family: :local, path: socket_path})
+    assert :ok = :socket.listen(listener)
+
+    assert {:present, %{incarnation_id: ^incarnation_id, state: :running}} =
+             Host.inspect_state(biot_id, host).container
+
+    assert {:ok, accepted} = :socket.accept(listener)
+    assert :ok = :socket.close(accepted)
+    assert :ok = :socket.close(listener)
+
+    assert {:ok, %Command.Result{status: 0}} =
+             Podman.run(host.config, ["unshare", "rm", "-f", "--", socket_path])
+
+    assert :ok = Podman.grant(host.config, allocation, [run_path])
+
+    assert {:ok, %Command.Result{status: 0}} =
+             Podman.run(host.config, ["restart", IncarnationId.to_string(incarnation_id)])
+
+    assert eventually(fn -> File.exists?(socket_path) end)
   end
 
   defp curl_executable(host, bundle) do

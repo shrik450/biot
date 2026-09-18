@@ -55,6 +55,10 @@ defmodule BiotWeb.Components.BiotSummary do
     %{label: "observed running", detail: nil, tone: "healthy"}
   end
 
+  defp value_without_failure(%BiotView{actual: %{container: {:present, _incarnation, :starting}}}) do
+    %{label: "observed starting", detail: nil, tone: "working"}
+  end
+
   defp value_without_failure(%BiotView{
          actual: %{container: {:present, _incarnation, {:exited, status}}}
        }) do
