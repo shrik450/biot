@@ -2,11 +2,26 @@
 set -euo pipefail
 
 repo_directory=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+keep_run_directory=0
+
+if [[ "${1:-}" == "--keep" ]]; then
+  keep_run_directory=1
+  shift
+fi
+
+if (( $# > 0 )); then
+  printf 'usage: %s [--keep]\n' "${BASH_SOURCE[0]}" >&2
+  exit 2
+fi
+
 mkdir -p "$repo_directory/.work"
 run_directory=$(mktemp -d "$repo_directory/.work/node-host.XXXXXX")
+cache_directory=${XDG_CACHE_HOME:-$HOME/.cache}
+mkdir -p "$cache_directory"
+data_directory=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/biot-dev.XXXXXX")
+export BIOT_DATA_DIRECTORY="$data_directory"
 server_pid=
 node_pid=
-keep_run_directory=0
 stop_requested=0
 
 stop_process_group() {
@@ -29,7 +44,7 @@ stop_process_group() {
 }
 
 cleanup_containers() {
-  local module_file="$run_directory/node-data/podman.conf"
+  local module_file="$data_directory/podman.conf"
   [[ -f "$module_file" ]] || return 0
 
   local container_id mounts
@@ -37,7 +52,7 @@ cleanup_containers() {
     [[ -n "$container_id" ]] || continue
     mounts=$(podman inspect "$container_id" --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' 2>/dev/null)
     case "$mounts" in
-      *"$run_directory/node-data"*)
+      *"$data_directory"*)
         podman --module "$module_file" rm -f "$container_id" >/dev/null 2>&1 || podman rm -f "$container_id" >/dev/null 2>&1
         ;;
     esac
@@ -45,8 +60,8 @@ cleanup_containers() {
 }
 
 cleanup_networks() {
-  local module_file="$run_directory/node-data/podman.conf"
-  local allocations_directory="$run_directory/node-data/biots"
+  local module_file="$data_directory/podman.conf"
+  local allocations_directory="$data_directory/biots"
   [[ -f "$module_file" && -d "$allocations_directory" ]] || return 0
 
   local biot_id
@@ -72,10 +87,11 @@ cleanup() {
   cleanup_containers
   cleanup_networks
 
-  if [[ "$stop_requested" -eq 1 || ("$status" -eq 0 && "$keep_run_directory" -eq 0) ]]; then
-    podman unshare rm -rf -- "$run_directory"
+  if [[ "$keep_run_directory" -eq 0 && ("$stop_requested" -eq 1 || "$status" -eq 0) ]]; then
+    podman unshare rm -rf -- "$run_directory" "$data_directory"
   else
     printf 'run directory preserved: %s\n' "$run_directory" >&2
+    printf 'data root preserved: %s\n' "$data_directory" >&2
   fi
 
   exit "$status"
@@ -86,7 +102,7 @@ trap 'stop_requested=1; exit 0' INT TERM
 
 (
   cd "$repo_directory"
-  BIOT_RUN_DIRECTORY="$run_directory" MIX_ENV=dev mise exec -- mix run --no-start dev/local_bootstrap.exs
+  BIOT_RUN_DIRECTORY="$run_directory" BIOT_DATA_DIRECTORY="$data_directory" MIX_ENV=dev mise exec -- mix run --no-start dev/local_bootstrap.exs
 ) >"$run_directory/bootstrap.log" 2>&1
 source "$run_directory/environment"
 
@@ -141,7 +157,8 @@ while [[ ! -f "$BIOT_DEV_READY_FILE.node" ]]; do
 done
 
 printf 'server and node are ready\n'
-printf 'server log: %s\nnode log: %s\n' "$run_directory/server.log" "$run_directory/node.log"
+printf 'server log: %s\nnode log: %s\nrun directory: %s\ndata root: %s\n' \
+  "$run_directory/server.log" "$run_directory/node.log" "$run_directory" "$data_directory"
 printf 'HTTP: http://localhost:%s\n' "$PORT"
 printf 'node: %s\n' "$BIOT_DEV_NODE_ID"
 printf 'Stop with Ctrl-C.\n'

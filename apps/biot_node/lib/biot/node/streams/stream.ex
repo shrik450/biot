@@ -101,7 +101,7 @@ defmodule Biot.Node.Streams.Stream do
         {:error, :agent_unreachable}
 
       allocation ->
-        path = Path.join(Paths.run(config, stream.biot_id), "agent.sock")
+        path = Paths.agent_socket(config, stream.biot_id)
         Agent.connect(path, allocation.uid_range, stream.target)
     end
   end

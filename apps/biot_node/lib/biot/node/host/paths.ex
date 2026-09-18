@@ -25,6 +25,9 @@ defmodule Biot.Node.Host.Paths do
   alias Biot.Protocol.EnvironmentId
   alias Biot.Protocol.PrivateDiagnosticId
 
+  @agent_socket_name "agent.sock"
+  @agent_socket_path_limit 107
+
   @spec lock(Config.t() | String.t()) :: String.t()
   def lock(%Config{data_root: root}), do: lock(root)
 
@@ -84,6 +87,30 @@ defmodule Biot.Node.Host.Paths do
 
   @spec run(Config.t(), BiotId.t()) :: String.t()
   def run(config, biot_id), do: Path.join(biot(config, biot_id), "run")
+
+  @doc "The Unix socket the runtime agent listens on for this Biot."
+  @spec agent_socket(Config.t(), BiotId.t()) :: String.t()
+  def agent_socket(%Config{data_root: data_root}, biot_id) do
+    build_agent_socket(data_root, BiotId.to_string(biot_id))
+  end
+
+  @doc "The byte length of the longest possible agent socket path below a data root."
+  @spec agent_socket_path_length(String.t()) :: non_neg_integer()
+  def agent_socket_path_length(data_root) do
+    data_root
+    |> build_agent_socket(String.duplicate("0", 36))
+    |> byte_size()
+  end
+
+  @doc "The Linux byte limit for a Unix-domain socket path, excluding its terminating NUL."
+  @spec agent_socket_path_limit() :: pos_integer()
+  def agent_socket_path_limit, do: @agent_socket_path_limit
+
+  @doc "The longest data-root byte length that always fits the agent socket path limit."
+  @spec max_agent_socket_data_root_length() :: non_neg_integer()
+  def max_agent_socket_data_root_length do
+    @agent_socket_path_limit - byte_size(agent_socket_suffix())
+  end
 
   @spec secrets(Config.t(), BiotId.t()) :: String.t()
   def secrets(config, biot_id), do: Path.join(biot(config, biot_id), "secrets")
@@ -218,5 +245,13 @@ defmodule Biot.Node.Host.Paths do
   @spec checkout_staging(Config.t(), BiotId.t()) :: String.t()
   def checkout_staging(config, biot_id) do
     Path.join(biot(config, biot_id), ".checkout.staging")
+  end
+
+  defp agent_socket_suffix do
+    "/" <> build_agent_socket("", String.duplicate("0", 36))
+  end
+
+  defp build_agent_socket(data_root, biot_id) do
+    Path.join([data_root, "biots", biot_id, "run", @agent_socket_name])
   end
 end

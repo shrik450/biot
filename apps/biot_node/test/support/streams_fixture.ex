@@ -106,9 +106,8 @@ defmodule Biot.Node.StreamsFixture do
         initialization: :uninitialized
       })
 
-    run = Paths.run(config, biot_id)
-    File.mkdir_p!(run)
-    Path.join(run, "agent.sock")
+    File.mkdir_p!(Paths.run(config, biot_id))
+    Paths.agent_socket(config, biot_id)
   end
 
   @doc "Starts the real agent as an OS process and waits for its socket."

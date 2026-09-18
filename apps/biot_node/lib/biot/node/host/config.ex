@@ -32,6 +32,7 @@ defmodule Biot.Node.Host.Config do
 
   alias Biot.Node.Host.Command
   alias Biot.Node.Host.FileSystem
+  alias Biot.Node.Host.Paths
   alias Biot.Protocol.Platform
 
   @enforce_keys [
@@ -123,6 +124,7 @@ defmodule Biot.Node.Host.Config do
   defp parse_application do
     with {:ok, platform} <- Platform.current(),
          {:ok, data_root} <- absolute_path(:data_root),
+         :ok <- agent_socket_path(data_root),
          {:ok, uid_range_base} <- non_negative_integer(:uid_range_base),
          {:ok, uid_range_count} <- positive_integer(:uid_range_count),
          {:ok, uid_range_limit} <- positive_integer(:uid_range_limit),
@@ -221,6 +223,21 @@ defmodule Biot.Node.Host.Config do
 
   defp uid_range(base, count, limit) do
     if base + count <= limit, do: :ok, else: {:error, {:invalid_config, :uid_range_limit}}
+  end
+
+  defp agent_socket_path(data_root) do
+    length = Paths.agent_socket_path_length(data_root)
+    limit = Paths.agent_socket_path_limit()
+
+    if length <= limit do
+      :ok
+    else
+      {:error,
+       {:invalid_config,
+        "BIOT_NODE_DATA_ROOT #{inspect(data_root)} produces a #{length}-byte agent socket " <>
+          "path; the limit is #{limit} bytes, and the longest data root that fits is " <>
+          "#{Paths.max_agent_socket_data_root_length()} bytes"}}
+    end
   end
 
   # The release pins the builder image by digest, because "the release's trusted image" is a claim
