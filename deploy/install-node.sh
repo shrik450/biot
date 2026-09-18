@@ -224,29 +224,33 @@ check_podman() {
     return
   fi
 
-  local target
   if user_exists "$service_user"; then
-    target=$service_user
-  elif [[ $EUID -eq 0 ]]; then
-    block "rootless Podman for $service_user cannot be checked before the account exists" \
-      "run --check as a non-root operator, or create $service_user first"
+    check_podman_for "$service_user" ""
     return
-  else
-    target=$current_user
   fi
 
-  local rootless
-  if [[ $target == "$current_user" ]]; then
-    rootless=$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)
-  elif [[ $EUID -eq 0 ]]; then
-    rootless=$(runuser -u "$target" -- podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)
-  else
-    block "cannot run podman as $target without root" "run --check as $target or as root"
+  # The account does not exist yet, and install_account is about to create it.
+  # Rootless Podman is a property of the host, not of one account: what is
+  # per-account is the subordinate range, which check_account already owns. So
+  # report what the host supports, measured on whoever ran this, and leave the
+  # service account's own check to verify_service_podman, which runs after the
+  # account and its range exist. Blocking here would stop the install before it
+  # could create the account the block is about.
+  local operator=${SUDO_USER:-$current_user}
+  if [[ $operator == root ]]; then
+    todo "rootless Podman for $service_user is checked during the install" \
+      "no ordinary account is available to measure the host with; verify_service_podman runs once $service_user and its subordinate range exist"
     return
   fi
+  check_podman_for "$operator" "$service_user is created with the same host support"
+}
+
+check_podman_for() {
+  local target=$1 note=$2 rootless
+  rootless=$(run_as_user "$target" podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)
 
   if [[ $rootless == true ]]; then
-    good "rootless Podman works for $target"
+    good "rootless Podman works for $target${note:+; $note}"
   else
     block "Podman is not rootless for $target (reported '${rootless:-nothing}')" \
       "install and configure rootless Podman for $target"
