@@ -324,6 +324,9 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
     assert {:error, :invalid_format} = StagedInputs.parse(document)
   end
 
+  # The only test here that runs a container rather than just building one, so it is the only one
+  # that has to sit out where podman cannot start.
+  @tag :podman
   test "the stateful service keeps private state across a container restart", context do
     podman_root = Path.join(context.root, "podman")
     checkout = Path.join(podman_root, "checkout")
