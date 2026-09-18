@@ -33,7 +33,7 @@ defmodule BiotWeb.Endpoint do
     at: "/",
     from: :biot_web,
     gzip: not code_reloading?,
-    only: BiotWeb.static_paths(),
+    only_matching: BiotWeb.static_paths(),
     raise_on_missing_only: code_reloading?
 
   if code_reloading? do
