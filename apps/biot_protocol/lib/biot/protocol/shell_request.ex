@@ -32,6 +32,15 @@ defmodule Biot.Protocol.ShellRequest do
     }
   end
 
+  @doc """
+  Whether a terminal name is one `parse/1` accepts.
+
+  A caller that takes the name from a client needs this: it has to substitute its own default
+  before building a request, because a name this module refuses makes the whole target invalid.
+  """
+  @spec valid_term?(term()) :: boolean()
+  def valid_term?(value), do: match?({:ok, _term}, parse_term(value))
+
   @spec parse(term()) :: {:ok, t()} | {:error, :invalid_format}
   def parse(value) do
     with {:ok, value} <- StrictMap.fetch_exact(value, @fields),

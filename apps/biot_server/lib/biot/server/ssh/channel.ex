@@ -84,7 +84,7 @@ defmodule Biot.Server.Ssh.Channel do
       ) do
     state = %{
       state
-      | term: to_string(term),
+      | term: terminal(term, @default_term),
         cols: positive(cols, @default_cols),
         rows: positive(rows, @default_rows)
     }
@@ -251,4 +251,13 @@ defmodule Biot.Server.Ssh.Channel do
 
   defp positive(value, _default) when is_integer(value) and value > 0, do: value
   defp positive(_value, default), do: default
+
+  # A client with no terminal of its own sends an empty terminal name, which is every `ssh -tt`
+  # from a session without a tty. `ShellRequest` refuses that name, so passing it through built a
+  # target the protocol itself rejects and the shell never opened. The size fields have always
+  # fallen back here; the terminal name is the third of the same three and now does too.
+  defp terminal(value, default) do
+    name = to_string(value)
+    if ShellRequest.valid_term?(name), do: name, else: default
+  end
 end

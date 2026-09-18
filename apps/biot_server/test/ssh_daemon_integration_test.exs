@@ -93,6 +93,26 @@ defmodule Biot.Server.SshDaemonIntegrationTest do
     assert output =~ "node-first"
   end
 
+  # Every CI runner runs ssh without a terminal of its own, so the client sends an empty terminal
+  # name and the daemon has to substitute one. Sending it through built a target `ShellRequest`
+  # refuses, and the shell never opened.
+  test "a client that names no terminal still opens a shell", context do
+    task =
+      Task.async(fn -> ssh(context, context.user_key, ["-tt", "--", "cat"], [{"TERM", ""}]) end)
+
+    open = AccessHarness.await_open(context.peer)
+
+    assert {:shell, request} = open.target
+    assert request.term != ""
+
+    attach = AccessHarness.attach(context.peer, open.stream_id)
+    send_data(attach, "no-term\n")
+    send_exit(attach, 0)
+
+    assert {output, 0} = Task.await(task, @timeout)
+    assert output =~ "no-term"
+  end
+
   test "an unregistered key is refused", context do
     result = ssh(context, context.unknown_key, ["--", "true"])
     assert elem(result, 1) == 255
@@ -257,9 +277,10 @@ defmodule Biot.Server.SshDaemonIntegrationTest do
   defp ssh_task(context, command),
     do: Task.async(fn -> ssh(context, context.user_key, command) end)
 
-  defp ssh(context, key_path, args) do
+  defp ssh(context, key_path, args, environment \\ []) do
     System.cmd("ssh", ssh_options(context, key_path) ++ [context.user <> "@127.0.0.1" | args],
-      stderr_to_stdout: true
+      stderr_to_stdout: true,
+      env: environment
     )
   end
 
