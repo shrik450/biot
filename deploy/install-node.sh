@@ -257,14 +257,22 @@ check_podman() {
 }
 
 # Asks Podman, as one account, whether it is rootless. Sets podman_rootless to
-# its last line and podman_output to everything it said, because what Podman
-# says when it fails is the only useful thing anyone has to go on.
+# the answer and podman_output to whatever Podman said on the way, because what
+# Podman says when it fails is the only useful thing anyone has to go on.
+#
+# The two are kept on separate streams on purpose. Podman writes warnings to
+# stderr while the value goes to stdout, and outside a systemd user session it
+# warns about the cgroup manager and the session bus. Merging them puts a
+# warning after the answer, and any attempt to read the value out of the
+# combined text finds a warning instead.
 podman_rootless=""
 podman_output=""
 probe_rootless_podman() {
-  local target=$1
-  podman_output=$(run_as_user "$target" podman info --format '{{.Host.Security.Rootless}}' 2>&1) || true
-  podman_rootless=$(printf '%s\n' "$podman_output" | tail -n 1)
+  local target=$1 errors
+  errors=$(mktemp)
+  podman_rootless=$(run_as_user "$target" podman info --format '{{.Host.Security.Rootless}}' 2>"$errors" | tr -d '[:space:]') || true
+  podman_output=$(<"$errors")
+  rm -f "$errors"
   [[ $podman_rootless == true ]]
 }
 
@@ -281,7 +289,7 @@ check_podman_for() {
     return
   fi
 
-  block "Podman is not rootless for $target; it said: $(printf '%s' "$podman_output" | tr '\n' ' ')" \
+  block "Podman answered '${podman_rootless:-nothing}' for $target, not 'true'; it also said: $(printf '%s' "$podman_output" | tr '\n' ' ')" \
     "install and configure rootless Podman for $target"
 }
 
