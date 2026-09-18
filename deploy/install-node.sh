@@ -244,6 +244,12 @@ check_podman() {
 
 check_podman_for() {
   local target=$1 note=$2 rootless
+  if [[ $target != "$current_user" && $EUID -ne 0 ]]; then
+    todo "rootless Podman for $target cannot be measured from here" \
+      "only root may run a command as $target; the install verifies it, or rerun --check with sudo"
+    return
+  fi
+
   rootless=$(run_as_user "$target" podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)
 
   if [[ $rootless == true ]]; then
@@ -329,7 +335,7 @@ check_subid() {
   count=$(subid_count "$service_user" "$database")
   if [[ -z $start ]]; then
     block "no $label range for $service_user in $database" \
-      "the account was created without one; remove it and let the installer recreate it ($recreate), or add an explicit range with usermod --add-subuids FIRST-LAST"
+      "the account was created without one; remove it with userdel and run the installer again, which creates it with useradd --add-subids-for-system, or add an explicit range with usermod --add-subuids FIRST-LAST"
   elif ((count < uid_span)); then
     block "$database gives $service_user $count $label IDs starting at $start, but the node needs $uid_span" \
       "add more with usermod, or lower BIOT_NODE_UID_RANGE_LIMIT"
