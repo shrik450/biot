@@ -33,7 +33,7 @@ defmodule BiotWeb.Preview.Failure do
     # page that blames the Biot being stopped belongs here.
     invalid_response:
       {502, "No valid response",
-       "The application did not return a valid response. Check the application's logs.",
+       "The application did not return a valid response. Check what the application logged.",
        "Open Biot"},
     port_not_listening:
       {502, "Nothing to show",
