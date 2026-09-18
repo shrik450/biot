@@ -4,6 +4,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   alias Biot.Node.Allocation
   alias Biot.Node.Controllers
   alias Biot.Node.DataRootLock
+  alias Biot.Node.GitHostFixture
   alias Biot.Node.Host
   alias Biot.Node.Host.Command
   alias Biot.Node.Host.Config
@@ -33,7 +34,6 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   alias Biot.Protocol.EnvironmentSelection
   alias Biot.Protocol.ExecutionSpec
   alias Biot.Protocol.IncarnationId
-  alias Biot.Protocol.RepositorySource
   alias Biot.Protocol.SourceSelector
 
   @moduletag :linux
@@ -67,7 +67,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
     broken_layer = git_repository(repository_root, "broken-layer", "{ this is not valid Nix; }\n")
 
-    {repositories, server} =
+    repositories =
       served_repositories(repository_root, authority, %{
         checkout: checkout_source,
         base_layer: base_layer,
@@ -79,7 +79,6 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     System.put_env("GIT_SSL_NO_VERIFY", "true")
 
     on_exit(fn ->
-      if Port.info(server), do: Port.close(server)
       :persistent_term.erase(Config)
       remove_all_test_containers(settings)
       File.chmod(data_root, 0o700)
@@ -842,7 +841,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     key = Path.join(root, "server.key")
     request = Path.join(root, "server.csr")
     extensions = Path.join(root, "server.ext")
-    address = host_address()
+    address = GitHostFixture.address()
 
     assert {_, 0} =
              System.cmd(
@@ -888,91 +887,11 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
                stderr_to_stdout: true
              )
 
-    port_number = unused_port()
+    git_host = GitHostFixture.start(served, certificate: cert, key: key)
 
-    python = """
-    import http.server, os, ssl, subprocess, sys, urllib.parse
-
-    class GitHandler(http.server.BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def do_GET(self):
-            self.run_backend()
-
-        def do_POST(self):
-            self.run_backend()
-
-        def run_backend(self):
-            parsed = urllib.parse.urlsplit(self.path)
-            length = int(self.headers.get("Content-Length", "0"))
-            environment = os.environ.copy()
-            environment.update({
-                "GIT_PROJECT_ROOT": sys.argv[1],
-                "GIT_HTTP_EXPORT_ALL": "1",
-                "PATH_INFO": parsed.path,
-                "QUERY_STRING": parsed.query,
-                "REQUEST_METHOD": self.command,
-                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                "CONTENT_LENGTH": str(length),
-                "REMOTE_ADDR": self.client_address[0],
-            })
-            process = subprocess.run(
-                ["git", "http-backend"],
-                input=self.rfile.read(length),
-                capture_output=True,
-                env=environment,
-            )
-            headers, body = process.stdout.split(b"\\r\\n\\r\\n", 1)
-            status = 200
-            response_headers = []
-            for line in headers.decode().split("\\r\\n"):
-                name, value = line.split(":", 1)
-                if name.lower() == "status":
-                    status = int(value.strip().split(" ", 1)[0])
-                else:
-                    response_headers.append((name, value.strip()))
-            self.send_response(status)
-            for name, value in response_headers:
-                self.send_header(name, value)
-            if not any(name.lower() == "content-length" for name, _ in response_headers):
-                self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.wfile.write(body)
-            self.wfile.flush()
-            self.close_connection = True
-
-        def log_message(self, format, *args):
-            return
-
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", int(sys.argv[2])), GitHandler)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(sys.argv[3], sys.argv[4])
-    server.socket = context.wrap_socket(server.socket, server_side=True)
-    print("ready", flush=True)
-    server.serve_forever()
-    """
-
-    server =
-      Port.open({:spawn_executable, System.find_executable("python3")}, [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        {:line, 1_024},
-        args: ["-c", python, served, Integer.to_string(port_number), cert, key]
-      ])
-
-    assert_receive {^server, {:data, {:eol, "ready"}}}, 5_000
-
-    repositories =
-      Map.new(sources, fn {name, _source} ->
-        {:ok, repository} =
-          RepositorySource.parse("https://#{address}:#{port_number}/#{name}.git")
-
-        {name, repository}
-      end)
-
-    {repositories, server}
+    Map.new(sources, fn {name, _source} ->
+      {name, GitHostFixture.repository_source(git_host, Atom.to_string(name))}
+    end)
   end
 
   # The fetch worker's trust store is the disposable image's, so an operator who wants it to reach a
@@ -1032,11 +951,6 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     %{certificate: certificate, key: key, bundle: bundle}
   end
 
-  defp host_address do
-    {addresses, 0} = System.cmd("hostname", ["-I"], stderr_to_stdout: true)
-    addresses |> String.split() |> hd()
-  end
-
   defp git_repository(root, name, content, filename \\ "default.nix") do
     path = Path.join(root, name)
     File.mkdir_p!(path)
@@ -1058,13 +972,6 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
 
   defp layer(project_root, name) do
     File.read!(Path.join(project_root, "nix/examples/stateful-counter/#{name}/default.nix"))
-  end
-
-  defp unused_port do
-    {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false])
-    {:ok, {_address, port}} = :inet.sockname(socket)
-    :gen_tcp.close(socket)
-    port
   end
 
   # A writable mount belongs to the allocation's user; a directory the node publishes into stays the

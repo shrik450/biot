@@ -8,6 +8,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
 
   alias Biot.Node.Controllers
   alias Biot.Node.DataRootLock
+  alias Biot.Node.GitHostFixture
   alias Biot.Node.Host
   alias Biot.Node.Host.FetchCredentials
   alias Biot.Node.Host.Outcome
@@ -56,13 +57,13 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
     start_supervised!(Repo)
     assert :ignore = Migrator.start_link([])
 
-    {private, server, request_log} = private_git_host(repository_root)
+    git_host = private_git_host(repository_root)
+    private = GitHostFixture.repository_source(git_host, "private")
 
     old_ssl = System.get_env("GIT_SSL_NO_VERIFY")
     System.put_env("GIT_SSL_NO_VERIFY", "true")
 
     on_exit(fn ->
-      if Port.info(server), do: Port.close(server)
       :persistent_term.erase(Biot.Node.Host.Config)
 
       System.cmd("podman", ["unshare", "chown", "-R", "0:0", data_root], stderr_to_stdout: true)
@@ -80,7 +81,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
       end)
     end)
 
-    {:ok, data_root: data_root, private: private, request_log: request_log}
+    {:ok, data_root: data_root, private: private, git_host: git_host}
   end
 
   test "a secret is published, replaced, listed, and removed with no temporary left behind" do
@@ -246,7 +247,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
     start_supervised!(Controllers)
     biot_id = id(BiotId, 1_807)
     private = context.private
-    before = unauthorized_count(context.request_log)
+    before = GitHostFixture.unauthorized_count(context.git_host)
 
     assert {:ok, _intent} =
              Journal.put_intent(%BiotSpec{
@@ -258,7 +259,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
 
     # The clone is in flight once the host has seen the request it will refuse; delivering now is
     # the race the model's serialization rule is about.
-    assert eventually(fn -> unauthorized_count(context.request_log) > before end)
+    assert eventually(fn -> GitHostFixture.unauthorized_count(context.git_host) > before end)
 
     request =
       SecretRequest.new(
@@ -352,7 +353,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
     start_supervised!(Controllers)
     biot_id = id(BiotId, 1_808)
     private = context.private
-    before = unauthorized_count(context.request_log)
+    before = GitHostFixture.unauthorized_count(context.git_host)
 
     assert {:ok, _intent} =
              Journal.put_intent(%BiotSpec{
@@ -361,7 +362,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
              })
 
     assert :ok = Controllers.intent_changed(biot_id)
-    assert eventually(fn -> unauthorized_count(context.request_log) > before end)
+    assert eventually(fn -> GitHostFixture.unauthorized_count(context.git_host) > before end)
 
     expired = SecretRequest.new("expired", :list_secrets, 1, self())
     assert Controllers.secret_request(biot_id, expired) == :ok
@@ -401,13 +402,6 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
       desired: %Desired{revision: 1, state: :running, environment_id: environment_id},
       environment: %{id: environment_id, selection: selection}
     }
-  end
-
-  defp unauthorized_count(log) do
-    case File.read(log) do
-      {:ok, content} -> content |> String.split("authorization absent") |> length() |> Kernel.-(1)
-      {:error, _reason} -> 0
-    end
   end
 
   defp name(value) do
@@ -466,11 +460,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
 
     cert = Path.join(root, "server.crt")
     key = Path.join(root, "server.key")
-    log = Path.join(root, "requests.log")
-    File.write!(log, "")
-
-    {addresses, 0} = System.cmd("hostname", ["-I"], stderr_to_stdout: true)
-    address = addresses |> String.split() |> hd()
+    address = GitHostFixture.address()
 
     assert {_, 0} =
              System.cmd(
@@ -495,122 +485,12 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
                stderr_to_stdout: true
              )
 
-    port_number = unused_port()
-
-    server =
-      Port.open({:spawn_executable, System.find_executable("python3")}, [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        {:line, 2_048},
-        args: [
-          "-c",
-          git_host_source(),
-          served,
-          Integer.to_string(port_number),
-          cert,
-          key,
-          @token,
-          log,
-          Integer.to_string(@unauthorized_delay_ms)
-        ]
-      ])
-
-    assert_receive {^server, {:data, {:eol, "ready"}}}, 10_000
-
-    {:ok, private} =
-      RepositorySource.parse("https://#{address}:#{port_number}/private.git")
-
-    {private, server, log}
-  end
-
-  defp git_host_source do
-    """
-    import http.server, os, ssl, subprocess, sys, time, urllib.parse
-
-    ROOT, PORT, CERT, KEY, EXPECTED, LOG, DELAY = sys.argv[1:8]
-
-    def record(line):
-        with open(LOG, "a", encoding="utf-8") as handle:
-            handle.write(line + "\\n")
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def log_message(self, fmt, *args):
-            return
-
-        def do_GET(self):
-            self.serve()
-
-        def do_POST(self):
-            self.serve()
-
-        def serve(self):
-            authorization = self.headers.get("Authorization")
-
-            if authorization != EXPECTED:
-                record("authorization absent")
-                time.sleep(int(DELAY) / 1000.0)
-                self.send_response(401)
-                self.send_header("WWW-Authenticate", 'Basic realm="biot"')
-                self.send_header("Content-Length", "0")
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.close_connection = True
-                return
-
-            record("authorization present")
-            self.backend()
-
-        def backend(self):
-            parsed = urllib.parse.urlsplit(self.path)
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length)
-            environment = os.environ.copy()
-            environment.update({
-                "GIT_PROJECT_ROOT": ROOT,
-                "GIT_HTTP_EXPORT_ALL": "1",
-                "PATH_INFO": parsed.path,
-                "QUERY_STRING": parsed.query,
-                "REQUEST_METHOD": self.command,
-                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                "CONTENT_LENGTH": str(length),
-                "REMOTE_ADDR": self.client_address[0],
-            })
-            process = subprocess.run(
-                ["git", "http-backend"],
-                input=body,
-                capture_output=True,
-                env=environment,
-            )
-            headers, payload = process.stdout.split(b"\\r\\n\\r\\n", 1)
-            status = 200
-            response_headers = []
-            for line in headers.decode().split("\\r\\n"):
-                name, value = line.split(":", 1)
-                if name.lower() == "status":
-                    status = int(value.strip().split(" ", 1)[0])
-                else:
-                    response_headers.append((name, value.strip()))
-            self.send_response(status)
-            for name, value in response_headers:
-                self.send_header(name, value)
-            if not any(name.lower() == "content-length" for name, _ in response_headers):
-                self.send_header("Content-Length", str(len(payload)))
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.wfile.write(payload)
-            self.wfile.flush()
-            self.close_connection = True
-
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", int(PORT)), Handler)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(CERT, KEY)
-    server.socket = context.wrap_socket(server.socket, server_side=True)
-    print("ready", flush=True)
-    server.serve_forever()
-    """
+    GitHostFixture.start(served,
+      certificate: cert,
+      key: key,
+      authorization: @token,
+      unauthorized_delay_ms: @unauthorized_delay_ms
+    )
   end
 
   defp git!(path, arguments) do
@@ -618,13 +498,6 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
       {output, 0} -> String.trim(output)
       {output, status} -> raise "git exited with #{status}: #{output}"
     end
-  end
-
-  defp unused_port do
-    {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false])
-    {:ok, {_address, port}} = :inet.sockname(socket)
-    :gen_tcp.close(socket)
-    port
   end
 
   defp eventually(fun, attempts \\ 200)
