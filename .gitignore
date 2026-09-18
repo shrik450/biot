@@ -37,3 +37,7 @@ cli/biot
 # ExUnit tmp_dir output
 /apps/*/tmp/
 .work/
+
+# The compose stack's operator-supplied material: secrets and the control-link and SSH keys.
+/docker/server/.env
+/docker/server/etc/

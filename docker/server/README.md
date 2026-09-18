@@ -16,21 +16,109 @@ Docker builds the Docker image format by default, which is what carries the `HEA
 defaults to the OCI image format, which has no healthcheck field and silently drops it, so pass
 `--format docker` (or set `BUILDAH_FORMAT=docker`).
 
-## Run
+## Run with compose
+
+`compose.yaml` starts one server with the storage, certificates, and identity it needs, so a person
+can bring it up and reach the sign-in page.
+
+This is **not a production deployment**. It publishes loopback ports over plain HTTP behind no
+edge, and it is a way to run and see the server, not the deployment described in
+[docs/deployment.md](../../docs/deployment.md). TLS, the reverse proxy, the wildcard DNS for
+previews, and the node machines are all still the operator's. It runs no node, so signing in and
+the server's own API work, while creating a Biot needs a node registered with
+`BIOT_NODE_REGISTRATIONS`.
+
+Identity is yours. Biot is not an identity provider, and this stack does not become one: it points
+at your OIDC provider through `BIOT_OIDC_ISSUER`, `BIOT_OIDC_CLIENT_ID`, and
+`BIOT_OIDC_CLIENT_SECRET`. The release refuses an issuer that is not HTTPS, and the provider must
+allow the redirect `https://<PHX_HOST>/login/callback`.
+
+The file itself carries no secret values and no certificate material. The secrets come from
+`docker/server/.env` and the key material from `docker/server/etc/`, and both paths are ignored by
+git.
+
+### Prepare
+
+Generate the control-link certificates with the project's tool, keeping the authority in a
+directory of its own. Only the server's material goes into the mounted directory; the authority's
+private key (`ca-key.pem`) never does.
+
+```sh
+mise exec -- mix biot.certs authority ~/biot-authority
+mise exec -- mix biot.certs server ~/biot-authority
+mkdir -p docker/server/etc
+cp ~/biot-authority/ca.pem ~/biot-authority/server-cert.pem ~/biot-authority/server-key.pem docker/server/etc/
+```
+
+Generate the SSH host key:
+
+```sh
+ssh-keygen -q -t ed25519 -N "" -f docker/server/etc/ssh-host-key
+rm docker/server/etc/ssh-host-key.pub
+```
+
+The container runs as uid 10001, so make the material readable by that uid. Rootless Podman can do
+this without root; Docker needs the operator's privilege:
+
+```sh
+podman unshare chown -R 10001:10001 docker/server/etc   # or: sudo chown -R 10001:10001 docker/server/etc
+```
+
+Copy the environment template and fill it in. `.env` holds `SECRET_KEY_BASE` and the OIDC client
+secret, so it is never committed.
+
+```sh
+cp docker/server/.env.example docker/server/.env
+${EDITOR:-vi} docker/server/.env
+```
+
+### Bring it up
+
+Run compose from this directory, which is where it reads `.env` and resolves the build context:
+
+```sh
+cd docker/server
+docker compose up -d --build
+```
+
+With Podman, build the image first so the `HEALTHCHECK` survives, because Podman's default OCI
+image format drops it and compose's build does not pass `--format docker`:
+
+```sh
+podman build --format docker -t biot-server:local -f docker/server/Dockerfile ../..
+docker compose up -d
+```
+
+Then open `http://<PHX_HOST>:<BIOT_HTTP_PORT>/`, which with the template's defaults is
+`http://localhost:4000/`, and follow the sign-in link. The link sends the browser to your provider
+and back to `https://<PHX_HOST>/login/callback`; a completed login also needs an edge terminating
+TLS for `PHX_HOST`. Without that edge the landing page and the health check still work, and
+`/login` reports that the provider is unavailable.
+
+### What persists
+
+- The SQLite database, in the `biot-data` named volume mounted at `/var/lib/biot`.
+- The control-link certificates and the SSH host key, in `docker/server/etc/` mounted read-only at
+  `/etc/biot`.
+
+Nothing else persists; the container is disposable. `docker compose down` and `up` keep the
+database and the server's control and SSH identities. Back up the volume and `etc/` together: node
+pins and SSH known-hosts name the server's fingerprints, so replacing those keys breaks them.
+
+## Environment
 
 Every setting below is required; the release stops at boot naming the first one it does not find.
-Generate `SECRET_KEY_BASE` with `mise exec -- mix phx.gen.secret`, and the certificates and SSH
-host key with the procedures in [docs/deployment.md](../../docs/deployment.md).
+The compose file supplies the last four paths itself and takes the rest from `.env`.
 
 | Variable | What it supplies |
 | --- | --- |
 | `PHX_HOST` | The control hostname, a lowercase DNS name. |
 | `BIOT_SERVER_PUBLICATION_DOMAIN` | The suffix under which preview hostnames are created. `PHX_HOST` must not be the domain or a name below it. |
-| `SECRET_KEY_BASE` | Phoenix's signing and encryption key. |
+| `SECRET_KEY_BASE` | Phoenix's signing and encryption key. Generate with `mise exec -- mix phx.gen.secret`. |
 | `BIOT_OIDC_ISSUER` | The OIDC provider's HTTPS issuer URL. |
 | `BIOT_OIDC_CLIENT_ID` | The server's OIDC client id. |
 | `BIOT_OIDC_CLIENT_SECRET` | The server's OIDC client secret. |
-| `BIOT_SERVER_DATABASE` | Absolute path to the SQLite database. Put it on a writable volume. |
+| `BIOT_SERVER_DATABASE` | Absolute path to the SQLite database. |
 | `BIOT_SSH_ADVERTISED_HOST` | The hostname or address printed for SSH clients. |
 | `BIOT_SSH_PORT` | The SSH listener port. |
 | `BIOT_SSH_HOST_KEY_FILE` | Absolute path to the SSH host key file. |
@@ -53,40 +141,12 @@ Settings an operator normally also sets, each with a default:
 The remaining `BIOT_*` settings are protocol timeouts and bounds with defaults; they do not need to
 be set to boot. `config/releases/server.exs` is the complete list.
 
-## Ports and paths
-
-The image creates `/var/lib/biot` owned by `biot` as the natural place for the database, and
-`/etc/biot` for mounted certificate material. The operator chooses both paths and passes them in
-`BIOT_SERVER_DATABASE`, `BIOT_SSH_HOST_KEY_FILE`, and the `BIOT_CONTROL_*` settings.
-
-Mount the database directory on a volume, owned by uid 10001, or the container loses its data when
-it is replaced:
-
-```sh
-podman run -d --name biot-server \
-  -p 4000:4000 -p 4443:4443 -p 2222:2222 \
-  -v biot-data:/var/lib/biot \
-  -v /etc/biot:/etc/biot:ro \
-  -e PHX_HOST=biot.example.com \
-  -e BIOT_SERVER_PUBLICATION_DOMAIN=preview.example.com \
-  -e SECRET_KEY_BASE="$(mise exec -- mix phx.gen.secret)" \
-  -e BIOT_OIDC_ISSUER=https://id.example.com \
-  -e BIOT_OIDC_CLIENT_ID=biot \
-  -e BIOT_OIDC_CLIENT_SECRET=... \
-  -e BIOT_SERVER_DATABASE=/var/lib/biot/server.sqlite3 \
-  -e BIOT_SSH_ADVERTISED_HOST=biot.example.com \
-  -e BIOT_SSH_PORT=2222 \
-  -e BIOT_SSH_HOST_KEY_FILE=/etc/biot/ssh-host-key \
-  -e BIOT_CONTROL_CERTFILE=/etc/biot/server-cert.pem \
-  -e BIOT_CONTROL_KEYFILE=/etc/biot/server-key.pem \
-  -e BIOT_CONTROL_CACERTFILE=/etc/biot/ca.pem \
-  biot-server
-```
+## Ports
 
 `PORT`, `BIOT_CONTROL_PORT`, and `BIOT_SSH_PORT` are all above 1024, so the container needs no
-capability. Put a reverse proxy in front of `PORT` for TLS and the preview wildcard, as
-[docs/deployment.md](../../docs/deployment.md) describes; the container does not terminate TLS
-itself.
+capability. Compose publishes them on loopback: change a bind address in `compose.yaml` when a node
+or an SSH client on another host must reach that listener. Put a reverse proxy in front of `PORT`
+for TLS and the preview wildcard; the container does not terminate TLS itself.
 
 ## Health
 

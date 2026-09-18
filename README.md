@@ -6,9 +6,10 @@ and ports listening in there can get durable, authenticated HTTPS hostnames.
 An existing OIDC provider identifies users. Biot controls which environments
 and published ports each person can access.
 
-*Status: in progress. The lifecycle and policy core exists; access, previews,
-shells, and the clients are being built. [docs/model.md](docs/model.md) is the
-implementation contract and describes intended behavior in detail.*
+*Status: in progress. The lifecycle and policy core, access, previews, shells,
+and the clients exist; credential mediation is planned and not built yet.
+[docs/model.md](docs/model.md) is the implementation contract and describes
+intended behavior in detail.*
 
 Deployment requirements are in [docs/deployment.md](docs/deployment.md).
 
