@@ -668,16 +668,32 @@ defmodule BiotWeb.Live.AccountLive do
   defp clear_token(socket), do: assign(socket, :new_credential_token, nil)
 
   defp parse_expiry(value) when is_binary(value) do
-    value = if String.ends_with?(value, "Z"), do: value, else: value <> ":00Z"
-
-    case DateTime.from_iso8601(value) do
-      {:ok, datetime, 0} -> {:ok, datetime}
-      {:ok, datetime, _offset} -> {:ok, datetime}
-      {:error, _reason} -> CommandError.invalid_input(%{expires_at: [:invalid_format]})
+    with {:ok, iso8601} <- browser_expiry_iso8601(value),
+         {:ok, datetime, 0} <- DateTime.from_iso8601(iso8601) do
+      # credentials.expires_at is :utc_datetime_usec; Ecto refuses any other precision, so the
+      # boundary must raise the parsed browser value to microsecond precision here.
+      {:ok, DateTime.add(datetime, 0, :microsecond)}
+    else
+      _error -> CommandError.invalid_input(%{expires_at: [:invalid_format]})
     end
   end
 
   defp parse_expiry(_value), do: CommandError.invalid_input(%{expires_at: [:invalid_format]})
+
+  # A datetime-local control sends minute precision, while ISO 8601 needs seconds before parsing.
+  defp browser_expiry_iso8601(value) do
+    case String.split(value, "T", parts: 2) do
+      [date, time] ->
+        case String.split(time, ":") do
+          [hour, minute] -> {:ok, "#{date}T#{hour}:#{minute}:00Z"}
+          [hour, minute, second] -> {:ok, "#{date}T#{hour}:#{minute}:#{second}Z"}
+          _parts -> :error
+        end
+
+      _parts ->
+        :error
+    end
+  end
 
   defp display(nil), do: "—"
   defp display(value), do: value

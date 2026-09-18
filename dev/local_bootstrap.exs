@@ -1,13 +1,14 @@
 defmodule Dev.LocalBootstrap do
   alias Biot.Protocol.{Certificates, NodeId, RegistrationId}
 
-  @uid_range_base 100_000
+  @subuid_path "/etc/subuid"
+  @subgid_path "/etc/subgid"
   @uid_range_count 1_024
-  @uid_range_limit 165_536
 
   def main do
     run_directory = fetch_env!("BIOT_RUN_DIRECTORY")
     certificate_directory = Path.join(run_directory, "certificates")
+    uid_range = subordinate_range!()
 
     File.mkdir_p!(run_directory)
     {:ok, _authority} = Certificates.create_authority(certificate_directory)
@@ -31,7 +32,8 @@ defmodule Dev.LocalBootstrap do
       registration_id,
       ssh_host_key,
       registration_file,
-      ports
+      ports,
+      uid_range
     )
 
     IO.puts("local bootstrap ready: #{run_directory}")
@@ -60,7 +62,8 @@ defmodule Dev.LocalBootstrap do
          registration_id,
          ssh_host_key,
          registration_file,
-         ports
+         ports,
+         uid_range
        ) do
     environment = %{
       "BIOT_CONTROL_CACERTFILE" => Path.join(certificate_directory, "ca.pem"),
@@ -80,9 +83,9 @@ defmodule Dev.LocalBootstrap do
       "BIOT_NODE_DATA_ROOT" => Path.join(run_directory, "node-data"),
       "BIOT_NODE_KEYFILE" => node.key,
       "BIOT_NODE_REGISTRATION_ID" => registration_id,
-      "BIOT_NODE_UID_RANGE_BASE" => @uid_range_base,
-      "BIOT_NODE_UID_RANGE_COUNT" => @uid_range_count,
-      "BIOT_NODE_UID_RANGE_LIMIT" => @uid_range_limit,
+      "BIOT_NODE_UID_RANGE_BASE" => uid_range.base,
+      "BIOT_NODE_UID_RANGE_COUNT" => uid_range.count,
+      "BIOT_NODE_UID_RANGE_LIMIT" => uid_range.limit,
       "BIOT_NODE_WORKER_TIMEOUT_MS" => 1_200_000,
       "BIOT_SERVER_DATABASE" => Path.join(run_directory, "server.sqlite3"),
       "BIOT_SERVER_FINGERPRINT" => server.fingerprint,
@@ -127,6 +130,77 @@ defmodule Dev.LocalBootstrap do
     {:ok, port} = :inet.port(socket)
     :ok = :gen_tcp.close(socket)
     port
+  end
+
+  defp subordinate_range! do
+    user = current_user!()
+    uid_range = read_subordinate_range!(@subuid_path, user, "UID")
+    gid_range = read_subordinate_range!(@subgid_path, user, "GID")
+
+    if uid_range.start != gid_range.start do
+      raise(
+        "subordinate UID and GID ranges for #{user} must start at the same ID; " <>
+          "#{@subuid_path} starts at #{uid_range.start}, " <>
+          "#{@subgid_path} starts at #{gid_range.start}"
+      )
+    end
+
+    available_count = min(uid_range.count, gid_range.count)
+
+    %{
+      base: uid_range.start,
+      count: min(@uid_range_count, available_count),
+      limit: uid_range.start + available_count
+    }
+  end
+
+  defp current_user! do
+    case System.cmd("id", ["-un"], stderr_to_stdout: true) do
+      {output, 0} ->
+        String.trim(output)
+
+      {output, status} ->
+        raise "could not determine the running user (id exited #{status}): #{output}"
+    end
+  end
+
+  defp read_subordinate_range!(path, user, kind) do
+    case File.read(path) do
+      {:ok, contents} ->
+        case Enum.find_value(String.split(contents, "\n"), &parse_subordinate_entry(&1, user)) do
+          {start, count} -> %{start: start, count: count}
+          nil -> missing_subordinate_range!(path, user, kind)
+        end
+
+      {:error, reason} ->
+        raise(
+          "could not read #{path} for user #{user}: #{:file.format_error(reason)}; " <>
+            "add an entry such as #{user}:524288:65536"
+        )
+    end
+  end
+
+  defp parse_subordinate_entry(line, user) do
+    case String.split(line, ":", parts: 3) do
+      [^user, start, count] ->
+        with {start, ""} <- Integer.parse(start),
+             {count, ""} <- Integer.parse(count),
+             true <- start >= 0 and count > 0 do
+          {start, count}
+        else
+          _invalid -> nil
+        end
+
+      _other ->
+        nil
+    end
+  end
+
+  defp missing_subordinate_range!(path, user, kind) do
+    raise(
+      "no subordinate #{kind} range for user #{user} in #{path}; " <>
+        "add an entry such as #{user}:524288:65536"
+    )
   end
 
   defp shell_quote(value) do
