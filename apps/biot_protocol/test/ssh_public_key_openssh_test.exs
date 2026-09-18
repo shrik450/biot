@@ -16,7 +16,7 @@ defmodule Biot.Protocol.SshPublicKeyOpenSshTest do
 
   setup_all do
     keygen = System.find_executable("ssh-keygen")
-    dir = Path.join(System.tmp_dir!(), "biot-ssh-keys-#{System.unique_integer([:positive])}")
+    dir = BiotTest.Temp.directory("biot-ssh-keys")
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf(dir) end)
 

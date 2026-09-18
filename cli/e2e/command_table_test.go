@@ -80,9 +80,8 @@ func TestLifecycleCommands(t *testing.T) {
 	if !strings.Contains(show.stdout, "desired: destroyed") {
 		t.Fatalf("the server does not report the Biot destroyed:\n%s", show.stdout)
 	}
-	if !strings.Contains(show.stdout, "container: absent") {
-		t.Fatalf("the destroyed Biot still reports a container:\n%s", show.stdout)
-	}
+	// The absent container is the node's report, which the destroy command does not wait for.
+	assertContainer(t, env, name, "absent")
 }
 
 // TestRunningBiotCommands walks the commands a running Biot answers: runtime
@@ -469,14 +468,9 @@ func biotID(t *testing.T, env *cliEnv, name string) string {
 	return ""
 }
 
-// assertContainer asks the server for the container label it reports.
+// assertContainer waits for the node to report the container, because the command that changed it
+// returned as soon as the server recorded the intent.
 func assertContainer(t *testing.T, env *cliEnv, name string, want string) {
 	t.Helper()
-	show := env.run(t, nil, "show", name)
-	if show.exit != 0 {
-		t.Fatalf("show %s exited %d:\n%s", name, show.exit, show.combined())
-	}
-	if !strings.Contains(show.stdout, "container: "+want) {
-		t.Fatalf("the server does not report %s's container as %s:\n%s", name, want, show.stdout)
-	}
+	waitForShow(t, env, name, "container: "+want)
 }

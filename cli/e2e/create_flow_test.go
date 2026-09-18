@@ -138,19 +138,18 @@ func TestCreateWithStdinCredentialReachesReady(t *testing.T) {
 }
 
 // assertRunning asks the server for the Biot's state rather than trusting the
-// CLI's own ready line.
+// CLI's own ready line. The desired state is the server's own record, so a wrong
+// one fails at once; the container is the node's report, so it is waited for.
 func assertRunning(t *testing.T, env *cliEnv, name string) {
 	t.Helper()
 	show := env.run(t, nil, "show", name)
 	if show.exit != 0 {
 		t.Fatalf("show %s exited %d:\n%s", name, show.exit, show.combined())
 	}
-	if !strings.Contains(show.stdout, "container: running") {
-		t.Fatalf("the server does not report %s as running:\n%s", name, show.stdout)
-	}
 	if !strings.Contains(show.stdout, "desired: running") {
 		t.Fatalf("the server does not report %s as desired running:\n%s", name, show.stdout)
 	}
+	waitForShow(t, env, name, "container: running")
 }
 
 func assertDelivery(t *testing.T, entry recordedRequest, path string, fields map[string]string) {

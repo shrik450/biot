@@ -49,10 +49,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
 
   setup_all do
     directory =
-      Path.join(
-        System.tmp_dir!(),
-        "biot-control-integration-#{System.unique_integer([:positive])}"
-      )
+      BiotTest.Temp.directory("biot-control-integration")
 
     {:ok, certificates} = TestFixtures.certificates(directory, 5)
     on_exit(fn -> File.rm_rf!(directory) end)
@@ -1911,7 +1908,7 @@ defmodule Biot.Server.ControlProtocolIntegrationTest do
   # The missing UID range keeps these protocol tests from starting unrelated host actions.
   defp start_node_journal do
     data_root =
-      Path.join(System.tmp_dir!(), "biot-node-journal-#{System.unique_integer([:positive])}")
+      BiotTest.Temp.directory("biot-node-journal")
 
     File.mkdir_p!(data_root)
 

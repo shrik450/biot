@@ -12,6 +12,11 @@
 # It prints SERVER_URL, TOKEN, NODE_ID, and the rest, then READY, and keeps
 # answering until killed.
 
+# The fixtures name their scratch files with `BiotTest.Temp`, which only the test environment
+# compiles, so this dev-environment script loads it the same way it loads them, first because they
+# depend on it.
+Code.require_file("../../apps/biot_protocol/test/support/temp.ex", __DIR__)
+
 support = Path.join([__DIR__, "..", "..", "apps", "biot_server", "test", "support"])
 Code.require_file(Path.join(support, "fixtures.ex"))
 Code.require_file(Path.join(support, "access_harness.ex"))
@@ -36,6 +41,7 @@ defmodule E2EServer do
 
   def main do
     port = free_port()
+
     directory =
       Path.join(System.tmp_dir!(), "biot-e2e-#{System.system_time(:microsecond)}-#{System.pid()}")
 
@@ -57,7 +63,18 @@ defmodule E2EServer do
       registration(offline_id, offline_number, Enum.at(certificates.nodes, 1).fingerprint)
     ])
 
+    # The server migrates its database at boot, so a fresh file inside this run's own directory is
+    # a migrated one. Without this the script seeds a developer's own dev database with fixtures.
+    repo = Application.fetch_env!(:biot_server, Repo)
+
+    Application.put_env(
+      :biot_server,
+      Repo,
+      Keyword.put(repo, :database, Path.join(directory, "e2e.sqlite3"))
+    )
+
     Application.put_env(:biot_server, :control_port, port)
+
     Application.put_env(:biot_server, :control_tls,
       certfile: certificates.server.cert,
       keyfile: certificates.server.key,
@@ -71,11 +88,16 @@ defmodule E2EServer do
     Application.put_env(:biot_server, :ssh_port, ssh_port)
 
     endpoint = Application.fetch_env!(:biot_web, BiotWeb.Endpoint)
+    # The dev config leaves the endpoint's port unset, so without this the script would announce
+    # Phoenix's 4000 whatever else is running there.
+    http_port = free_port()
+
     endpoint =
       endpoint
       |> Keyword.put(:code_reloader, false)
       |> Keyword.put(:server, true)
       |> Keyword.put(:watchers, [])
+      |> Keyword.update!(:http, &Keyword.put(&1, :port, http_port))
 
     Application.put_env(:biot_web, BiotWeb.Endpoint, endpoint)
     {:ok, _} = Application.ensure_all_started(:biot_web)
@@ -108,10 +130,7 @@ defmodule E2EServer do
         }
       )
 
-    File.mkdir_p!("/tmp/biot-e2e")
-    File.write!("/tmp/biot-e2e/token", created.token)
-
-    IO.puts("SERVER_URL=http://localhost:4000")
+    IO.puts("SERVER_URL=http://localhost:#{http_port}")
     IO.puts("TOKEN=#{created.token}")
     IO.puts("SECOND_TOKEN=#{second.token}")
     IO.puts("SECOND_CREDENTIAL_ID=#{second.credential.id}")
@@ -260,7 +279,8 @@ defmodule E2EServer do
     with {:ok, header} <- :ssl.recv(socket, 5, :infinity),
          <<type::8, length::unsigned-big-32>> = header,
          {:ok, payload} <- :ssl.recv(socket, length, :infinity),
-         {:ok, [frame], <<>>} <- ShellFrame.decode(<<type, length::unsigned-big-32, payload::binary>>, :to_agent) do
+         {:ok, [frame], <<>>} <-
+           ShellFrame.decode(<<type, length::unsigned-big-32, payload::binary>>, :to_agent) do
       {:ok, frame}
     end
   end

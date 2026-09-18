@@ -336,7 +336,11 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
       File.mkdir_p!(path)
     end
 
-    name = "biot-step7-#{System.unique_integer([:positive])}"
+    # A container name an aborted run left behind would still be taken, so it carries a timestamp
+    # and a pid too; the unique integer keeps two names inside one run apart.
+    name =
+      "biot-step7-#{System.system_time(:microsecond)}-#{System.pid()}-#{System.unique_integer([:positive])}"
+
     on_exit(fn -> System.cmd("podman", ["rm", "--force", name], stderr_to_stdout: true) end)
 
     entrypoint = StorePath.to_string(context.bundle.entrypoint)
@@ -571,6 +575,6 @@ defmodule Biot.Node.NixEnvironmentBundleTest do
   end
 
   defp temporary_directory(prefix) do
-    Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
+    BiotTest.Temp.directory(prefix)
   end
 end

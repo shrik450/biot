@@ -522,7 +522,7 @@ defmodule Biot.Protocol.ControlProtocolTest do
 
   defp temp_directory(suffix) do
     directory =
-      Path.join(System.tmp_dir!(), "biot-step5-#{suffix}-#{System.unique_integer([:positive])}")
+      BiotTest.Temp.directory("biot-step5-#{suffix}")
 
     on_exit(fn -> File.rm_rf!(directory) end)
     directory

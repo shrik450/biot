@@ -640,6 +640,13 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
     refute File.exists?(Path.join(Paths.biot(host.config, biot_id), "rootfs"))
 
     socket_path = Path.join(Paths.run(host.config, biot_id), "agent.sock")
+
+    # A Unix socket path is capped at 108 bytes including its terminating NUL, and an over-long one
+    # fails as an opaque sockaddr tuple rather than saying so.
+    assert byte_size(socket_path) <= 107,
+           "the agent socket path is #{byte_size(socket_path)} bytes, over the 107-byte limit: " <>
+             socket_path
+
     assert eventually(fn -> match?({:ok, %File.Stat{type: :other}}, File.stat(socket_path)) end)
     assert Bitwise.band(File.stat!(socket_path).mode, 0o777) == 0o666
 
@@ -1097,7 +1104,7 @@ defmodule Biot.Node.HostLinuxIntegrationTest do
   end
 
   defp temporary_directory(prefix) do
-    path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
+    path = BiotTest.Temp.directory(prefix)
     File.mkdir_p!(path)
     path
   end

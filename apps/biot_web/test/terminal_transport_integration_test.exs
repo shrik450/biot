@@ -17,7 +17,7 @@ defmodule BiotWeb.TerminalTransportIntegrationTest do
 
   setup_all do
     directory =
-      Path.join(System.tmp_dir!(), "biot-terminal-#{System.unique_integer([:positive])}")
+      BiotTest.Temp.directory("biot-terminal")
 
     {:ok, certificates} = Biot.Server.TestFixtures.certificates(directory, 1)
     on_exit(fn -> File.rm_rf!(directory) end)

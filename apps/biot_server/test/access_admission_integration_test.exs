@@ -28,7 +28,7 @@ defmodule Biot.Server.AccessAdmissionIntegrationTest do
 
   setup_all do
     directory =
-      Path.join(System.tmp_dir!(), "biot-admission-#{System.unique_integer([:positive])}")
+      BiotTest.Temp.directory("biot-admission")
 
     {:ok, certificates} = TestFixtures.certificates(directory, 2)
     on_exit(fn -> File.rm_rf!(directory) end)

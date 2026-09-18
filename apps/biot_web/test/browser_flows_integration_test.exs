@@ -25,8 +25,8 @@ defmodule BiotWeb.BrowserFlowsIntegrationTest do
              :args
            ])
 
-    directory =
-      Path.join(System.tmp_dir!(), "biot-browser-#{System.unique_integer([:positive])}")
+    # BiotTest.Temp keeps a directory an aborted run left behind from colliding with this one.
+    directory = BiotTest.Temp.directory("biot-browser")
 
     {:ok, certificates} = ServerFixtures.certificates(directory, 1)
 

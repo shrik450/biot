@@ -10,7 +10,7 @@ defmodule Biot.Node.TestSandboxGate do
   @spec supported?() :: :ok | {:error, term()}
   def supported? do
     data_root =
-      Path.join(System.tmp_dir!(), "biot-sandbox-gate-#{System.unique_integer([:positive])}")
+      BiotTest.Temp.directory("biot-sandbox-gate")
 
     settings = [
       data_root: data_root,

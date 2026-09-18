@@ -279,7 +279,7 @@ defmodule Biot.Server.PrincipalsReloadTest do
       context = seed()
 
       path =
-        Path.join(System.tmp_dir!(), "biot-reload-#{System.unique_integer([:positive])}.json")
+        BiotTest.Temp.directory("biot-reload") <> ".json"
 
       File.write!(path, "{not json")
       Application.put_env(:biot_server, :disabled_principals_file, path)

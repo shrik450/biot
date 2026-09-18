@@ -76,6 +76,40 @@ func requireNode(t *testing.T) string {
 	return requireEnv(t, "BIOT_E2E_NODE")
 }
 
+// stateTimeout bounds a wait for a state the node reports. The create flow already waits up to
+// 90s for its own markers, and a report arrives when the node's connection next sweeps, so this is
+// generous for a loaded machine rather than tuned to a quiet one.
+const stateTimeout = 90 * time.Second
+
+// statePollInterval is short enough to notice a report that lands immediately, and long enough
+// that polling does not swamp a loaded machine.
+const statePollInterval = 100 * time.Millisecond
+
+// waitForShow polls `biot show NAME` until its output contains want, and returns that output.
+//
+// A Biot's container and data state are what the node reports, so a command that changes them
+// returns as soon as the server records the intent. Asserting that state once is a race. The
+// failure prints what it last saw and what it wanted, so the next person does not have to rerun
+// the suite to find out.
+func waitForShow(t *testing.T, env *cliEnv, name string, want string) string {
+	t.Helper()
+	deadline := time.Now().Add(stateTimeout)
+
+	for {
+		show := env.run(t, nil, "show", name)
+		if show.exit != 0 {
+			t.Fatalf("show %s exited %d while waiting for %q:\n%s", name, show.exit, want, show.combined())
+		}
+		if strings.Contains(show.stdout, want) {
+			return show.stdout
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("show %s did not report %q within %s; the last output was:\n%s", name, want, stateTimeout, show.stdout)
+		}
+		time.Sleep(statePollInterval)
+	}
+}
+
 type cliEnv struct {
 	configHome string
 	home       string

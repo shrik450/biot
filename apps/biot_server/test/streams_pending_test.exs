@@ -46,7 +46,7 @@ defmodule Biot.Server.StreamsPendingTest do
 
   setup_all do
     directory =
-      Path.join(System.tmp_dir!(), "biot-streams-pending-#{System.unique_integer([:positive])}")
+      BiotTest.Temp.directory("biot-streams-pending")
 
     {:ok, certificates} = TestFixtures.certificates(directory, 0)
 

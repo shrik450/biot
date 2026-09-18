@@ -54,7 +54,7 @@ defmodule BiotWeb.PreviewProxyIntegrationTest do
   end
 
   setup_all do
-    directory = Path.join(System.tmp_dir!(), "biot-preview-#{System.unique_integer([:positive])}")
+    directory = BiotTest.Temp.directory("biot-preview")
     {:ok, certificates} = Biot.Server.TestFixtures.certificates(directory, 1)
     on_exit(fn -> File.rm_rf!(directory) end)
     %{certificates: certificates}

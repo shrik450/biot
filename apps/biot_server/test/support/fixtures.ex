@@ -236,7 +236,7 @@ defmodule Biot.Server.TestFixtures do
   defp identity_json(entry), do: entry
 
   defp put_operator_file(key, contents) do
-    path = Path.join(System.tmp_dir!(), "biot-#{key}-#{System.unique_integer([:positive])}.json")
+    path = BiotTest.Temp.directory("biot-#{key}") <> ".json"
     File.write!(path, Jason.encode!(contents))
     Application.put_env(:biot_server, key, path)
   end

@@ -24,7 +24,7 @@ MIX_ENV=dev nohup mix run --no-start cli/e2e/e2e_server.exs > /tmp/biot-e2e-serv
 It holds until killed. Once the log contains `READY`, it has printed:
 
 ```text
-SERVER_URL=http://localhost:4000
+SERVER_URL=http://localhost:...
 TOKEN=...
 SECOND_TOKEN=...
 SECOND_CREDENTIAL_ID=...
@@ -52,19 +52,20 @@ What the script seeds, all through the server's own paths:
   into `:biot_server` before startup so the SSH daemon runs. The dev config
   leaves both unset, exactly as it leaves the control listener unset.
 
-It creates `/tmp/biot-e2e/` for the token file it writes; nothing needs to exist
-beforehand.
+The script keeps its certificates, host key, and database under one temp
+directory, so a run never seeds a developer's own dev data and nothing needs to
+exist beforehand.
 
-The HTTP endpoint listens on `http://localhost:4000`. Use `localhost`, not
-`127.0.0.1`: the control host is `localhost` and the host dispatcher answers
-anything else with the preview 404 page.
+The HTTP endpoint listens on `localhost`, on the port the log prints. Use
+`localhost`, not `127.0.0.1`: the control host is `localhost` and the host
+dispatcher answers anything else with the preview 404 page.
 
 ## Run the suite
 
 ```sh
 cd cli
 log=/tmp/biot-e2e-server.log
-export BIOT_E2E_SERVER=http://localhost:4000
+export BIOT_E2E_SERVER="$(grep '^SERVER_URL=' "$log" | cut -d= -f2)"
 export BIOT_E2E_TOKEN="$(grep '^TOKEN=' "$log" | cut -d= -f2)"
 export BIOT_E2E_SECOND_TOKEN="$(grep '^SECOND_TOKEN=' "$log" | cut -d= -f2)"
 export BIOT_E2E_SECOND_CREDENTIAL_ID="$(grep '^SECOND_CREDENTIAL_ID=' "$log" | cut -d= -f2)"
@@ -73,6 +74,10 @@ export BIOT_E2E_BIOT="$(grep '^BIOT_NAME=' "$log" | cut -d= -f2)"
 export BIOT_E2E_NODE="$(grep '^NODE_ID=' "$log" | cut -d= -f2)"
 GOCACHE=/tmp/biot-go-cache go test -tags=e2e -count=1 -v ./e2e/
 ```
+
+A run consumes part of what the server seeds: `TestTokenListAndRevoke` revokes
+the second credential, so a second run against the same server fails at
+`token list`. Start a fresh server, as above, for each run of the suite.
 
 `TestMain` builds `./cmd/biot` into a temporary directory with
 `GOCACHE=/tmp/biot-go-cache` unless `BIOT_E2E_BINARY` names an existing binary.

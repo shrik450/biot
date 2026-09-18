@@ -76,7 +76,7 @@ defmodule Biot.Server.Principals.DisabledIdentitiesTest do
   end
 
   test "a missing file and invalid JSON report typed errors" do
-    path = Path.join(System.tmp_dir!(), "biot-missing-#{System.unique_integer([:positive])}")
+    path = BiotTest.Temp.directory("biot-missing")
     Application.put_env(:biot_server, :disabled_principals_file, path)
     assert {:error, {:file, ^path, :enoent}} = DisabledIdentities.load()
 

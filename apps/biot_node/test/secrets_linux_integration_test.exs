@@ -641,7 +641,7 @@ defmodule Biot.Node.SecretsLinuxIntegrationTest do
   defp eventually(_fun, 0), do: false
 
   defp temporary_directory(prefix) do
-    path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
+    path = BiotTest.Temp.directory(prefix)
     File.mkdir_p!(path)
     path
   end

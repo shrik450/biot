@@ -8,6 +8,9 @@ defmodule Biot.MixProject do
       apps_path: "apps",
       version: "0.1.0",
       start_permanent: Mix.env() == :prod,
+      # Phoenix's code reloader recompiles through this listener. Without it every request in
+      # development answers with a stack trace telling you to add it.
+      listeners: [Phoenix.CodeReloader],
       deps: deps(),
       aliases: aliases(),
       releases: releases()

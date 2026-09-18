@@ -29,7 +29,7 @@ defmodule Biot.Server.Principals.StartupTest do
   end
 
   test "an invalid JSON file fails boot with a readable message" do
-    path = Path.join(System.tmp_dir!(), "biot-startup-#{System.unique_integer([:positive])}.json")
+    path = BiotTest.Temp.directory("biot-startup") <> ".json"
     File.write!(path, "{not json")
     Application.put_env(:biot_server, :disabled_principals_file, path)
 

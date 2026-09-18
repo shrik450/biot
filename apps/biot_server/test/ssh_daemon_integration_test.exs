@@ -10,7 +10,7 @@ defmodule Biot.Server.SshDaemonIntegrationTest do
   @timeout 8_000
 
   setup_all do
-    directory = Path.join(System.tmp_dir!(), "biot-ssh-#{System.unique_integer([:positive])}")
+    directory = BiotTest.Temp.directory("biot-ssh")
     File.mkdir_p!(directory)
     host_key = Path.join(directory, "host")
     user_key = Path.join(directory, "user")

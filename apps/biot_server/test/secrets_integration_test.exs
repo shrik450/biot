@@ -36,10 +36,7 @@ defmodule Biot.Server.SecretsIntegrationTest do
 
   setup_all do
     directory =
-      Path.join(
-        System.tmp_dir!(),
-        "biot-secrets-integration-#{System.unique_integer([:positive])}"
-      )
+      BiotTest.Temp.directory("biot-secrets-integration")
 
     {:ok, certificates} = TestFixtures.certificates(directory, 2)
     on_exit(fn -> File.rm_rf!(directory) end)

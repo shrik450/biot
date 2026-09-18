@@ -40,7 +40,7 @@ defmodule Biot.Server.AccessClosureIntegrationTest do
   alias Biot.Server.Tokens
 
   setup_all do
-    directory = Path.join(System.tmp_dir!(), "biot-closure-#{System.unique_integer([:positive])}")
+    directory = BiotTest.Temp.directory("biot-closure")
     {:ok, certificates} = TestFixtures.certificates(directory, 3)
     on_exit(fn -> File.rm_rf!(directory) end)
     %{certificates: certificates}
