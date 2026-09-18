@@ -12,6 +12,7 @@
 - `docker/linux-host` contains the Linux host image for node host tests.
 - `docker/server` holds the `server` release image and the compose file that runs it.
 - `deploy/` holds the server and node host installers, `install-server.sh` and `install-node.sh`.
+- `dev/` holds the one-host launcher, `dev/local.sh`, and the server and node scripts it runs.
 - `agent/` contains the Go agent and its vendored dependencies.
 - `docs/` holds `model.md` (the implementation contract), `design.md`, this map, and `deployment.md` (the operator runbook).
 
@@ -97,7 +98,7 @@ This app owns shared parsed values and wire codecs.
 - **Execution:** `Failure` represents a bounded description of a failed lifecycle action.
   Its stages include `node` and `release_environment`; its codes include `node_abandoned`,
   `invalid_configuration`, and `ownership_mismatch`.
-- **Execution:** `ContainerState` represents the observed state of a container.
+- **Execution:** `ContainerState` is the observed container state: `:starting`, `:running`, or `{:exited, status}`. The node reports `:starting` for a running container whose runtime agent has not bound its socket yet.
 - **Identifiers:** `ConnectionId` identifies an authenticated node connection.
 - **Identifiers:** `IncarnationId` is Podman's full 64-hex native container ID. The node parses it
   from inspection and never generates it.
@@ -200,6 +201,7 @@ against a destroyed Biot.
 overlap the control host, and `classify/3` is the one host-dispatch read: it returns `:control`,
 `{:preview, hostname}`, or `:unknown` for one request `Host`. `within?/2` is the boot-time
 overlap check. `Login.Settings` parses the required HTTPS OIDC configuration once at release boot.
+`Health.check/0` runs one `SELECT 1` against `Repo` and answers `:ok` or `{:error, :database}`.
 
 ### Application modules
 
@@ -699,11 +701,16 @@ preview proxy. It is the only app that answers a public request.
 
 - `BiotWeb.Application` starts `BiotWeb.PubSub` and `BiotWeb.Endpoint`.
 - `BiotWeb.Endpoint` is the one request path. It assigns the request ID, resolves the client
-  address, emits telemetry, dispatches on the request `Host`, and only then serves static assets and
-  the LiveView socket, parses requests, applies the Phoenix session, and installs `BiotWeb.Router`.
-  Both LiveView transports accept only the endpoint's exact origin.
-- `BiotWeb.Plugs.HostDispatch` is the first plug that can answer a request, after `Plug.RequestId`,
-  `put_client_address`, and `Plug.Telemetry` and before the `/live` socket, `Plug.Static`, and
+  address, emits telemetry, answers a health check, dispatches on the request `Host`, and only then
+  serves static assets and the LiveView socket, parses requests, applies the Phoenix session, and
+  installs `BiotWeb.Router`. Both LiveView transports accept only the endpoint's exact origin.
+- `BiotWeb.Plugs.Health` runs before host dispatch and the session, so a container runtime with no
+  session and no bearer token reaches it. It answers `GET /health` on the control host and on any
+  host outside the publication domain, with `200 {"status":"ok"}` or `503 {"status":"unavailable"}`.
+  It leaves a preview host to the proxy, so a published service keeps its own `/health`, and
+  `config/prod.exs` excludes `/health` from the endpoint's HTTPS redirect.
+- `BiotWeb.Plugs.HostDispatch` runs after `Plug.RequestId`, `put_client_address`,
+  `Plug.Telemetry`, and `BiotWeb.Plugs.Health`, and before the `/live` socket, `Plug.Static`, and
   `Plug.Parsers`. It reads `:control_host` and `:publication_domain` and classifies `conn.host`
   through `Biot.Server.DomainName.classify/3`: `:control` continues through the endpoint as the
   application; `{:preview, hostname}` is answered entirely by `BiotWeb.Preview.Proxy`;
@@ -990,6 +997,8 @@ The node owns host reconciliation and reports inspected state to the server.
   Stopped convergence retires execution first, then runs data, environment, and release, so a
   stopped Biot still resolves, prepares, and installs its selected environment without starting it.
   Destruction runs execution, release, then data.
+  `Reconcile.Execution` retains a `:starting` container whose environment matches the desired one,
+  so the loop waits for the agent instead of replacing the container.
 - `BlockReason` includes `{:inspection, failure}`, `{:current_action, action}`, `{:recorded_failure, failure}`, and `{:fetch_credential, source}`. `Retry.classify/4` maps host outcomes to bounded failures and retry policies; a credential wait is the one operator-owned block. `Reconcile.next/3` blocks running and stopped intent on that wait, but lets destruction proceed.
   `Retry.failure/2` builds failures found without an action.
 - `Action.metadata/1` holds only an action's stage and `cancellable?` flag.
@@ -1117,9 +1126,10 @@ The effect modules own host resources:
 - `Host.Container` starts and retires rootless Podman containers. `run_container` uses the bundle's
   physical `--rootfs`, `--read-only`, `/tmp` and `/run` tmpfs mounts, the five allocation mounts,
   and a read-only `/nix/store` mount. Its stable runtime name is `biot-<BiotId>`. Inspection resolves
-  that name to Podman's native container ID, and retirement removes that exact inspected ID so it
-  cannot remove a later incarnation. `Host.Network` creates, inspects, and removes named private
-  networks.
+  that name to Podman's native container ID, and it calls a running container `:running` only when
+  the runtime agent's socket accepts a connection; a running container whose socket does not answer
+  is `:starting`. Retirement removes that exact inspected ID so it cannot remove a later
+  incarnation. `Host.Network` creates, inspects, and removes named private networks.
 - `Host.Worker` owns the disposable build worker. `run/4` cancels any existing worker, runs one
   phase command, and cancels again on every exit; `cancel/2` is destructive and confirms absence;
   `state/2` is the read-only inspection; and `probe/2` runs the startup sandbox check. A private
@@ -1189,8 +1199,11 @@ Support modules provide the smaller boundaries:
   `runtime_mounts`, and `allocation_owned_directories`. `Paths.allocation_directories/2` is the one
   owner of required allocation directories, their owner, and their mount: secrets are node-owned and
   mounted read-only, while fetch credentials are node-owned and unmounted. It also owns
-  `worker_nix_config` and `git_template`. `Host.PrivateStore` maps the logical store into the physical
-  one. The old zero-arity `Git.environment/0` and `Layout.variables/0`, plus
+  `worker_nix_config` and `git_template`. `Paths.agent_socket/2` is the one builder of the runtime
+  agent's Unix socket path under a Biot's `run` directory; `agent_socket_path_length/1`,
+  `agent_socket_path_limit/0`, and `max_agent_socket_data_root_length/0` expose the 107-byte Linux
+  limit and the longest data root that fits it. `Host.PrivateStore` maps the logical store into the
+  physical one. The old zero-arity `Git.environment/0` and `Layout.variables/0`, plus
   `Paths.mounts_created_at_allocation/2` and `Paths.node_owned_directories/2`, were replaced by
   the scoped and phase-aware APIs.
 - `Host.Names` derives worker and probe names, network names, and labels. Workers use one stable
@@ -1360,8 +1373,10 @@ connection. `config/releases/node.exs` reads data-root, UID/GID range, executabl
 heartbeat, reconnect, Podman, TLS, and build settings for the node release. The node release carries
 the exact `nix/` and `agent/` sources it was built with under `biot_node/priv/build_support`; that
 path is not an operator setting. Builder images must include a digest. Numeric `BIOT_NODE_*`
-overrides must meet the bounds in release configuration. `Host.Setup` loads complete host
-configuration before any effect reads it.
+overrides must meet the bounds in release configuration. `Host.Config.load/0` refuses a data root
+whose agent socket path would exceed the 107-byte Linux limit, naming the path length and the
+longest root that fits. `Host.Setup` loads that complete host configuration before any effect reads
+it.
 
 ### Stream boundary
 
@@ -1418,7 +1433,8 @@ diagnostic ID or a typed failure, and `Journal.diagnostic_truncated/1` answers t
 
 `Biot.Node.RuntimeLogs` is a Supervisor over a Registry and a DynamicSupervisor.
 `Biot.Node.BiotController.observe/1` calls `attach/3` with the inspected container. One `Capture`
-follows each running container with `podman logs --follow`. It copies output into
+follows every present container that has not exited, including a `:starting` one, with
+`podman logs --follow`. It copies output into
 `Paths.runtime_log/2`. The capture stays bounded by `runtime_log_max_bytes`.
 `Metadata` owns the JSON file with the incarnation ID and truncation flag. A restart re-attaches to
 the same incarnation and marks the gap. A new incarnation empties the log.
@@ -1495,6 +1511,10 @@ parser, so each command owns its own checking and its own `--help` text. `comman
 and `RejectUnknown` for the common cases. A leading `-` that is not `-h` or `--help` goes to the
 command's own `Run` when it has one, and is an unknown-flag error otherwise.
 
+`biot list` prints one tab-separated row per Biot and marks the historical
+`direct_secret_exposure_possible` flag with a one-word `SECRETS` column (`maybe`), so the table stays
+a table. `biot show` prints the full sentence for that marker.
+
 - `internal/api` is the HTTP client. `New/3` validates and normalizes the server URL and default
   transport, and `Request/5` sends and decodes JSON and bounds a response at 8 MiB. The error
   vocabulary is the embedded `error_vocabulary.txt` artifact described above, parsed and checked at
@@ -1528,8 +1548,11 @@ hint to register a key with `biot ssh-key add`.
 `cli/e2e` is behind the `e2e` build tag. `TestMain` builds the real `biot` binary, and
 `harness_test.go` gives each test an isolated `XDG_CONFIG_HOME`, `HOME`, and `TMPDIR`, a transparent
 recording reverse proxy in front of the real server, `/proc` inspection helpers, and a PTY runner.
-`cli/e2e/e2e_server.exs` stands up the dev server and a real control-protocol peer, and
-`cli/e2e/README.md` says how to run it and which `BIOT_E2E_*` variables it prints.
+`cli/e2e/e2e_server.exs` stands up the dev server and a real control-protocol peer in one run
+directory: it binds the HTTP and control listeners to port 0 and prints the ports it got, keeps the
+database, certificates, host key, and token there, and removes the directory on a clean stop or
+`SIGTERM`, keeping it on a setup failure. `harness_test.go` requires `BIOT_E2E_SERVER` and has no
+fixed fallback. `cli/e2e/README.md` says how to run it and which `BIOT_E2E_*` variables it prints.
 `secret_handling_test.go` proves that secret bytes reach the server unchanged, that a NUL byte
 reaches the real parser, that invalid UTF-8 is refused rather than rewritten, and that a hidden
 prompt leaks neither to the process table nor to shell history. `create_flow_test.go` drives a
@@ -1549,9 +1572,9 @@ configuration under `config/releases/`.
 
 Build them with `MIX_ENV=prod mix release server` and `MIX_ENV=prod mix release node`.
 
-`docs/deployment.md` is the operator runbook for those releases: it builds them, installs the server
-and the node as service units, marks the steps that need root, and ends with a checklist.
-`README.md` links it.
+`docs/deployment.md` is the operator runbook for those releases: an ordered overview, how to register
+Biot with an OIDC provider, how to build them, and how to install the server and the node as service
+units. It marks the steps that need root and ends with a checklist. `README.md` links it.
 
 `deploy/` installs those releases on a host. `deploy/install-server.sh` creates the server's service
 account and paths, generates the SSH host key, copies the release, gives the service account read
@@ -1588,6 +1611,11 @@ CLI error-vocabulary drift check (`mix biot.check_cli_error_vocabulary`).
 
 The root and `apps/biot_server` `test` aliases load `mix/test_env.exs`. Its `Biot.Mix.TestEnv.require_test_env!/1` refuses to run unless `Mix.env()` is `:test`, and it runs before `ecto.drop`, so `MIX_ENV=dev mix test` cannot drop the dev database.
 
+`dev/local.sh` runs one server and one real node on this machine for development. It keeps the run
+directory under `.work/` and the node data root under `$XDG_CACHE_HOME` (or `$HOME/.cache`), because
+the data root holds the private Nix store. It removes both on a clean stop; `--keep` keeps them and
+prints their paths.
+
 Build and vet the CLI, and vet and test the agent, with:
 
 ```sh
@@ -1600,8 +1628,8 @@ go vet ./...
 go test ./...
 ```
 
-The CLI's `e2e` suite is manual and needs a running server, `BIOT_E2E_TOKEN`, and
-`BIOT_E2E_BIOT`:
+The CLI's `e2e` suite is manual and needs a running server and the `BIOT_E2E_*` variables that
+server prints:
 
 ```sh
 cd cli
