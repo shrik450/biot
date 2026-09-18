@@ -30,12 +30,19 @@ defmodule BiotWeb.PreviewProxyIntegrationTest do
         {:upstream_request, conn.method, conn.request_path, conn.req_headers, body}
       )
 
-      conn =
-        Enum.reduce(options[:headers] || [], conn, fn {name, value}, conn ->
-          put_resp_header(conn, name, value)
-        end)
+      if options[:close] do
+        # An upstream that accepts the connection and closes it without writing a byte. Returning
+        # an unsent conn would make Bandit answer 500 instead, and an `exit/1` is caught and
+        # rendered the same way; an untrappable kill closes the socket. This branch never returns.
+        Process.exit(self(), :kill)
+      else
+        conn =
+          Enum.reduce(options[:headers] || [], conn, fn {name, value}, conn ->
+            put_resp_header(conn, name, value)
+          end)
 
-      send_resp(conn, options[:status] || 200, options[:body] || "")
+        send_resp(conn, options[:status] || 200, options[:body] || "")
+      end
     end
 
     defp read_full_body(conn, body) do
@@ -447,18 +454,57 @@ defmodule BiotWeb.PreviewProxyIntegrationTest do
     AccessHarness.no_message(context.peer, Biot.Protocol.Message.OpenStream, 300)
   end
 
+  test "an upstream that closes without answering is an invalid response, not a stopped Biot",
+       context do
+    {:ok, upstream, upstream_port} = start_upstream(self(), close: true)
+    {:ok, proxy, proxy_port} = start_proxy()
+
+    on_exit(fn ->
+      stop_bandit(proxy)
+      stop_bandit(upstream)
+    end)
+
+    client =
+      Task.async(fn ->
+        http_request(proxy_port, preview_host(context.hostname), "/", [
+          {"x-biot-authorization", "Bearer " <> context.viewer_credential}
+        ])
+      end)
+
+    open = AccessHarness.await_open(context.peer)
+    attach = AccessHarness.attach(context.peer, open.stream_id)
+    bridge(attach, upstream_port)
+
+    response = Task.await(client, @timeout)
+
+    # The application really was reached, so the close came from it and not from the node.
+    assert_receive {:upstream_request, "POST", "/", _headers, ""}, @timeout
+
+    assert response.status == 502
+    assert response.body =~ "did not return a valid response"
+    refute response.body =~ "Biot not running"
+  end
+
+  # The reasons come from the module, so a page added without a status here fails the assertion;
+  # the statuses are the contract, so each one is written down.
+  @failure_statuses %{
+    not_found: 404,
+    forbidden: 403,
+    unauthenticated: 401,
+    unsupported_credential: 401,
+    node_unavailable: 503,
+    agent_unreachable: 503,
+    invalid_response: 502,
+    port_not_listening: 502,
+    too_large: 413,
+    too_many_streams: 503,
+    timeout: 503
+  }
+
   test "failure pages expose the model status for every proxy failure" do
-    for {reason, status} <- [
-          not_found: 404,
-          forbidden: 403,
-          unauthenticated: 401,
-          node_unavailable: 503,
-          agent_unreachable: 503,
-          port_not_listening: 502,
-          too_large: 413,
-          too_many_streams: 503,
-          timeout: 503
-        ] do
+    assert Failure.reasons() == Enum.sort(Map.keys(@failure_statuses))
+
+    for {reason, status} <- @failure_statuses do
       {actual, body} = Failure.response(reason, Endpoint.url())
       assert actual == status, inspect(reason)
       assert body =~ "<html", inspect(reason)

@@ -159,9 +159,11 @@ defmodule BiotWeb.Preview.Proxy do
       :more ->
         await_head(conn, stream, buffer)
 
+      # Bytes that are not an HTTP response are the application failing to answer, not a stream it
+      # lost, so the page must send the person to the application.
       {:error, :malformed_response} ->
         _ = Access.close(stream)
-        Page.render(conn, :agent_unreachable)
+        Page.render(conn, :invalid_response)
     end
   end
 
@@ -170,9 +172,10 @@ defmodule BiotWeb.Preview.Proxy do
       {:ok, events, stream} ->
         consume_head(events, conn, stream, buffer)
 
+      # Closing before a head arrives is that same failure to answer, not a lost stream.
       :closed ->
         _ = Access.close(stream)
-        Page.render(conn, :agent_unreachable)
+        Page.render(conn, :invalid_response)
     end
   end
 
@@ -181,9 +184,10 @@ defmodule BiotWeb.Preview.Proxy do
       {:ok, buffer} ->
         read_head(conn, stream, buffer)
 
+      # Closing part-way through a head is that same failure to answer.
       :closed ->
         _ = Access.close(stream)
-        Page.render(conn, :agent_unreachable)
+        Page.render(conn, :invalid_response)
 
       {:error, :lost} ->
         _ = Access.close(stream)
