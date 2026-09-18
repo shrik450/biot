@@ -6,6 +6,7 @@ defmodule BiotWeb.Endpoint do
   plug Plug.RequestId
   plug :put_client_address
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
+  plug BiotWeb.Plugs.Health
   plug BiotWeb.Plugs.HostDispatch
 
   socket "/live", Phoenix.LiveView.Socket,
